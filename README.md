@@ -67,7 +67,7 @@ MCP server 继承 Claude Code 启动时的项目目录作为 cwd，这就是 pro
 | 工具 | 用途 |
 |---|---|
 | `rdev_exec` | 前台命令，`argv` 数组 |
-| `rdev_job_start` / `_list` / `_status` / `_logs` / `_stop` | 长任务，断连存活 |
+| `rdev_job_start` / `_wait` / `_list` / `_status` / `_logs` / `_stop` | 长任务，断连存活 |
 | `rdev_read` / `rdev_write` | 远端文件读写（替代 heredoc） |
 | `rdev_sync` | rsync push/pull |
 | `rdev_session` | 每 host 的 `cwd`/`env` 粘性状态 |
@@ -118,7 +118,24 @@ supervisor 在 detached session 内，比 SSH 连接活得久，负责 `wait()` 
 
 `job_stop` 按记录的 pgid 发信号（不是 grep 进程名），所以能连子进程一起清掉。
 
-### 4. login shell 用位置参数 trampoline
+### 4. 完成通知用 job_wait，不靠轮询
+
+长任务反复查 `job_status` 既费 context 又不及时。`job_wait` 一次调用阻塞到结束：
+
+```jsonc
+{"host":"dev", "id":"<job>", "timeout_sec":600, "tail_on_exit":20}
+→ {"job":{"state":"exited","exit_code":3}, "waited_ms":12009, "logs":"..."}
+```
+
+三个约束：
+- **有界**。默认 300s，上限 3600s。超时返回 `timed_out=true`，**job 不受影响**，再调一次即可。无界等待会让请求永远悬着。
+- **独立连接**。`Conn.Do` 在单条 agent 管道上串行化请求，所以阻塞等待走**专用连接池**（`waitConns`），否则一个 5 分钟的 wait 会卡住到该主机的所有命令。
+  实测：同一 MCP 进程内 wait 阻塞 12s 期间，`exec` **0.2s** 返回。
+- **退避轮询**。agent 侧 200ms → 3s 退避，跑一小时的 job 每分钟几次 stat，而不是每秒十次。
+
+`tail_on_exit` 顺带回传尾部日志，省一次 `job_logs` 往返。
+
+### 5. login shell 用位置参数 trampoline
 
 要解决 `uv: command not found` 就得加载 profile，但又不能把 argv 塞进 shell 脚本文本（会被二次解析）：
 
@@ -128,7 +145,7 @@ bash -lc 'exec "$@"' rdev <argv...>
 
 profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv 作为真实参数传入，shell 不会重新解析它。默认开启。
 
-### 5. 凭据在边界统一脱敏
+### 6. 凭据在边界统一脱敏
 
 注册过的值在**所有**返回值里被替换成 `<redacted:name>`（stdout/stderr/日志/错误消息/job argv）。
 用 `env: {"TOKEN":"secret:name"}` 可以把明文注入远端环境，而值从不出现在调用或结果里。
@@ -175,12 +192,15 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 | **supervisor 被 SIGKILL** | ✅ `state=running orphaned=true child_pid=N`，且 `job_stop` 能清掉 |
 | **UTF-8 边界截断** | ✅ `cap=10` 切在「文」中间 → 返回 `中文测`（valid UTF-8，非乱码） |
 | **远端凭据注册** | ✅ `source=dev:~/.nexus/...`，明文不落本地 |
+| **job_wait 阻塞** | ✅ 5s 的 job 阻塞 6s 返回 `exited exit_code=3` |
+| **wait 不阻塞其他命令** | ✅ 同 MCP 进程内 wait 阻塞 12s 期间 `exec` 0.2s 返回 |
+| **wait 超时不影响 job** | ✅ `timed_out=true` + `state=running`，可再等 |
 
 **性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
 
 **单元测试：**`go test ./...` 全绿（agent 43 项、secrets 11 项、session 8 项、client 9 项）。
 
-开发过程中测试抓到 6 个真 bug：
+开发过程中测试抓到 7 个真 bug：
 1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
 2. macOS 的 openrsync 不认 `--info=stats1` → 只用可移植 flag
 3. **MCP 并发调用导致多个 goroutine 同时 bootstrap，抢同一个 `.tmp` 文件** → 加 per-host dial 锁 + PID 后缀
@@ -188,7 +208,9 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 5. **`max_output_bytes` 按字节硬切会切断多字节 UTF-8** → 截断时丢弃不完整 rune
 6. **`rdev_secrets` 只能读本地文件**，远端凭据要 sync pull 绕路 → 加 `host` 参数直读远端
 
-第 4、5 两个是用户实测报告发现的。
+7. **`job_wait` 在 `doJob` 里实现了但 dispatcher 没路由**，报 `unknown op` → dispatcher 改为查 `isJobOp()`，op 列表只有一份
+
+第 4、5、6 三个是用户实测报告发现的；第 7 个是加 `job_wait` 时自己撞上的 —— 起因是 `main.go` 和 `jobs.go` 各维护一份 op 列表，现在只有一份了。
 
 ## CLI
 
@@ -198,6 +220,7 @@ MCP 之外还有一套 CLI，共享同一 `internal/client`，给人肉调试和
 rdev exec dev -- sqlite3 db "SELECT json_extract(x,'\$.score') FROM runs"
 rdev job start dev -label batch -- ./run.sh
 rdev job logs dev <id> -grep ERROR -tail 50
+rdev job wait dev <id> -timeout 600 -tail 20              # 阻塞到结束，退出码透传给 shell
 rdev job stop dev <id> -signal TERM -grace 5
 rdev read dev ~/app/config.yaml
 echo "content" | rdev write dev /tmp/f.txt

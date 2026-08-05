@@ -183,12 +183,27 @@ type JobStopIn struct {
 	GraceSec int    `json:"grace_sec,omitempty" jsonschema:"Seconds to wait after TERM before sending KILL."`
 }
 
+type JobWaitIn struct {
+	Host       string `json:"host"`
+	ID         string `json:"id"`
+	TimeoutSec int    `json:"timeout_sec,omitempty" jsonschema:"How long to block, in seconds. Default 300, capped at 3600. If the job is still running when this expires you get timed_out=true and can call again."`
+	TailOnExit int    `json:"tail_on_exit,omitempty" jsonschema:"Return this many trailing stdout lines with the final status, saving a follow-up rdev_job_logs call."`
+}
+
+type JobWaitOut struct {
+	Job      JobOut `json:"job"`
+	TimedOut bool   `json:"timed_out,omitempty" jsonschema:"True when the wait budget expired while the job was still running. The job is unaffected."`
+	WaitedMS int64  `json:"waited_ms"`
+	Logs     string `json:"logs,omitempty"`
+}
+
 func registerJobs(s *mcp.Server, c *client.Client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "rdev_job_start",
 		Description: "Start a long-running command that survives disconnects. " +
 			"The process is detached and supervised on the remote host, so its output and exit code are recorded even if this connection drops. " +
-			"Use this for batch runs, builds, and test suites instead of rdev_exec.",
+			"Use this for batch runs, builds, and test suites instead of rdev_exec. " +
+			"Follow with rdev_job_wait to block until it finishes rather than polling rdev_job_status.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStartIn) (*mcp.CallToolResult, JobOut, error) {
 		info, err := c.JobStart(ctx, client.JobStartOptions{
 			Host: in.Host, Argv: in.Argv, Cwd: in.Cwd, Env: in.Env,
@@ -260,6 +275,28 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 			return nil, JobOut{}, err
 		}
 		return nil, toJobOut(info), nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "rdev_job_wait",
+		Description: "Block until a job finishes, then return its final state. " +
+			"Prefer this over repeatedly calling rdev_job_status: one call covers a long batch. " +
+			"It runs on a separate connection, so other commands to the same host still work while waiting. " +
+			"If the job outlives timeout_sec you get timed_out=true and can call again; the job is never affected.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobWaitIn) (*mcp.CallToolResult, JobWaitOut, error) {
+		res, err := c.JobWait(ctx, client.JobWaitOptions{
+			Host: in.Host, ID: in.ID,
+			TimeoutSec: in.TimeoutSec, TailOnExit: in.TailOnExit,
+		})
+		if err != nil {
+			return nil, JobWaitOut{}, err
+		}
+		return nil, JobWaitOut{
+			Job:      toJobOut(res.Info),
+			TimedOut: res.TimedOut,
+			WaitedMS: res.WaitedMS,
+			Logs:     res.Logs,
+		}, nil
 	})
 }
 

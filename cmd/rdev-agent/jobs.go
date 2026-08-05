@@ -39,6 +39,21 @@ type jobMeta struct {
 	StartedAt string   `json:"started_at"`
 }
 
+// jobOps is the set of ops doJob handles. main's dispatcher consults this rather
+// than repeating the list, so a new job op cannot be added to one place and
+// forgotten in the other.
+var jobOps = map[string]bool{
+	proto.OpJobStart:  true,
+	proto.OpJobList:   true,
+	proto.OpJobStatus: true,
+	proto.OpJobLogs:   true,
+	proto.OpJobStop:   true,
+	proto.OpJobWait:   true,
+}
+
+// isJobOp reports whether op is dispatched by doJob.
+func isJobOp(op string) bool { return jobOps[op] }
+
 func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error) {
 	switch op {
 	case proto.OpJobStart:
@@ -55,8 +70,106 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 		return jobLogs(p, state)
 	case proto.OpJobStop:
 		return jobStop(p, state)
+	case proto.OpJobWait:
+		return jobWait(p, state)
 	}
 	return nil, fmt.Errorf("unknown job op %q", op)
+}
+
+// Wait polling bounds. The interval backs off so a job that runs for an hour
+// costs a handful of stat calls per minute instead of ten per second, while a
+// short job is still noticed almost immediately.
+const (
+	waitPollMin = 200 * time.Millisecond
+	waitPollMax = 3 * time.Second
+	// maxWaitSec caps a single wait. Beyond this the agent returns TimedOut so
+	// the request cannot be stranded by a job that never finishes.
+	maxWaitSec     = 3600
+	defaultWaitSec = 300
+)
+
+// jobWait blocks until the job leaves the running state, or the wait budget
+// expires.
+//
+// This replaces caller-side polling: one call covers a long batch instead of a
+// status check every few seconds. The job is never affected by the wait, so a
+// TimedOut reply just means "ask again".
+func jobWait(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	if p.ID == "" {
+		return nil, errors.New("job id required")
+	}
+	dir := jobDir(state, p.ID)
+	meta, err := readMeta(dir)
+	if err != nil {
+		return nil, fmt.Errorf("job %s: %w", p.ID, err)
+	}
+
+	budget := p.WaitTimeoutSec
+	if budget <= 0 {
+		budget = defaultWaitSec
+	}
+	if budget > maxWaitSec {
+		budget = maxWaitSec
+	}
+
+	start := time.Now()
+	deadline := start.Add(time.Duration(budget) * time.Second)
+	interval := waitPollMin
+
+	for {
+		info := metaToInfo(meta, dir)
+		if info.State != proto.JobRunning {
+			return finishWait(p, dir, info, start, false), nil
+		}
+		if !time.Now().Before(deadline) {
+			return finishWait(p, dir, info, start, true), nil
+		}
+
+		// Do not overshoot the deadline: sleeping past it would report a longer
+		// wait than the caller asked for.
+		sleep := interval
+		if remaining := time.Until(deadline); remaining < sleep {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+
+		if interval < waitPollMax {
+			interval *= 2
+			if interval > waitPollMax {
+				interval = waitPollMax
+			}
+		}
+	}
+}
+
+// finishWait assembles the wait reply, attaching trailing output when asked.
+func finishWait(p *proto.JobParams, dir string, info *proto.JobInfo, start time.Time, timedOut bool) *proto.JobResult {
+	res := &proto.JobResult{
+		Info:     info,
+		TimedOut: timedOut,
+		WaitedMS: time.Since(start).Milliseconds(),
+	}
+	if p.TailOnExit > 0 {
+		// Best effort: a missing log file should not fail the wait, since the
+		// status is the answer the caller actually needs.
+		if logs, err := readTail(filepath.Join(dir, "stdout"), p.TailOnExit); err == nil {
+			res.Logs = logs
+		}
+	}
+	return res
+}
+
+// readTail returns the last n lines of a file.
+func readTail(path string, n int) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func jobDir(state, id string) string { return filepath.Join(state, "jobs", id) }

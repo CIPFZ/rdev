@@ -109,6 +109,7 @@ USAGE
   rdev job     list   <host>
   rdev job     status <host> <job-id>
   rdev job     logs   <host> <job-id> [-stream stdout|stderr] [-tail N] [-grep S]
+  rdev job     wait   <host> <job-id> [-timeout N] [-tail N]
   rdev job     stop   <host> <job-id> [-signal TERM|KILL] [-grace N]
   rdev read    <host> <path> [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
@@ -326,6 +327,36 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		return printJSON(info)
+
+	case "wait":
+		fs, err := parseFlags(rest, nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 2 {
+			return errors.New("usage: rdev job wait <host> <job-id> [-timeout N] [-tail N]")
+		}
+		res, err := c.JobWait(ctx, client.JobWaitOptions{
+			Host: fs.pos[0], ID: fs.pos[1],
+			TimeoutSec: fs.num("timeout"), TailOnExit: fs.num("tail"),
+		})
+		if err != nil {
+			return err
+		}
+		if res.Logs != "" {
+			fmt.Fprintln(os.Stderr, res.Logs)
+		}
+		if err := printJSON(res.Info); err != nil {
+			return err
+		}
+		if res.TimedOut {
+			return fmt.Errorf("still running after %dms; wait again", res.WaitedMS)
+		}
+		// Mirror the job's exit code so shell && / || work off a remote job.
+		if res.Info.ExitCode != 0 {
+			os.Exit(res.Info.ExitCode)
+		}
+		return nil
 	}
 	return fmt.Errorf("unknown job subcommand %q", sub)
 }

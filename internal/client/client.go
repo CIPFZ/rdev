@@ -32,6 +32,13 @@ type Client struct {
 
 	mu    sync.Mutex
 	conns map[string]*transport.Conn
+	// waitConns are separate connections used only for blocking job_wait calls.
+	//
+	// Conn.Do serializes request/response pairs over a single agent pipe, so a
+	// multi-minute wait on the shared connection would block every other command
+	// to that host. Waiting gets its own pipe so the caller can still inspect
+	// logs or run commands while a batch finishes.
+	waitConns map[string]*transport.Conn
 	// dialing serializes connection setup per host. MCP dispatches tool calls
 	// concurrently, and without this several goroutines would bootstrap the same
 	// host at once, racing on the agent upload's temp file.
@@ -40,11 +47,12 @@ type Client struct {
 
 func New(lookup AgentLookup) *Client {
 	return &Client{
-		Hosts:   session.NewRegistry(),
-		Secrets: secrets.New(),
-		lookup:  lookup,
-		conns:   make(map[string]*transport.Conn),
-		dialing: make(map[string]*sync.Mutex),
+		Hosts:     session.NewRegistry(),
+		Secrets:   secrets.New(),
+		lookup:    lookup,
+		conns:     make(map[string]*transport.Conn),
+		waitConns: make(map[string]*transport.Conn),
+		dialing:   make(map[string]*sync.Mutex),
 	}
 }
 
@@ -338,6 +346,112 @@ func (c *Client) JobStop(ctx context.Context, host, id, signal string, graceSec 
 	return c.redactJob(resp.Job.Info), nil
 }
 
+// JobWaitOptions bounds a blocking wait.
+type JobWaitOptions struct {
+	Host string
+	ID   string
+	// TimeoutSec bounds the wait. The agent clamps it to one hour.
+	TimeoutSec int
+	// TailOnExit returns this many trailing stdout lines with the final status.
+	TailOnExit int
+}
+
+// JobWaitResult is a finished (or still-running) job plus wait bookkeeping.
+type JobWaitResult struct {
+	Info     *proto.JobInfo
+	TimedOut bool
+	WaitedMS int64
+	Logs     string
+}
+
+// JobWait blocks until a job finishes or the wait budget expires.
+//
+// It runs on a dedicated connection so it does not stall other commands to the
+// same host. A TimedOut result leaves the job untouched; call again to keep
+// waiting.
+func (c *Client) JobWait(ctx context.Context, opts JobWaitOptions) (*JobWaitResult, error) {
+	if opts.ID == "" {
+		return nil, errors.New("job id required")
+	}
+
+	conn, err := c.waitConn(ctx, opts.Host)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := conn.Do(ctx, &proto.Request{
+		Op: proto.OpJobWait,
+		Job: &proto.JobParams{
+			ID:             opts.ID,
+			WaitTimeoutSec: opts.TimeoutSec,
+			TailOnExit:     opts.TailOnExit,
+		},
+	})
+	if err != nil {
+		// Drop the wait connection: a failed blocking call may have left the
+		// stream out of sync, and the next wait should start clean.
+		c.dropWaitConn(conn, opts.Host)
+		return nil, c.redactErr(err)
+	}
+	if resp.Job == nil || resp.Job.Info == nil {
+		return nil, fmt.Errorf("job %s not found", opts.ID)
+	}
+	return &JobWaitResult{
+		Info:     c.redactJob(resp.Job.Info),
+		TimedOut: resp.Job.TimedOut,
+		WaitedMS: resp.Job.WaitedMS,
+		Logs:     c.Secrets.Redact(resp.Job.Logs),
+	}, nil
+}
+
+// waitConn returns the host's dedicated wait connection, dialing on first use.
+func (c *Client) waitConn(ctx context.Context, hostName string) (*transport.Conn, error) {
+	host, err := c.Hosts.Host(hostName)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	existing, ok := c.waitConns[host.Name]
+	c.mu.Unlock()
+	if ok {
+		return existing, nil
+	}
+
+	// Reuse the same per-host setup lock as the main pool: bootstrap writes a
+	// shared remote temp file regardless of which pool the connection lands in.
+	lock := c.dialLock(host.Name)
+	lock.Lock()
+	defer lock.Unlock()
+
+	c.mu.Lock()
+	existing, ok = c.waitConns[host.Name]
+	c.mu.Unlock()
+	if ok {
+		return existing, nil
+	}
+
+	conn, err := transport.Dial(ctx, host, c.lookup)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.waitConns[host.Name] = conn
+	c.mu.Unlock()
+	return conn, nil
+}
+
+func (c *Client) dropWaitConn(conn *transport.Conn, hostName string) {
+	c.mu.Lock()
+	if host, err := c.Hosts.Host(hostName); err == nil {
+		if c.waitConns[host.Name] == conn {
+			delete(c.waitConns, host.Name)
+		}
+	}
+	c.mu.Unlock()
+	conn.Close()
+}
+
 // SetSecretFromRemoteFile registers a secret read from a file on a remote host.
 //
 // Without this, registering a remote credential means copying it locally first
@@ -526,11 +640,15 @@ func (c *Client) Ping(ctx context.Context, host string) (*proto.PingResult, erro
 // Close tears down all pooled connections.
 func (c *Client) Close() {
 	c.mu.Lock()
-	conns := make([]*transport.Conn, 0, len(c.conns))
+	conns := make([]*transport.Conn, 0, len(c.conns)+len(c.waitConns))
 	for _, conn := range c.conns {
 		conns = append(conns, conn)
 	}
+	for _, conn := range c.waitConns {
+		conns = append(conns, conn)
+	}
 	c.conns = make(map[string]*transport.Conn)
+	c.waitConns = make(map[string]*transport.Conn)
 	c.mu.Unlock()
 
 	for _, conn := range conns {

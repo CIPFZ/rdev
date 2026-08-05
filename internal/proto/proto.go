@@ -23,6 +23,7 @@ const (
 	OpJobStatus = "job_status"
 	OpJobLogs   = "job_logs"
 	OpJobStop   = "job_stop"
+	OpJobWait   = "job_wait"
 )
 
 // Job states reported by the agent.
@@ -115,6 +116,14 @@ type JobParams struct {
 	Signal string `json:"signal,omitempty"`
 	// GraceSec waits this long after TERM before sending KILL. 0 skips KILL.
 	GraceSec int `json:"grace_sec,omitempty"`
+
+	// WaitTimeoutSec bounds a job_wait call. The agent returns with TimedOut set
+	// rather than blocking forever, so the caller can decide whether to keep
+	// waiting; an unbounded wait would strand the request if the job never ends.
+	WaitTimeoutSec int `json:"wait_timeout_sec,omitempty"`
+	// TailOnExit returns this many trailing stdout lines with the final status,
+	// saving a follow-up job_logs round trip.
+	TailOnExit int `json:"tail_on_exit,omitempty"`
 }
 
 // Response is one JSON-encoded line read from the agent's stdout.
@@ -205,4 +214,10 @@ type JobResult struct {
 	LogSize int64 `json:"log_size,omitempty"`
 	// Matched counts lines kept by Grep, before TailLines was applied.
 	Matched int `json:"matched,omitempty"`
+
+	// TimedOut is set by job_wait when the wait budget expired while the job was
+	// still running. The job is unaffected; the caller may wait again.
+	TimedOut bool `json:"timed_out,omitempty"`
+	// WaitedMS is how long job_wait actually blocked.
+	WaitedMS int64 `json:"waited_ms,omitempty"`
 }

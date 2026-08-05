@@ -141,14 +141,19 @@ func handle(req *proto.Request, state string) *proto.Response {
 			break
 		}
 		resp.Cat, err = doWrite(req.Cat)
-	case proto.OpJobStart, proto.OpJobList, proto.OpJobStatus, proto.OpJobLogs, proto.OpJobStop:
+	default:
+		// Job ops are dispatched by doJob, which owns the list of names it
+		// handles. Routing anything unrecognized there rather than duplicating
+		// the set here means adding a job op cannot be half-wired.
+		if !isJobOp(req.Op) {
+			err = fmt.Errorf("unknown op %q", req.Op)
+			break
+		}
 		if req.Job == nil {
 			err = errors.New("job params required")
 			break
 		}
 		resp.Job, err = doJob(req.Op, req.Job, state)
-	default:
-		err = fmt.Errorf("unknown op %q", req.Op)
 	}
 
 	if err != nil {

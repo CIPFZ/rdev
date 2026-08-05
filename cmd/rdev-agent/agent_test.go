@@ -535,3 +535,184 @@ func TestJobStopKillsOrphanedChild(t *testing.T) {
 	}
 	t.Errorf("child pid %d survived jobStop", pid)
 }
+
+func TestJobWaitBlocksUntilExit(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	res, err := jobStart(&proto.JobParams{
+		Label: "wait-exit",
+		Spec:  &proto.ExecParams{Argv: []string{"sh", "-c", "echo one; echo two; sleep 1; exit 6"}},
+	}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := res.Info.ID
+
+	// One wait call replaces a caller-side polling loop.
+	got, err := jobWait(&proto.JobParams{ID: id, WaitTimeoutSec: 30, TailOnExit: 2}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TimedOut {
+		t.Fatal("wait should not have timed out")
+	}
+	if got.Info.State != proto.JobExited {
+		t.Errorf("State = %q, want exited", got.Info.State)
+	}
+	if got.Info.ExitCode != 6 {
+		t.Errorf("ExitCode = %d, want 6", got.Info.ExitCode)
+	}
+	// tail_on_exit saves a follow-up logs call.
+	if !strings.Contains(got.Logs, "two") {
+		t.Errorf("Logs = %q, want the trailing output", got.Logs)
+	}
+	if got.WaitedMS <= 0 {
+		t.Error("WaitedMS should be recorded")
+	}
+}
+
+func TestJobWaitTimesOutWithoutAffectingJob(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	res, err := jobStart(&proto.JobParams{
+		Spec: &proto.ExecParams{Argv: []string{"sleep", "30"}},
+	}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := res.Info.ID
+	defer jobStop(&proto.JobParams{ID: id, Signal: "KILL"}, state)
+
+	got, err := jobWait(&proto.JobParams{ID: id, WaitTimeoutSec: 1}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.TimedOut {
+		t.Error("TimedOut should be true when the budget expires")
+	}
+	// A timeout must leave the job alone: the caller may wait again.
+	if got.Info.State != proto.JobRunning {
+		t.Errorf("State = %q, want running (a timeout must not disturb the job)", got.Info.State)
+	}
+	if got.WaitedMS > 5000 {
+		t.Errorf("WaitedMS = %d, expected the wait to end near 1s", got.WaitedMS)
+	}
+}
+
+func TestJobWaitReturnsImmediatelyForFinishedJob(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	res, _ := jobStart(&proto.JobParams{
+		Spec: &proto.ExecParams{Argv: []string{"true"}},
+	}, state)
+	id := res.Info.ID
+
+	// Let it finish, then confirm waiting on a done job does not block.
+	jobWait(&proto.JobParams{ID: id, WaitTimeoutSec: 30}, state)
+
+	got, err := jobWait(&proto.JobParams{ID: id, WaitTimeoutSec: 30}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TimedOut {
+		t.Error("waiting on an already-finished job should return at once")
+	}
+	if got.WaitedMS > 1000 {
+		t.Errorf("WaitedMS = %d, want a near-instant return", got.WaitedMS)
+	}
+}
+
+func TestJobWaitClampsBudget(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+	res, _ := jobStart(&proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"true"}}}, state)
+
+	// An absurd budget must be clamped rather than honored, so a request cannot
+	// be stranded indefinitely.
+	got, err := jobWait(&proto.JobParams{ID: res.Info.ID, WaitTimeoutSec: 999999}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Info == nil {
+		t.Fatal("expected job info")
+	}
+}
+
+func TestJobWaitUnknownID(t *testing.T) {
+	if _, err := jobWait(&proto.JobParams{ID: "nope"}, t.TempDir()); err == nil {
+		t.Error("an unknown job id should error")
+	}
+}
+
+func TestReadTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log")
+	os.WriteFile(path, []byte("a\nb\nc\nd\ne\n"), 0o644)
+
+	got, err := readTail(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "d\ne" {
+		t.Errorf("readTail() = %q, want %q", got, "d\ne")
+	}
+}
+
+func TestReadTailFewerLinesThanRequested(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log")
+	os.WriteFile(path, []byte("only\n"), 0o644)
+
+	got, err := readTail(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "only" {
+		t.Errorf("readTail() = %q, want %q", got, "only")
+	}
+}
+
+// Guards against the dispatcher and doJob drifting apart: job_wait was once
+// implemented in doJob but never routed to it, so it reported "unknown op".
+func TestEveryJobOpIsRouted(t *testing.T) {
+	ops := []string{
+		proto.OpJobStart, proto.OpJobList, proto.OpJobStatus,
+		proto.OpJobLogs, proto.OpJobStop, proto.OpJobWait,
+	}
+	for _, op := range ops {
+		if !isJobOp(op) {
+			t.Errorf("op %q is not routed to doJob", op)
+		}
+	}
+}
+
+func TestHandleRejectsUnknownOp(t *testing.T) {
+	resp := handle(&proto.Request{Op: "not_a_real_op"}, t.TempDir())
+	if resp.OK {
+		t.Error("an unknown op should not succeed")
+	}
+	if !strings.Contains(resp.Err, "unknown op") {
+		t.Errorf("Err = %q, want it to mention an unknown op", resp.Err)
+	}
+}
+
+// Exercises the dispatcher rather than doJob directly, which is the layer that
+// was broken.
+func TestHandleRoutesJobWait(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	resp := handle(&proto.Request{
+		Op:  proto.OpJobWait,
+		Job: &proto.JobParams{ID: "missing-job"},
+	}, state)
+
+	// A missing job is the expected failure here; "unknown op" would mean the
+	// dispatcher never reached doJob.
+	if strings.Contains(resp.Err, "unknown op") {
+		t.Errorf("job_wait was not routed: %q", resp.Err)
+	}
+}
