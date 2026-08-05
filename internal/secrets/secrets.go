@@ -101,6 +101,12 @@ func (s *Store) Delete(name string) bool {
 // Longest values are substituted first: when one secret is a substring of
 // another, replacing the shorter one first would leave a fragment of the longer
 // one exposed.
+//
+// Limitation worth knowing: matching is whole-value, so a command that emits
+// only part of a secret (`cut -c1-4`, a base64 re-encoding, a hash) is not
+// caught. This defends against the common accident -- a credential echoed,
+// dumped, or quoted back verbatim -- not against a caller deliberately
+// transforming the value before printing it.
 func (s *Store) Redact(text string) string {
 	if text == "" {
 		return text

@@ -172,7 +172,8 @@ type JobLogsOut struct {
 	Logs       string `json:"logs"`
 	NextOffset int64  `json:"next_offset"`
 	LogSize    int64  `json:"log_size"`
-	Matched    int    `json:"matched,omitempty" jsonschema:"Lines matching grep before tail_lines was applied."`
+	Matched    int    `json:"matched,omitempty" jsonschema:"How many lines matched grep in total. tail_lines is applied afterwards, so logs may contain fewer lines than this."`
+	Returned   int    `json:"returned" jsonschema:"How many lines are actually in logs."`
 }
 
 type JobStopIn struct {
@@ -228,7 +229,9 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "rdev_job_logs",
 		Description: "Read a job's output. grep and tail_lines are applied on the remote host, " +
-			"so a multi-megabyte log costs only the lines you ask for.",
+			"so a multi-megabyte log costs only the lines you ask for. " +
+			"Order is grep first, then tail: 'matched' counts all grep hits while 'returned' " +
+			"counts the lines you actually got.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobLogsIn) (*mcp.CallToolResult, JobLogsOut, error) {
 		res, err := c.JobLogs(ctx, client.JobLogsOptions{
 			Host: in.Host, ID: in.ID, Stream: in.Stream,
@@ -237,9 +240,13 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 		if err != nil {
 			return nil, JobLogsOut{}, err
 		}
+		returned := 0
+		if res.Logs != "" {
+			returned = strings.Count(res.Logs, "\n") + 1
+		}
 		return nil, JobLogsOut{
 			Logs: res.Logs, NextOffset: res.NextOffset,
-			LogSize: res.LogSize, Matched: res.Matched,
+			LogSize: res.LogSize, Matched: res.Matched, Returned: returned,
 		}, nil
 	})
 
@@ -486,13 +493,15 @@ func registerSession(s *mcp.Server, c *client.Client) {
 type SecretsIn struct {
 	Action string `json:"action" jsonschema:"set, set_from_file, list, or delete."`
 	Name   string `json:"name,omitempty"`
-	Value  string `json:"value,omitempty" jsonschema:"Plaintext value for action=set."`
-	Path   string `json:"path,omitempty" jsonschema:"Local file to read for action=set_from_file, e.g. ~/.nexus/auth/gongfeng/key."`
+	Value  string `json:"value,omitempty" jsonschema:"Plaintext value for action=set. Avoid when possible: it puts the secret in the tool call."`
+	Path   string `json:"path,omitempty" jsonschema:"File to read for action=set_from_file, e.g. ~/.nexus/auth/gongfeng/key."`
+	Host   string `json:"host,omitempty" jsonschema:"For action=set_from_file: read the file on this remote host instead of locally. Use this when the credential lives on the remote machine, which is the common case."`
 }
 
 type SecretsOut struct {
 	Names   []string `json:"names"`
 	Changed bool     `json:"changed,omitempty"`
+	Source  string   `json:"source,omitempty" jsonschema:"Where the value was read from."`
 }
 
 func registerSecrets(s *mcp.Server, c *client.Client) {
@@ -501,19 +510,33 @@ func registerSecrets(s *mcp.Server, c *client.Client) {
 		Description: "Register credentials so they are masked in all tool output. " +
 			"A registered value is replaced with <redacted:name> everywhere, and can be injected into a remote " +
 			"environment by passing env {\"VAR\":\"secret:name\"} without ever revealing the plaintext. " +
-			"Prefer set_from_file so the value never appears in a tool call.",
+			"Prefer set_from_file with a host, so the value is read over the connection and never enters " +
+			"a tool call, a transcript, or the local disk. Note that a value registered from the local file " +
+			"will not mask remote output if the two machines hold different credentials.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SecretsIn) (*mcp.CallToolResult, SecretsOut, error) {
 		switch strings.ToLower(in.Action) {
 		case "set":
 			if err := c.Secrets.Set(in.Name, in.Value); err != nil {
 				return nil, SecretsOut{}, err
 			}
-			return nil, SecretsOut{Names: c.Secrets.Names(), Changed: true}, nil
+			return nil, SecretsOut{Names: c.Secrets.Names(), Changed: true, Source: "inline value"}, nil
 		case "set_from_file":
+			if in.Host != "" {
+				if err := c.SetSecretFromRemoteFile(ctx, in.Host, in.Name, in.Path); err != nil {
+					return nil, SecretsOut{}, err
+				}
+				return nil, SecretsOut{
+					Names: c.Secrets.Names(), Changed: true,
+					Source: fmt.Sprintf("%s:%s", in.Host, in.Path),
+				}, nil
+			}
 			if err := c.Secrets.SetFromFile(in.Name, in.Path); err != nil {
 				return nil, SecretsOut{}, err
 			}
-			return nil, SecretsOut{Names: c.Secrets.Names(), Changed: true}, nil
+			return nil, SecretsOut{
+				Names: c.Secrets.Names(), Changed: true,
+				Source: "local:" + in.Path,
+			}, nil
 		case "delete":
 			changed := c.Secrets.Delete(in.Name)
 			return nil, SecretsOut{Names: c.Secrets.Names(), Changed: changed}, nil

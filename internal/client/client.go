@@ -338,6 +338,49 @@ func (c *Client) JobStop(ctx context.Context, host, id, signal string, graceSec 
 	return c.redactJob(resp.Job.Info), nil
 }
 
+// SetSecretFromRemoteFile registers a secret read from a file on a remote host.
+//
+// Without this, registering a remote credential means copying it locally first
+// and deciding where the plaintext lands. The value is read over the agent
+// connection and goes straight into the store, so it never reaches a tool
+// result, a transcript, or the local filesystem.
+func (c *Client) SetSecretFromRemoteFile(ctx context.Context, host, name, path string) error {
+	if name == "" {
+		return errors.New("secret name required")
+	}
+	if path == "" {
+		return errors.New("path required")
+	}
+
+	// Read directly rather than via c.ReadFile: that method redacts its result,
+	// which would corrupt a value that happens to contain an existing secret.
+	resp, err := c.do(ctx, host, &proto.Request{
+		Op:   proto.OpReadFile,
+		Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes},
+	})
+	if err != nil {
+		return c.redactErr(err)
+	}
+	if resp.Read == nil {
+		return errors.New("agent returned no content")
+	}
+	if resp.Read.ContentB64 {
+		return fmt.Errorf("%s looks binary; a credential file should be text", path)
+	}
+
+	// Credential files usually end with a newline, and sending it along breaks
+	// HTTP headers in confusing ways.
+	value := strings.TrimSpace(resp.Read.Content)
+	if value == "" {
+		return fmt.Errorf("%s on %s is empty", path, host)
+	}
+	return c.Secrets.Set(name, value)
+}
+
+// maxSecretFileBytes bounds a credential read. Tokens and keys are small; a
+// larger file is a sign the wrong path was given.
+const maxSecretFileBytes = 64 << 10
+
 func (c *Client) ReadFile(ctx context.Context, host, path string, offset, limit int64) (*proto.ReadResult, error) {
 	resp, err := c.do(ctx, host, &proto.Request{
 		Op:   proto.OpReadFile,

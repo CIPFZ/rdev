@@ -147,3 +147,16 @@ func TestDeleteAndNames(t *testing.T) {
 		t.Errorf("Names() = %v, want 1 entry after delete", got)
 	}
 }
+
+// Documents a known limitation: redaction matches whole values, so a caller who
+// deliberately prints a fragment defeats it. This guards against the common
+// accident (a credential echoed or dumped verbatim), not against transformation.
+func TestRedactDoesNotCatchFragments(t *testing.T) {
+	s := New()
+	s.Set("tok", "82d9b49359b262b40bdbbfa844891b5e")
+
+	got := s.Redact("prefix=82d9")
+	if got != "prefix=82d9" {
+		t.Errorf("Redact() = %q; fragment matching is not implemented, so this should pass through", got)
+	}
+}

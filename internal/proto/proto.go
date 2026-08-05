@@ -177,8 +177,15 @@ type JobInfo struct {
 	Label string   `json:"label,omitempty"`
 	Argv  []string `json:"argv"`
 	Cwd   string   `json:"cwd,omitempty"`
-	PID   int      `json:"pid"`
-	State string   `json:"state"`
+	// PID is the supervisor process, which is also the job's process group id.
+	PID   int    `json:"pid"`
+	State string `json:"state"`
+	// ChildPID is the supervised command, reported only when the supervisor died
+	// and the child was orphaned.
+	ChildPID int `json:"child_pid,omitempty"`
+	// Orphaned marks a job still running without its supervisor. The work
+	// continues but no exit code will be recorded.
+	Orphaned bool `json:"orphaned,omitempty"`
 	// ExitCode is valid only when State is JobExited.
 	ExitCode  int    `json:"exit_code,omitempty"`
 	StartedAt string `json:"started_at"`

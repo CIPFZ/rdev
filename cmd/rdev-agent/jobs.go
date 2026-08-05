@@ -173,10 +173,16 @@ func jobStatus(id, state string) (*proto.JobInfo, error) {
 	return metaToInfo(meta, dir), nil
 }
 
-// metaToInfo merges the immutable job record with its current state. State is
-// derived from status.json when the reaper recorded an exit, and otherwise from
-// a signal-0 liveness probe, which is what makes jobs observable across agent
-// restarts.
+// metaToInfo merges the immutable job record with its current state.
+//
+// State is resolved in three tiers, because each source can be missing:
+//  1. status.json, written by the supervisor when it reaped the child. Exact.
+//  2. a signal-0 probe on the supervisor pid. Covers a running job whose
+//     supervisor has not exited yet.
+//  3. a signal-0 probe on the recorded child pid. This is what catches a
+//     SIGKILLed supervisor: the child is reparented to init and keeps working,
+//     so reporting "unknown" would hide live work. The exit code is genuinely
+//     lost in that case, but the job is still observable and stoppable.
 func metaToInfo(m *jobMeta, dir string) *proto.JobInfo {
 	info := &proto.JobInfo{
 		ID:        m.ID,
@@ -204,12 +210,34 @@ func metaToInfo(m *jobMeta, dir string) *proto.JobInfo {
 
 	if processAlive(m.PID) {
 		info.State = proto.JobRunning
-	} else {
-		// Alive-check failed and no status file: the agent that owned this job
-		// died before reaping. The process is gone but the exit code is lost.
-		info.State = proto.JobUnknown
+		return info
 	}
+
+	// The supervisor is gone without recording a status. If the child survived
+	// it (orphaned to init), the job is still doing work and must not be
+	// reported as finished.
+	if child := readChildPID(dir); child > 0 && processAlive(child) {
+		info.State = proto.JobRunning
+		info.ChildPID = child
+		info.Orphaned = true
+		return info
+	}
+
+	// Nothing alive and no status file: the process is gone but its exit code
+	// was never recorded.
+	info.State = proto.JobUnknown
 	return info
+}
+
+// readChildPID returns the supervised child's pid, or 0 when unrecorded.
+func readChildPID(dir string) int {
+	var c struct {
+		ChildPID int `json:"child_pid"`
+	}
+	if err := readJSON(filepath.Join(dir, "child.json"), &c); err != nil {
+		return 0
+	}
+	return c.ChildPID
 }
 
 func processAlive(pid int) bool {
@@ -296,30 +324,44 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 
 	// Signal the whole process group (negative pid). Because jobStart used
-	// Setsid, the pid is also the pgid, so this reaches every descendant --
-	// the reason a recorded pgid beats grepping for a command string.
-	if err := syscall.Kill(-meta.PID, sig); err != nil {
-		// Fall back to the bare pid in case the group is already gone.
-		if err2 := syscall.Kill(meta.PID, sig); err2 != nil {
-			return nil, fmt.Errorf("signal job %s (pid %d): %w", p.ID, meta.PID, err)
+	// Setsid, the supervisor pid is also the pgid, so this reaches every
+	// descendant -- the reason a recorded pgid beats grepping for a command
+	// string.
+	groupErr := syscall.Kill(-meta.PID, sig)
+	if groupErr != nil {
+		// The group is gone. Try the bare supervisor pid, then the recorded
+		// child: a SIGKILLed supervisor leaves the child orphaned to init but
+		// still running, and that child is exactly what a caller wants to stop.
+		pidErr := syscall.Kill(meta.PID, sig)
+		if pidErr != nil {
+			child := readChildPID(dir)
+			if child <= 0 || syscall.Kill(child, sig) != nil {
+				return nil, fmt.Errorf("signal job %s (pid %d): %w", p.ID, meta.PID, groupErr)
+			}
+			// Also sweep the orphan's own group, in case it spawned children.
+			syscall.Kill(-child, sig)
 		}
 	}
 
 	if sig == syscall.SIGTERM && p.GraceSec > 0 {
 		deadline := time.Now().Add(time.Duration(p.GraceSec) * time.Second)
 		for time.Now().Before(deadline) {
-			if !processAlive(meta.PID) {
+			if !jobAlive(meta, dir) {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if processAlive(meta.PID) {
+		if jobAlive(meta, dir) {
 			syscall.Kill(-meta.PID, syscall.SIGKILL)
+			if child := readChildPID(dir); child > 0 {
+				syscall.Kill(child, syscall.SIGKILL)
+				syscall.Kill(-child, syscall.SIGKILL)
+			}
 		}
 	}
 
 	// Record the kill so status reports JobKilled rather than a bare exit.
-	if !processAlive(meta.PID) {
+	if !jobAlive(meta, dir) {
 		writeJSON(filepath.Join(dir, "status.json"), map[string]any{
 			"exit_code": -1,
 			"ended_at":  time.Now().UTC().Format(time.RFC3339),
@@ -327,6 +369,16 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		})
 	}
 	return &proto.JobResult{Info: metaToInfo(meta, dir)}, nil
+}
+
+// jobAlive reports whether any part of the job is still running: the supervisor
+// or, if it died, the orphaned child.
+func jobAlive(m *jobMeta, dir string) bool {
+	if processAlive(m.PID) {
+		return true
+	}
+	child := readChildPID(dir)
+	return child > 0 && processAlive(child)
 }
 
 func readMeta(dir string) (*jobMeta, error) {

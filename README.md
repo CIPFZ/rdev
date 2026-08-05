@@ -133,7 +133,18 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 注册过的值在**所有**返回值里被替换成 `<redacted:name>`（stdout/stderr/日志/错误消息/job argv）。
 用 `env: {"TOKEN":"secret:name"}` 可以把明文注入远端环境，而值从不出现在调用或结果里。
 
+**远端凭据直接注册**（推荐）：
+```jsonc
+{"action":"set_from_file", "name":"gftoken", "host":"dev", "path":"~/.nexus/auth/gongfeng/key"}
+```
+值经 agent 连接读取，直接进 store —— 不落本地磁盘、不进对话记录。
+不带 `host` 则读本地文件；**注意两侧凭据可能不同**，注册错的值会导致远端明文不被脱敏（假通过）。
+
 按长度降序替换：当一个 secret 是另一个的子串时，先替换短的会让长的漏出片段。
+
+**已知限制**：匹配是全值的。`cut -c1-4`、重新 base64、取 hash 这类**主动变形**后输出的片段不会被拦住
+（实测 `echo $MYTOK | cut -c1-4` → `82d9` 明文可见）。它防的是「凭据被原样 echo / dump / 引用」这类常见事故，
+不是防刻意提取。
 
 ## 实测验证
 
@@ -161,15 +172,23 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 | **MCP 进程退出后 CLI 查同一 job** | ✅ `state=exited exit_code=5 label=mcp-e2e` |
 | 远端 grep + tail | ✅ `matched=10` 但只回传 2 行 |
 | stop by pgid | ✅ 连子进程 `sleep` 一起清掉 |
+| **supervisor 被 SIGKILL** | ✅ `state=running orphaned=true child_pid=N`，且 `job_stop` 能清掉 |
+| **UTF-8 边界截断** | ✅ `cap=10` 切在「文」中间 → 返回 `中文测`（valid UTF-8，非乱码） |
+| **远端凭据注册** | ✅ `source=dev:~/.nexus/...`，明文不落本地 |
 
 **性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
 
 **单元测试：**`go test ./...` 全绿（agent 43 项、secrets 11 项、session 8 项、client 9 项）。
 
-开发过程中测试抓到 3 个真 bug：
+开发过程中测试抓到 6 个真 bug：
 1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
 2. macOS 的 openrsync 不认 `--info=stats1` → 只用可移植 flag
 3. **MCP 并发调用导致多个 goroutine 同时 bootstrap，抢同一个 `.tmp` 文件** → 加 per-host dial 锁 + PID 后缀
+4. **supervisor 被 SIGKILL 时子进程变孤儿继续跑，但状态报 `unknown`** → 三级状态判定（status.json → supervisor pid → child pid），`job_stop` 也能清孤儿
+5. **`max_output_bytes` 按字节硬切会切断多字节 UTF-8** → 截断时丢弃不完整 rune
+6. **`rdev_secrets` 只能读本地文件**，远端凭据要 sync pull 绕路 → 加 `host` 参数直读远端
+
+第 4、5 两个是用户实测报告发现的。
 
 ## CLI
 

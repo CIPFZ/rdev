@@ -2,10 +2,12 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tonynyyan/rdev/internal/proto"
 )
@@ -410,4 +412,126 @@ func TestBuildCmdLoginShellUsesPositionalArgs(t *testing.T) {
 // fast, and called in a bounded loop so a hung job fails rather than hangs.
 func waitABit() {
 	time.Sleep(20 * time.Millisecond)
+}
+
+// A byte cap can land inside a multi-byte rune, which would put a replacement
+// character in the reply. The tail must be dropped instead.
+func TestCapWriterTrimsPartialRune(t *testing.T) {
+	// "中" is 3 bytes; a cap of 4 splits the second character.
+	w := &capWriter{cap: 4}
+	w.Write([]byte("中中中"))
+
+	got := w.text()
+	if !utf8.ValidString(got) {
+		t.Errorf("text() = %q, which is not valid UTF-8", got)
+	}
+	if got != "中" {
+		t.Errorf("text() = %q, want just the first full rune", got)
+	}
+}
+
+func TestCapWriterKeepsWholeRunes(t *testing.T) {
+	// A cap on an exact rune boundary must not lose a character.
+	w := &capWriter{cap: 6}
+	w.Write([]byte("中中中"))
+	if got := w.text(); got != "中中" {
+		t.Errorf("text() = %q, want 中中", got)
+	}
+}
+
+func TestCapWriterUntruncatedTextIsExact(t *testing.T) {
+	w := &capWriter{cap: 100}
+	w.Write([]byte("中文 ok"))
+	if got := w.text(); got != "中文 ok" {
+		t.Errorf("text() = %q, want the input unchanged", got)
+	}
+}
+
+func TestCapWriterASCIITruncationUnaffected(t *testing.T) {
+	w := &capWriter{cap: 5}
+	w.Write([]byte("abcdefgh"))
+	if got := w.text(); got != "abcde" {
+		t.Errorf("text() = %q, want abcde", got)
+	}
+}
+
+// A SIGKILLed supervisor leaves its child orphaned to init. Reporting that as
+// "unknown" would hide work that is still running, so the child pid is probed.
+func TestOrphanedChildReportsRunning(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "orphan")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A supervisor pid that is certainly dead, plus a live child.
+	live := exec.Command("sleep", "30")
+	if err := live.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer live.Process.Kill()
+
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		ID: "orphan", Argv: []string{"sleep", "30"}, PID: 999999,
+	})
+	writeJSON(filepath.Join(dir, "child.json"), map[string]any{"child_pid": live.Process.Pid})
+
+	info, err := jobStatus("orphan", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.State != proto.JobRunning {
+		t.Errorf("State = %q, want running (the orphaned child is alive)", info.State)
+	}
+	if !info.Orphaned {
+		t.Error("Orphaned should be true so the caller knows no exit code is coming")
+	}
+	if info.ChildPID != live.Process.Pid {
+		t.Errorf("ChildPID = %d, want %d", info.ChildPID, live.Process.Pid)
+	}
+}
+
+func TestDeadJobWithNoChildIsUnknown(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "gone")
+	os.MkdirAll(dir, 0o755)
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "gone", Argv: []string{"x"}, PID: 999999})
+
+	info, err := jobStatus("gone", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.State != proto.JobUnknown {
+		t.Errorf("State = %q, want unknown when nothing is alive and no status was recorded", info.State)
+	}
+}
+
+func TestJobStopKillsOrphanedChild(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "orphan2")
+	os.MkdirAll(dir, 0o755)
+
+	live := exec.Command("sleep", "30")
+	if err := live.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := live.Process.Pid
+	go live.Wait() // reap so the probe below sees a real death, not a zombie
+
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "orphan2", Argv: []string{"sleep"}, PID: 999999})
+	writeJSON(filepath.Join(dir, "child.json"), map[string]any{"child_pid": pid})
+
+	// Stopping must reach the child even though the supervisor is long gone,
+	// otherwise a caller can see the leak but not clean it up.
+	if _, err := jobStop(&proto.JobParams{ID: "orphan2", Signal: "KILL"}, state); err != nil {
+		t.Fatalf("jobStop should reach the orphaned child: %v", err)
+	}
+
+	for range 100 {
+		if !processAlive(pid) {
+			return
+		}
+		waitABit()
+	}
+	t.Errorf("child pid %d survived jobStop", pid)
 }

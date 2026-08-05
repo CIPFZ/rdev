@@ -28,6 +28,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tonynyyan/rdev/internal/proto"
 )
@@ -259,6 +260,34 @@ func (w *capWriter) Write(p []byte) (int, error) {
 
 func (w *capWriter) truncated() bool { return w.total > int64(len(w.buf)) }
 
+// text returns the captured output, trimmed so it never ends mid-character.
+//
+// The cap is a byte budget, so cutting at exactly that offset can split a
+// multi-byte rune and yield a replacement character in the reply. Dropping the
+// partial tail costs at most three bytes and keeps the output valid UTF-8.
+func (w *capWriter) text() string {
+	b := w.buf
+	if w.truncated() {
+		b = trimPartialRune(b)
+	}
+	return string(b)
+}
+
+// trimPartialRune removes an incomplete UTF-8 sequence from the end of b.
+func trimPartialRune(b []byte) []byte {
+	// A rune is at most 4 bytes, so an incomplete tail is within the last 3.
+	for i := len(b); i > 0 && i > len(b)-4; i-- {
+		r, size := utf8.DecodeLastRune(b[:i])
+		if r != utf8.RuneError || size > 1 {
+			return b[:i]
+		}
+	}
+	if len(b) >= 4 {
+		return b[:len(b)-3]
+	}
+	return b
+}
+
 func doExec(p *proto.ExecParams) (*proto.ExecResult, error) {
 	cmd, err := buildCmd(p)
 	if err != nil {
@@ -303,8 +332,8 @@ func doExec(p *proto.ExecParams) (*proto.ExecResult, error) {
 	}
 
 	res := &proto.ExecResult{
-		Stdout:      string(stdout.buf),
-		Stderr:      string(stderr.buf),
+		Stdout:      stdout.text(),
+		Stderr:      stderr.text(),
 		StdoutBytes: stdout.total,
 		StderrBytes: stderr.total,
 		Truncated:   stdout.truncated() || stderr.truncated(),
