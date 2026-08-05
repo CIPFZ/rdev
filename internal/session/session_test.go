@@ -1,6 +1,9 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tonynyyan/rdev/internal/transport"
@@ -122,5 +125,81 @@ func TestNamesSorted(t *testing.T) {
 	got := r.Names()
 	if len(got) != 2 || got[0] != "alpha" || got[1] != "zulu" {
 		t.Errorf("Names() = %v, want [alpha zulu]", got)
+	}
+}
+
+func TestProjectScopeOverridesGlobal(t *testing.T) {
+	// Simulate a repo that pins "dev" to its own machine while a global alias of
+	// the same name exists. The project definition must win.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if err := os.MkdirAll(filepath.Join(dir, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectJSON := `{"hosts":[{"name":"dev","addr":"user@project-box","port":2222,"cwd":"~/proj"}]}`
+	if err := os.WriteFile(filepath.Join(dir, ".rdev", "hosts.json"), []byte(projectJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRegistry()
+	// Load only the project file here; the global one belongs to the real home
+	// directory and must not be touched by a test.
+	p, err := ProjectConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.loadFile(p, ScopeProject); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := r.Host("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Addr != "user@project-box" || h.Port != 2222 {
+		t.Errorf("host = %s:%d, want user@project-box:2222", h.Addr, h.Port)
+	}
+	if got := r.ScopeOf("dev"); got != ScopeProject {
+		t.Errorf("ScopeOf(dev) = %q, want project", got)
+	}
+	if got := r.State("dev").Cwd; got != "~/proj" {
+		t.Errorf("Cwd = %q, want ~/proj", got)
+	}
+}
+
+func TestSaveOnlyWritesMatchingScope(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	r := NewRegistry()
+	r.Add(transport.Host{Name: "proj", Addr: "user@p"})
+	r.SetScope("proj", ScopeProject)
+	r.Add(transport.Host{Name: "glob", Addr: "user@g"})
+	r.SetScope("glob", ScopeGlobal)
+
+	if err := r.Save(ScopeProject); err != nil {
+		t.Fatal(err)
+	}
+
+	// Saving the project file must not absorb global hosts, or a private machine
+	// would silently leak into a committed config.
+	b, err := os.ReadFile(filepath.Join(dir, ".rdev", "hosts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	if !strings.Contains(body, "proj") {
+		t.Error("project host missing from project file")
+	}
+	if strings.Contains(body, "glob") {
+		t.Error("global host leaked into the project file")
+	}
+}
+
+func TestScopeDefaultsToGlobalForUnknownHost(t *testing.T) {
+	r := NewRegistry()
+	if got := r.ScopeOf("never-registered"); got != ScopeGlobal {
+		t.Errorf("ScopeOf() = %q, want global as the default", got)
 	}
 }

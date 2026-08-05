@@ -113,11 +113,13 @@ USAGE
   rdev read    <host> <path> [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]
-  rdev hosts   [list|add <name> <addr> [-port N] [-cwd DIR] [-save]]
+  rdev hosts   [list|add <name> <addr> [-port N] [-cwd DIR] [-global] [-save]]
 
 HOST
   A registered alias, or an ssh destination like user@1.2.3.4:2222.
-  Aliases live in ~/.rdev/hosts.json.
+  Aliases are read from ./.rdev/hosts.json (this directory only) and then
+  ~/.rdev/hosts.json (everywhere); the project file wins on name collisions.
+  "hosts add" defaults to project scope; pass -global for cross-project use.
 
 NOTES
   Everything after -- is passed as a literal argv array; no shell parses it,
@@ -433,6 +435,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			Port       int    `json:"port,omitempty"`
 			Cwd        string `json:"cwd,omitempty"`
 			LoginShell bool   `json:"login_shell"`
+			Scope      string `json:"scope"`
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
@@ -441,29 +444,44 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 				continue
 			}
 			st := c.Hosts.State(n)
-			rows = append(rows, row{h.Name, h.Addr, h.Port, st.Cwd, st.LoginShell})
+			rows = append(rows, row{h.Name, h.Addr, h.Port, st.Cwd, st.LoginShell, string(c.Hosts.ScopeOf(n))})
 		}
 		return printJSON(rows)
 	}
 
 	if args[0] == "add" {
-		fs, err := parseFlags(args[1:], map[string]bool{"save": true}, nil)
+		fs, err := parseFlags(args[1:], map[string]bool{"save": true, "global": true}, nil)
 		if err != nil {
 			return err
 		}
 		if len(fs.pos) < 2 {
-			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-save]")
+			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-global] [-save]")
 		}
+		// Project scope is the default: a host registered while working in a repo
+		// almost always belongs to that repo. -global opts into cross-project
+		// visibility explicitly.
+		scope := session.ScopeProject
+		if fs.bools["global"] {
+			scope = session.ScopeGlobal
+		}
+
 		c.Hosts.Add(transport.Host{Name: fs.pos[0], Addr: fs.pos[1], Port: fs.num("port")})
+		c.Hosts.SetScope(fs.pos[0], scope)
 		if cwd := fs.str("cwd"); cwd != "" {
 			c.Hosts.Update(fs.pos[0], func(st *session.State) { st.Cwd = cwd })
 		}
 		if fs.bools["save"] {
-			if err := c.Hosts.Save(); err != nil {
+			if err := c.Hosts.Save(scope); err != nil {
 				return err
 			}
-			path, _ := session.ConfigPath()
-			fmt.Fprintf(os.Stderr, "saved to %s\n", path)
+			var path string
+			if scope == session.ScopeProject {
+				path, _ = session.ProjectConfigPath()
+				fmt.Fprintf(os.Stderr, "saved to %s (visible only in this directory)\n", path)
+			} else {
+				path, _ = session.ConfigPath()
+				fmt.Fprintf(os.Stderr, "saved to %s (visible in every project)\n", path)
+			}
 		}
 		return cmdHosts(ctx, c, []string{"list"})
 	}

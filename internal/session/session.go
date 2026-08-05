@@ -31,17 +31,31 @@ type State struct {
 	LoginShell bool `json:"login_shell"`
 }
 
+// Scope identifies which config file a host is defined in.
+type Scope string
+
+const (
+	// ScopeGlobal hosts live in ~/.rdev/hosts.json and are visible everywhere.
+	ScopeGlobal Scope = "global"
+	// ScopeProject hosts live in <project>/.rdev/hosts.json and are visible only
+	// while working in that directory. Use this for machines that belong to one
+	// codebase, so an alias like "dev" cannot be reached from an unrelated repo.
+	ScopeProject Scope = "project"
+)
+
 // Registry tracks known hosts and their state. Safe for concurrent use.
 type Registry struct {
-	mu    sync.RWMutex
-	hosts map[string]transport.Host
-	state map[string]*State
+	mu     sync.RWMutex
+	hosts  map[string]transport.Host
+	state  map[string]*State
+	scopes map[string]Scope
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		hosts: make(map[string]transport.Host),
-		state: make(map[string]*State),
+		hosts:  make(map[string]transport.Host),
+		state:  make(map[string]*State),
+		scopes: make(map[string]Scope),
 	}
 }
 
@@ -58,13 +72,34 @@ type hostEntry struct {
 	Cwd       string `json:"cwd,omitempty"`
 }
 
-// Load reads ~/.rdev/hosts.json. A missing file is not an error: hosts can be
-// registered at runtime instead.
+// Load reads the global registry and then the project one, so a project can
+// define hosts that exist only while you work in that directory.
+//
+// Order matters: the project file is read last and wins on name collisions,
+// letting a repo pin "dev" to its own machine even if a global alias exists.
+// A missing file at either level is not an error; hosts can also be registered
+// at runtime.
 func (r *Registry) Load() error {
-	path, err := ConfigPath()
+	global, err := ConfigPath()
 	if err != nil {
 		return err
 	}
+	if err := r.loadFile(global, ScopeGlobal); err != nil {
+		return err
+	}
+
+	// The MCP server inherits the project directory as its cwd, which is what
+	// makes a project-scoped host file work without extra configuration.
+	if project, err := ProjectConfigPath(); err == nil {
+		if err := r.loadFile(project, ScopeProject); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loadFile merges one host file into the registry, tagging each entry's scope.
+func (r *Registry) loadFile(path string, scope Scope) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -87,6 +122,9 @@ func (r *Registry) Load() error {
 			Port:      e.Port,
 			RemoteDir: e.RemoteDir,
 		})
+		r.mu.Lock()
+		r.scopes[e.Name] = scope
+		r.mu.Unlock()
 		if e.Cwd != "" {
 			r.Update(e.Name, func(s *State) { s.Cwd = e.Cwd })
 		}
@@ -94,9 +132,19 @@ func (r *Registry) Load() error {
 	return nil
 }
 
-// Save persists the current hosts and their cwd to ~/.rdev/hosts.json.
-func (r *Registry) Save() error {
-	path, err := ConfigPath()
+// Save persists hosts to the given scope's file.
+//
+// Only hosts belonging to that scope are written, so saving the global file does
+// not silently absorb a project's private hosts (and vice versa).
+func (r *Registry) Save(scope Scope) error {
+	var path string
+	var err error
+	switch scope {
+	case ScopeProject:
+		path, err = ProjectConfigPath()
+	default:
+		path, err = ConfigPath()
+	}
 	if err != nil {
 		return err
 	}
@@ -107,6 +155,9 @@ func (r *Registry) Save() error {
 	r.mu.RLock()
 	hf := hostFile{}
 	for name, h := range r.hosts {
+		if r.scopes[name] != scope {
+			continue
+		}
 		e := hostEntry{Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir}
 		if st, ok := r.state[name]; ok {
 			e.Cwd = st.Cwd
@@ -123,6 +174,23 @@ func (r *Registry) Save() error {
 	// Written 0600: it records hostnames and usernames, not secrets, but there
 	// is no reason to make it world-readable.
 	return os.WriteFile(path, append(b, '\n'), 0o600)
+}
+
+// SetScope records which config file a host belongs to.
+func (r *Registry) SetScope(name string, scope Scope) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scopes[name] = scope
+}
+
+// ScopeOf reports which config file a host came from.
+func (r *Registry) ScopeOf(name string) Scope {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if s, ok := r.scopes[name]; ok {
+		return s
+	}
+	return ScopeGlobal
 }
 
 // Add registers or replaces a host, initializing its state.
@@ -238,11 +306,24 @@ func MergeEnv(base, override map[string]string) map[string]string {
 	return out
 }
 
-// ConfigPath returns the path to the host registry file.
+// ConfigPath returns the path to the global host registry file.
 func ConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, ".rdev", "hosts.json"), nil
+}
+
+// ProjectConfigPath returns the path to the project-local host registry.
+//
+// It resolves against the process working directory, which for the MCP server is
+// the project Claude Code was started in. That is what scopes a host to one
+// codebase without any extra plumbing.
+func ProjectConfigPath() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cwd, ".rdev", "hosts.json"), nil
 }

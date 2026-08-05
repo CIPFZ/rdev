@@ -25,15 +25,42 @@
 ```bash
 make build                                     # 需要 Go 1.25+
 
-# 注册一台机器（-save 写入 ~/.rdev/hosts.json）
-./bin/rdev hosts add dev user@1.2.3.4 -port 36000 -cwd '~/myproject' -save
+# 注册进 Claude Code（工具本身全局可用）
+claude mcp add rdev --scope user -- $PWD/bin/rdev serve
+
+# 在你的项目目录下注册开发机（默认 project scope）
+cd ~/works/myproject
+~/works/rdev/bin/rdev hosts add dev user@1.2.3.4 -port 36000 -cwd '~/myproject' -save
 
 # 首次连接自动上传 agent，无需在远端做任何准备
-./bin/rdev ping dev
-
-# 注册进 Claude Code
-claude mcp add rdev --scope user -- $PWD/bin/rdev serve
+~/works/rdev/bin/rdev ping dev
 ```
+
+## 两层配置：工具全局，主机按项目
+
+工具是通用的，但开发机往往属于某个具体项目。两者分开：
+
+| | 位置 | 可见范围 |
+|---|---|---|
+| **rdev 工具** | `~/.claude.json`（user scope MCP） | 所有项目 |
+| **project 主机** | `<项目>/.rdev/hosts.json` | 仅在该目录下工作时 |
+| **global 主机** | `~/.rdev/hosts.json` | 所有项目 |
+
+加载顺序是 global → project，**同名时 project 覆盖 global**，所以一个仓库可以把 `dev` 指向自己的机器。
+
+`hosts add` 默认写 project scope（在某个 repo 里注册的机器，基本上就属于那个 repo）；跨项目复用的机器加 `-global`。
+
+MCP server 继承 Claude Code 启动时的项目目录作为 cwd，这就是 project scope 生效的机制，不需要额外配置。
+
+实测隔离效果：
+```
+在 ~/works/nexus  → rdev exec dev -- pwd    ✅ /home/tonynyyan/nexus
+在 ~/works/rdev   → rdev exec dev -- pwd    ❌ unknown host "dev"
+在 ~              → rdev hosts list         ❌ null
+```
+
+> `.rdev/` 建议加进你的**全局** gitignore（`git config --global core.excludesfile`），
+> 而不是项目的 `.gitignore` —— 里面是你个人的用户名和跳板地址，同事的开发机不一样。
 
 ## MCP 工具（11 个）
 
@@ -156,7 +183,9 @@ rdev job stop dev <id> -signal TERM -grace 5
 rdev read dev ~/app/config.yaml
 echo "content" | rdev write dev /tmp/f.txt
 rdev sync dev push ./src /remote/dst -exclude .git -dry-run
-rdev hosts list
+rdev hosts list                    # 含 scope 列
+rdev hosts add dev user@h -port 36000 -save          # project scope
+rdev hosts add prod user@h -global -save             # 全局可见
 ```
 
 `--` 之后的一切都作为字面 argv 传递，本地 shell 也不会二次解析。

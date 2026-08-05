@@ -367,7 +367,8 @@ type SessionIn struct {
 	Cwd        string            `json:"cwd,omitempty" jsonschema:"Sticky working directory inherited by later calls on this host."`
 	Env        map[string]string `json:"env,omitempty" jsonschema:"Sticky environment variables merged into later calls."`
 	LoginShell *bool             `json:"login_shell,omitempty" jsonschema:"Default login-shell behaviour for this host."`
-	Persist    bool              `json:"persist,omitempty" jsonschema:"Save the host registry to ~/.rdev/hosts.json."`
+	Scope      string            `json:"scope,omitempty" jsonschema:"Where to save: 'project' writes ./.rdev/hosts.json so the host is only visible while working in this directory, 'global' writes ~/.rdev/hosts.json. Defaults to the host's current scope, or project for a new host."`
+	Persist    bool              `json:"persist,omitempty" jsonschema:"Save the host registry to the scope's file."`
 }
 
 type HostOut struct {
@@ -377,22 +378,55 @@ type HostOut struct {
 	Cwd        string            `json:"cwd,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	LoginShell bool              `json:"login_shell"`
+	Scope      string            `json:"scope"`
 }
 
 type SessionOut struct {
-	Hosts []HostOut `json:"hosts"`
-	Saved bool      `json:"saved,omitempty"`
+	Hosts     []HostOut `json:"hosts"`
+	Saved     bool      `json:"saved,omitempty"`
+	SavedTo   string    `json:"saved_to,omitempty"`
+	SavedNote string    `json:"saved_note,omitempty"`
 }
 
 func registerSession(s *mcp.Server, c *client.Client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "rdev_session",
-		Description: "Inspect or update per-host state. Setting cwd once removes the need to repeat it, " +
-			"and registering a host gives it a short alias.",
+		Description: "Inspect or update per-host state. Setting cwd once removes the need to repeat it. " +
+			"Hosts saved with scope 'project' live in ./.rdev/hosts.json and are only reachable while " +
+			"working in that directory, which is the right choice for a machine that belongs to one codebase.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionIn) (*mcp.CallToolResult, SessionOut, error) {
+		isNew := false
+		if in.Host != "" {
+			if _, err := c.Hosts.Host(in.Host); err != nil {
+				isNew = true
+			}
+		}
+
 		if in.Host != "" && in.Addr != "" {
 			c.Hosts.Add(transport.Host{Name: in.Host, Addr: in.Addr, Port: in.Port})
 		}
+
+		// Default a brand-new host to project scope: a machine you register while
+		// working in a repo almost always belongs to that repo, and the safer
+		// mistake is a host that is too narrowly visible rather than one that
+		// leaks into unrelated projects.
+		scope := session.ScopeProject
+		switch strings.ToLower(in.Scope) {
+		case "global":
+			scope = session.ScopeGlobal
+		case "project":
+			scope = session.ScopeProject
+		case "":
+			if in.Host != "" && !isNew {
+				scope = c.Hosts.ScopeOf(in.Host)
+			}
+		default:
+			return nil, SessionOut{}, fmt.Errorf("scope must be project or global, got %q", in.Scope)
+		}
+		if in.Host != "" && (in.Addr != "" || in.Scope != "") {
+			c.Hosts.SetScope(in.Host, scope)
+		}
+
 		if in.Host != "" && (in.Cwd != "" || len(in.Env) > 0 || in.LoginShell != nil) {
 			if _, err := c.Hosts.Host(in.Host); err != nil {
 				return nil, SessionOut{}, err
@@ -412,10 +446,19 @@ func registerSession(s *mcp.Server, c *client.Client) {
 
 		var out SessionOut
 		if in.Persist {
-			if err := c.Hosts.Save(); err != nil {
+			if err := c.Hosts.Save(scope); err != nil {
 				return nil, SessionOut{}, fmt.Errorf("save host registry: %w", err)
 			}
 			out.Saved = true
+			if scope == session.ScopeProject {
+				p, _ := session.ProjectConfigPath()
+				out.SavedTo = p
+				out.SavedNote = "visible only when working in this directory"
+			} else {
+				p, _ := session.ConfigPath()
+				out.SavedTo = p
+				out.SavedNote = "visible in every project"
+			}
 		}
 
 		names := c.Hosts.Names()
@@ -431,6 +474,7 @@ func registerSession(s *mcp.Server, c *client.Client) {
 			out.Hosts = append(out.Hosts, HostOut{
 				Name: h.Name, Addr: h.Addr, Port: h.Port,
 				Cwd: st.Cwd, Env: st.Env, LoginShell: st.LoginShell,
+				Scope: string(c.Hosts.ScopeOf(n)),
 			})
 		}
 		return nil, out, nil
