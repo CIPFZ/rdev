@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -331,7 +337,7 @@ func TestJobLifecycle(t *testing.T) {
 		t.Errorf("logs = %q, want to contain hello", logs.Logs)
 	}
 
-	list, err := jobList(state)
+	list, err := jobList(&proto.JobParams{}, state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +686,7 @@ func TestReadTailFewerLinesThanRequested(t *testing.T) {
 func TestEveryJobOpIsRouted(t *testing.T) {
 	ops := []string{
 		proto.OpJobStart, proto.OpJobList, proto.OpJobStatus,
-		proto.OpJobLogs, proto.OpJobStop, proto.OpJobWait,
+		proto.OpJobLogs, proto.OpJobStop, proto.OpJobWait, proto.OpJobRm,
 	}
 	for _, op := range ops {
 		if !isJobOp(op) {
@@ -715,4 +721,662 @@ func TestHandleRoutesJobWait(t *testing.T) {
 	if strings.Contains(resp.Err, "unknown op") {
 		t.Errorf("job_wait was not routed: %q", resp.Err)
 	}
+}
+
+// A caller polling with next_offset can hold an offset from before the log was
+// rotated or truncated. That used to compute a negative slice length and panic,
+// taking the whole agent -- and every job's only observer -- down with it.
+func TestJobLogsStaleOffsetPastEOF(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "j1")
+	os.MkdirAll(dir, 0o755)
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
+	os.WriteFile(filepath.Join(dir, "stdout"), []byte("hello\n"), 0o644)
+
+	res, err := jobLogs(&proto.JobParams{ID: "j1", SinceOffset: 9999}, state)
+	if err != nil {
+		t.Fatalf("a stale offset should read as empty, not fail: %v", err)
+	}
+	if res.Logs != "" {
+		t.Errorf("Logs = %q, want empty: there is nothing past EOF", res.Logs)
+	}
+	// The clamped offset lets the next poll resume from a real position.
+	if res.NextOffset != 6 {
+		t.Errorf("NextOffset = %d, want 6 (clamped to the file size)", res.NextOffset)
+	}
+}
+
+func TestJobLogsNegativeOffset(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "j1")
+	os.MkdirAll(dir, 0o755)
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
+	os.WriteFile(filepath.Join(dir, "stdout"), []byte("a\nb\n"), 0o644)
+
+	res, err := jobLogs(&proto.JobParams{ID: "j1", SinceOffset: -5}, state)
+	if err != nil {
+		t.Fatalf("a negative offset should clamp to 0, not fail: %v", err)
+	}
+	if !strings.Contains(res.Logs, "a") || !strings.Contains(res.Logs, "b") {
+		t.Errorf("Logs = %q, want the whole file", res.Logs)
+	}
+}
+
+// Non-UTF-8 bytes with no NUL used to be sent as a JSON string, where
+// encoding/json silently rewrites them to U+FFFD. base64 is what keeps the
+// content intact.
+func TestReadInvalidUTF8IsBase64(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latin1.txt")
+	// Latin-1 "éè" plus 0xFF: invalid UTF-8, but contains no NUL byte.
+	os.WriteFile(path, []byte{0xE9, 0xE8, 0xFF, 'a', 'b'}, 0o644)
+
+	res, err := doRead(&proto.ReadParams{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ContentB64 {
+		t.Fatalf("ContentB64 = false for invalid UTF-8; content %q would be corrupted by JSON", res.Content)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(res.Content)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	if !bytes.Equal(decoded, []byte{0xE9, 0xE8, 0xFF, 'a', 'b'}) {
+		t.Errorf("decoded = %x, want the original bytes byte-for-byte", decoded)
+	}
+}
+
+func TestReadValidUTF8StaysText(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "utf8.txt")
+	os.WriteFile(path, []byte("中文 ok"), 0o644)
+
+	res, err := doRead(&proto.ReadParams{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ContentB64 {
+		t.Error("valid UTF-8 should stay readable text, not be base64-encoded")
+	}
+	if res.Content != "中文 ok" {
+		t.Errorf("Content = %q, want the original text", res.Content)
+	}
+}
+
+// A read whose limit lands mid-rune yields invalid UTF-8, which must be
+// base64'd rather than corrupted. This is a different path from capWriter's
+// trimming: doRead reports exact bytes at an offset, so it cannot drop the tail.
+func TestReadPartialRuneIsBase64(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cut.txt")
+	os.WriteFile(path, []byte("中文"), 0o644)
+
+	// 4 bytes cuts the second 3-byte rune in half.
+	res, err := doRead(&proto.ReadParams{Path: path, Limit: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.ContentB64 {
+		t.Errorf("a read cut mid-rune should be base64, got text %q", res.Content)
+	}
+}
+
+// One bad request must not take down the serve loop: a running job's only
+// observer is the agent process.
+func TestHandleSafelyContainsPanic(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "j1")
+	os.MkdirAll(dir, 0o755)
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
+	os.WriteFile(filepath.Join(dir, "stdout"), []byte("x\n"), 0o644)
+
+	// Now fixed, so this exercises the guard without relying on a live panic.
+	resp := handleSafely(&proto.Request{
+		Op:  proto.OpJobLogs,
+		Job: &proto.JobParams{ID: "j1", SinceOffset: 1 << 40},
+	}, state)
+	if resp == nil {
+		t.Fatal("handleSafely returned nil")
+	}
+	if !resp.OK {
+		t.Errorf("a clamped offset should succeed, got Err = %q", resp.Err)
+	}
+}
+
+func TestIsJSONSafeText(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want bool
+	}{
+		{"ascii", []byte("hello"), true},
+		{"utf8", []byte("中文"), true},
+		{"empty", nil, true},
+		{"nul byte", []byte{'a', 0, 'b'}, false},
+		{"latin1", []byte{0xE9, 0xE8}, false},
+		{"partial rune", []byte("中")[:2], false},
+	}
+	for _, c := range cases {
+		if got := isJSONSafeText(c.in); got != c.want {
+			t.Errorf("%s: isJSONSafeText(%x) = %v, want %v", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// The host passes -state so a custom RemoteDir cannot leave the two sides
+// reading different job directories.
+
+func TestStateDirCustomAndDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := stateDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".cache", "rdev"); got != want {
+		t.Errorf("default = %q, want %q", got, want)
+	}
+
+	got, err = stateDir("~/custom/rdev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, "custom", "rdev"); got != want {
+		t.Errorf("tilde = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(got, "jobs")); err != nil {
+		t.Errorf("jobs dir not created: %v", err)
+	}
+
+	abs := filepath.Join(t.TempDir(), "abs")
+	got, err = stateDir(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != abs {
+		t.Errorf("abs = %q, want %q", got, abs)
+	}
+
+	// A relative dir is what hosts.json holds when written as ".cache/rdev".
+	got, err = stateDir("rel/dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, "rel", "dir"); got != want {
+		t.Errorf("relative = %q, want %q", got, want)
+	}
+}
+
+// Job logs are unbounded, so without a reclaim path the state dir grows for the
+// life of the machine.
+func TestJobRmByID(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "j1")
+	os.MkdirAll(dir, 0o755)
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		ID: "j1", Argv: []string{"x"}, PID: 999999,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+		"exit_code": 0, "ended_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	os.WriteFile(filepath.Join(dir, "stdout"), []byte("0123456789"), 0o644)
+
+	res, err := jobRm(&proto.JobParams{ID: "j1"}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 1 || res.Removed[0] != "j1" {
+		t.Errorf("Removed = %v, want [j1]", res.Removed)
+	}
+	if res.FreedBytes < 10 {
+		t.Errorf("FreedBytes = %d, want at least the 10-byte log", res.FreedBytes)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Error("job directory should be gone")
+	}
+}
+
+// Removing a live job's records would leave the process running with no way to
+// observe or stop it, which is worse than the disk usage.
+func TestJobRmSkipsRunningJob(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "live")
+	os.MkdirAll(dir, 0o755)
+	// os.Getpid() is certainly alive, so this job reads as running.
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		ID: "live", Argv: []string{"sleep"}, PID: os.Getpid(),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	res, err := jobRm(&proto.JobParams{ID: "live"}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 0 {
+		t.Errorf("Removed = %v, want nothing: the job is running", res.Removed)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0] != "live" {
+		t.Errorf("Skipped = %v, want [live]", res.Skipped)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Error("a running job's records must survive")
+	}
+}
+
+func TestJobRmKeepLast(t *testing.T) {
+	state := t.TempDir()
+	// Distinct StartedAt values so "newest" is well defined.
+	for i, id := range []string{"old1", "old2", "new1", "new2"} {
+		dir := filepath.Join(state, "jobs", id)
+		os.MkdirAll(dir, 0o755)
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			ID: id, Argv: []string{"x"}, PID: 999999,
+			StartedAt: time.Date(2020, 1, 1+i, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		})
+		writeJSON(filepath.Join(dir, "status.json"), map[string]any{"exit_code": 0})
+	}
+
+	res, err := jobRm(&proto.JobParams{KeepLast: 2}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 2 {
+		t.Fatalf("Removed = %v, want the 2 oldest", res.Removed)
+	}
+	for _, id := range res.Removed {
+		if id == "new1" || id == "new2" {
+			t.Errorf("removed %s, which is among the newest 2", id)
+		}
+	}
+	for _, keep := range []string{"new1", "new2"} {
+		if _, err := os.Stat(filepath.Join(state, "jobs", keep)); err != nil {
+			t.Errorf("%s should have been kept", keep)
+		}
+	}
+}
+
+// Both filters must agree, so the combination is conservative rather than
+// surprising: a job inside the keep window stays even when it is old.
+func TestJobRmFiltersAreConjunctive(t *testing.T) {
+	state := t.TempDir()
+	ancient := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	for _, id := range []string{"a", "b", "c"} {
+		dir := filepath.Join(state, "jobs", id)
+		os.MkdirAll(dir, 0o755)
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			ID: id, Argv: []string{"x"}, PID: 999999, StartedAt: ancient,
+		})
+		writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+			"exit_code": 0, "ended_at": ancient,
+		})
+	}
+
+	// All three are ancient, but keep_last=3 protects every one of them.
+	res, err := jobRm(&proto.JobParams{KeepLast: 3, OlderThanSec: 60}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 0 {
+		t.Errorf("Removed = %v, want nothing: keep_last covers all of them", res.Removed)
+	}
+}
+
+func TestJobRmOlderThanKeepsRecent(t *testing.T) {
+	state := t.TempDir()
+	now := time.Now().UTC()
+	mk := func(id string, ended time.Time) {
+		dir := filepath.Join(state, "jobs", id)
+		os.MkdirAll(dir, 0o755)
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			ID: id, Argv: []string{"x"}, PID: 999999,
+			StartedAt: ended.Format(time.RFC3339),
+		})
+		writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+			"exit_code": 0, "ended_at": ended.Format(time.RFC3339),
+		})
+	}
+	mk("stale", now.Add(-2*time.Hour))
+	mk("recent", now.Add(-1*time.Minute))
+
+	res, err := jobRm(&proto.JobParams{OlderThanSec: 3600}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 1 || res.Removed[0] != "stale" {
+		t.Errorf("Removed = %v, want [stale] only", res.Removed)
+	}
+}
+
+func TestJobRmRequiresAFilter(t *testing.T) {
+	if _, err := jobRm(&proto.JobParams{}, t.TempDir()); err == nil {
+		t.Error("job_rm with no id and no filters should error rather than wipe everything")
+	}
+}
+
+// A missing EndedAt (supervisor died without recording status) falls back to
+// StartedAt rather than being treated as age zero and kept forever.
+func TestJobRmFallsBackToStartedAt(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "jobs", "noend")
+	os.MkdirAll(dir, 0o755)
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		ID: "noend", Argv: []string{"x"}, PID: 999999,
+		StartedAt: time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339),
+	})
+
+	res, err := jobRm(&proto.JobParams{OlderThanSec: 3600}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 1 {
+		t.Errorf("Removed = %v, want the job aged by StartedAt", res.Removed)
+	}
+}
+
+func TestListReturnsStructuredEntries(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("hello"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "subdir"), 0o755)
+	os.Symlink(filepath.Join(dir, "file.txt"), filepath.Join(dir, "link"))
+	// A name that would make `ls` output ambiguous to parse.
+	os.WriteFile(filepath.Join(dir, "od d na me.txt"), []byte("x"), 0o644)
+
+	res, err := doList(&proto.ListParams{Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != 4 {
+		t.Errorf("Total = %d, want 4", res.Total)
+	}
+
+	byName := map[string]proto.DirEntry{}
+	for _, e := range res.Entries {
+		byName[e.Name] = e
+	}
+	if e := byName["file.txt"]; e.Size != 5 || e.IsDir {
+		t.Errorf("file.txt = %+v, want size 5 and not a dir", e)
+	}
+	if e := byName["subdir"]; !e.IsDir {
+		t.Errorf("subdir = %+v, want IsDir", e)
+	}
+	if e := byName["link"]; !e.Symlink {
+		t.Errorf("link = %+v, want Symlink", e)
+	}
+	if _, ok := byName["od d na me.txt"]; !ok {
+		t.Error("a name with spaces should survive as one entry")
+	}
+	if e := byName["file.txt"]; e.ModTime == "" || e.Mode == "" {
+		t.Errorf("file.txt missing ModTime/Mode: %+v", e)
+	}
+}
+
+func TestListLimitReportsTruncation(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644)
+	}
+	res, err := doList(&proto.ListParams{Path: dir, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Entries) != 2 {
+		t.Errorf("got %d entries, want 2", len(res.Entries))
+	}
+	if !res.Truncated {
+		t.Error("Truncated should be set when the limit cut the listing")
+	}
+	// Total reports the real count so the caller knows what it did not see.
+	if res.Total != 5 {
+		t.Errorf("Total = %d, want 5", res.Total)
+	}
+}
+
+func TestListMissingDirErrors(t *testing.T) {
+	if _, err := doList(&proto.ListParams{Path: filepath.Join(t.TempDir(), "nope")}); err == nil {
+		t.Error("listing a missing directory should error")
+	}
+}
+
+func TestListRoutedThroughHandle(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644)
+
+	resp := handle(&proto.Request{Op: proto.OpList, List: &proto.ListParams{Path: dir}}, t.TempDir())
+	if !resp.OK {
+		t.Fatalf("list not routed: %q", resp.Err)
+	}
+	if resp.List == nil || len(resp.List.Entries) != 1 {
+		t.Errorf("List = %+v, want 1 entry", resp.List)
+	}
+}
+
+func TestJobRmRoutedThroughHandle(t *testing.T) {
+	resp := handle(&proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: "missing"}}, t.TempDir())
+	if strings.Contains(resp.Err, "unknown op") {
+		t.Errorf("job_rm was not routed: %q", resp.Err)
+	}
+}
+
+// Replies are written from many goroutines onto one pipe, so the writer must
+// serialize them: interleaved partial lines would corrupt the framing the host
+// relies on to match replies to requests.
+func TestRespWriterSerializesConcurrentReplies(t *testing.T) {
+	var buf lockedBuffer
+	w := &respWriter{out: bufio.NewWriter(&buf)}
+
+	const n = 50
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			w.write(&proto.Response{
+				ID: fmt.Sprint(i), OK: true,
+				// A payload long enough that an unguarded write would interleave.
+				Exec: &proto.ExecResult{Stdout: strings.Repeat("x", 4096)},
+			})
+		}(i)
+	}
+	wg.Wait()
+	w.flush()
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != n {
+		t.Fatalf("got %d lines, want %d: replies were interleaved", len(lines), n)
+	}
+	seen := map[string]bool{}
+	for _, line := range lines {
+		var resp proto.Response
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			t.Fatalf("corrupt line: %v", err)
+		}
+		if seen[resp.ID] {
+			t.Errorf("duplicate reply for ID %s", resp.ID)
+		}
+		seen[resp.ID] = true
+	}
+}
+
+// lockedBuffer is a concurrency-safe sink for the writer test.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// Handlers run concurrently, and they share the job state directory, so parallel
+// job_start calls must not collide on IDs or clobber each other's records.
+func TestConcurrentJobStartsAreIsolated(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	const n = 8
+	var wg sync.WaitGroup
+	ids := make(chan string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp := handleSafely(&proto.Request{
+				Op: proto.OpJobStart,
+				Job: &proto.JobParams{
+					Spec:  &proto.ExecParams{Argv: []string{"sh", "-c", fmt.Sprintf("echo job-%d", i)}},
+					Label: fmt.Sprint(i),
+				},
+			}, state)
+			if !resp.OK {
+				t.Errorf("job %d failed: %s", i, resp.Err)
+				return
+			}
+			ids <- resp.Job.Info.ID
+		}(i)
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := map[string]bool{}
+	for id := range ids {
+		if seen[id] {
+			t.Errorf("duplicate job ID %q: concurrent starts collided", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != n {
+		t.Errorf("got %d unique jobs, want %d", len(seen), n)
+	}
+
+	// Wait for the supervisors to finish writing before the test's TempDir
+	// cleanup runs; a job still creating status.json would fail the removal.
+	for id := range seen {
+		jobWait(&proto.JobParams{ID: id, WaitTimeoutSec: 10}, state)
+	}
+}
+
+// The post-disconnect drain must be bounded. job_wait can be budgeted for an
+// hour, so waiting for every handler would keep an agent alive long after its
+// host went away -- one lingering process per dropped ssh session.
+//
+// Abandoning those handlers is safe: the pipe is closed so replies have nowhere
+// to go, and jobs are detached with setsid, so no work depends on this process.
+func TestShutdownDrainIsBounded(t *testing.T) {
+	if shutdownDrainTimeout > 5*time.Second {
+		t.Errorf("shutdownDrainTimeout = %v, too long: a dropped connection would strand an agent", shutdownDrainTimeout)
+	}
+	if shutdownDrainTimeout < 500*time.Millisecond {
+		t.Errorf("shutdownDrainTimeout = %v, too short for an almost-finished handler to flush", shutdownDrainTimeout)
+	}
+	// A single wait budget can far exceed the drain, which is the case that makes
+	// the bound necessary rather than cosmetic.
+	if time.Duration(maxWaitSec)*time.Second <= shutdownDrainTimeout {
+		t.Error("maxWaitSec no longer exceeds the drain timeout; the bound may be pointless")
+	}
+}
+
+// The fast path must return exactly what the scanning path would.
+func TestJobLogsFastPathMatchesScan(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		tail int
+	}{
+		{"trailing newline", "a\nb\nc\n", 2},
+		{"no trailing newline", "a\nb\nc", 2},
+		{"single line", "only\n", 5},
+		{"empty file", "", 3},
+		{"tail exceeds lines", "x\ny\n", 100},
+		{"blank lines", "a\n\n\nb\n", 4},
+		{"crlf", "a\r\nb\r\n", 2},
+		{"tail 1", "1\n2\n3\n4\n", 1},
+		{"utf8", "中文\nline2\n", 2},
+	}
+	for _, c := range cases {
+		state := t.TempDir()
+		dir := filepath.Join(state, "jobs", "j")
+		os.MkdirAll(dir, 0o755)
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j", Argv: []string{"x"}, PID: 1})
+		os.WriteFile(filepath.Join(dir, "stdout"), []byte(c.body), 0o644)
+
+		fast, err := jobLogs(&proto.JobParams{ID: "j", TailLines: c.tail}, state)
+		if err != nil {
+			t.Fatalf("%s: fast: %v", c.name, err)
+		}
+		// Compare against the previous implementation, kept below as an oracle.
+		want := refTail(c.body, c.tail)
+		if fast.Logs != want {
+			t.Errorf("%s: fast path = %q, reference = %q", c.name, fast.Logs, want)
+		}
+		if fast.NextOffset != int64(len(c.body)) {
+			t.Errorf("%s: NextOffset = %d, want %d", c.name, fast.NextOffset, len(c.body))
+		}
+	}
+}
+
+// refTail is the old implementation, used as the oracle.
+func refTail(body string, n int) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// A line longer than one read chunk must still be tailed correctly.
+func TestReadTailHugeLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log")
+	huge := strings.Repeat("H", 300<<10) // 300 KB, spans several 64 KB chunks
+	os.WriteFile(path, []byte("first\n"+huge+"\nlast\n"), 0o644)
+
+	got, err := readTail(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(got, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2", len(lines))
+	}
+	if lines[1] != "last" {
+		t.Errorf("last line = %q, want last", lines[1])
+	}
+	if len(lines[0]) != len(huge) {
+		t.Errorf("huge line truncated: got %d bytes, want %d", len(lines[0]), len(huge))
+	}
+}
+
+// The scan cap must not corrupt output when the tail exceeds it.
+func TestReadTailBeyondScanCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log")
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		sb.WriteString(strings.Repeat(fmt.Sprintf("%d", i%10), 40<<10))
+		sb.WriteByte('\n')
+	}
+	os.WriteFile(path, []byte(sb.String()), 0o644)
+
+	got, err := readTail(path, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Whatever we get back must be whole lines from the end, never a partial one.
+	lines := strings.Split(got, "\n")
+	last := lines[len(lines)-1]
+	if len(last) != 40<<10 {
+		t.Errorf("last line is %d bytes, want a whole 40KB line", len(last))
+	}
+	t.Logf("returned %d lines under a capped scan", len(lines))
 }

@@ -145,3 +145,19 @@ type stringError string
 func (e stringError) Error() string { return string(e) }
 
 func errFromString(s string) error { return stringError(s) }
+
+func TestIsConnectedDoesNotRegisterHosts(t *testing.T) {
+	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
+	before := len(c.Hosts.Names())
+
+	// Hosts.Host auto-registers anything shaped like an ssh destination, so
+	// routing these through it would turn a status query on a typo into a
+	// permanent phantom entry in the rdev_session listing.
+	c.IsConnected("user@1.2.3.4")
+	c.Disconnect("user@5.6.7.8")
+
+	after := c.Hosts.Names()
+	if len(after) != before {
+		t.Errorf("registry grew from %d to %d: %v", before, len(after), after)
+	}
+}
