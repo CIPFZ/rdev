@@ -691,7 +691,9 @@ func registerSecrets(s *mcp.Server, c *client.Client) {
 			"environment by passing env {\"VAR\":\"secret:name\"} without ever revealing the plaintext. " +
 			"Prefer set_from_file with a host, so the value is read over the connection and never enters " +
 			"a tool call, a transcript, or the local disk. Note that a value registered from the local file " +
-			"will not mask remote output if the two machines hold different credentials.",
+			"will not mask remote output if the two machines hold different credentials. " +
+			"Masking covers the value verbatim and split across lines, but not a fragment or a transformed " +
+			"form of it: cutting, re-encoding, or hashing a credential before printing it will leak.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SecretsIn) (*mcp.CallToolResult, SecretsOut, error) {
 		switch strings.ToLower(in.Action) {
 		case "set":

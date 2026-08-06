@@ -160,3 +160,64 @@ func TestRedactDoesNotCatchFragments(t *testing.T) {
 		t.Errorf("Redact() = %q; fragment matching is not implemented, so this should pass through", got)
 	}
 }
+
+// A credential wrapped across lines by a config dump, a YAML folder, or `fold` is
+// an accident of formatting, not an attempt to hide the value, so it belongs on the
+// defended side of the line.
+func TestRedactMasksWrappedValue(t *testing.T) {
+	const tok = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+	s := New()
+	s.Set("tok", tok)
+
+	cases := map[string]string{
+		"wrapped at 20":  tok[:20] + "\n" + tok[20:],
+		"wrapped twice":  tok[:10] + "\n" + tok[10:25] + "\n" + tok[25:],
+		"space inserted": tok[:10] + " " + tok[10:],
+		"tab inserted":   tok[:5] + "\t" + tok[5:],
+		"crlf wrap":      tok[:15] + "\r\n" + tok[15:],
+		"indented cont":  tok[:12] + "\n    " + tok[12:],
+		"verbatim":       "Bearer " + tok,
+	}
+	for name, out := range cases {
+		red := s.Redact(out)
+		if strings.Contains(red, tok[:16]) {
+			t.Errorf("%s: still leaks: %q", name, red)
+		} else {
+			t.Logf("%-16s -> %q", name, strings.ReplaceAll(red, "\n", "\\n"))
+		}
+	}
+}
+
+// Whitespace tolerance must not swallow unrelated text or over-match.
+// Whitespace tolerance must not swallow unrelated text: scattered characters that
+// merely start with the same byte are not a match.
+func TestRedactWrapToleranceDoesNotOverMatch(t *testing.T) {
+	s := New()
+	s.Set("tok", "abcdefghijklmnop") // 16 chars, at the tolerance threshold
+
+	cases := []struct{ in, wantContains string }{
+		// Unrelated text with the same first byte must survive.
+		{"a b c d e f", "a b c d e f"},
+		{"alpha beta gamma", "alpha beta gamma"},
+		// A genuine wrap is masked but surrounding text is preserved.
+		{"key=abcdefgh\nijklmnop; next=1", "key=<redacted:tok>; next=1"},
+	}
+	for _, c := range cases {
+		got := s.Redact(c.in)
+		if !strings.Contains(got, c.wantContains) {
+			t.Errorf("Redact(%q) = %q, want it to contain %q", c.in, got, c.wantContains)
+		}
+	}
+}
+
+// Short values keep plain matching: the scattered pattern could occur naturally.
+// Short values keep plain matching: for a handful of characters, the scattered
+// pattern could plausibly occur in unrelated output.
+func TestRedactShortValuesAreNotWrapTolerant(t *testing.T) {
+	s := New()
+	s.Set("short", "abcdef") // 6 chars, below the threshold
+	got := s.Redact("a b c d e f")
+	if !strings.Contains(got, "a b c d e f") {
+		t.Errorf("a short value should not match scattered characters: %q", got)
+	}
+}

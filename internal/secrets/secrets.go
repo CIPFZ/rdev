@@ -102,11 +102,18 @@ func (s *Store) Delete(name string) bool {
 // another, replacing the shorter one first would leave a fragment of the longer
 // one exposed.
 //
-// Limitation worth knowing: matching is whole-value, so a command that emits
-// only part of a secret (`cut -c1-4`, a base64 re-encoding, a hash) is not
-// caught. This defends against the common accident -- a credential echoed,
-// dumped, or quoted back verbatim -- not against a caller deliberately
-// transforming the value before printing it.
+// Matching tolerates whitespace inserted inside a value, so a credential that got
+// line-wrapped by a config dump, a YAML folder, or `fold` is still caught. That is
+// an accident of formatting rather than an attempt to hide the value, so it belongs
+// on the defended side of the line. Only values of at least wrapTolerantMinLen are
+// treated this way, since for a short value the scattered-character pattern could
+// plausibly occur in unrelated output.
+//
+// Limitation worth knowing: matching is still whole-value. A command that emits
+// only part of a secret, or transforms it first (`cut -c1-4`, a base64
+// re-encoding, a hash, a case change), is not caught. This defends against the
+// common accident -- a credential echoed, dumped, wrapped, or quoted back -- not
+// against a caller deliberately reshaping the value before printing it.
 func (s *Store) Redact(text string) string {
 	if text == "" {
 		return text
@@ -122,10 +129,84 @@ func (s *Store) Redact(text string) string {
 	s.mu.RUnlock()
 
 	sort.Slice(pairs, func(i, j int) bool { return len(pairs[i][0]) > len(pairs[j][0]) })
+	// Whitespace-tolerant matching only matters for text that contains whitespace,
+	// and Redact runs over every byte of every command's output. One check here
+	// skips the scan for the common single-line case.
+	hasSpace := strings.ContainsAny(text, " \t\n\r\v\f")
 	for _, p := range pairs {
 		text = strings.ReplaceAll(text, p[0], p[1])
+		if hasSpace && len(p[0]) >= wrapTolerantMinLen {
+			text = replaceWrapped(text, p[0], p[1])
+		}
 	}
 	return text
+}
+
+// wrapTolerantMinLen is the length above which whitespace-tolerant matching is
+// used. Long enough that a value's characters appearing in order, separated only
+// by whitespace, is not a coincidence.
+const wrapTolerantMinLen = 16
+
+// replaceWrapped substitutes occurrences of value whose characters are separated
+// by whitespace, e.g. a token split across two lines.
+//
+// The plain substitution has already run, so this only sees genuinely broken-up
+// occurrences. It scans rather than using a regexp because Redact runs over every
+// byte of command output, and building a pattern with one optional-whitespace group
+// per character would cost far more than the first-byte check below.
+func replaceWrapped(text, value, placeholder string) string {
+	if len(value) == 0 {
+		return text
+	}
+	var b strings.Builder
+	i := 0
+	for i < len(text) {
+		// Cheap gate: nearly every position fails here without further work.
+		if text[i] != value[0] {
+			b.WriteByte(text[i])
+			i++
+			continue
+		}
+		end, ok := matchSkippingSpace(text, i, value)
+		if !ok {
+			b.WriteByte(text[i])
+			i++
+			continue
+		}
+		b.WriteString(placeholder)
+		i = end
+	}
+	return b.String()
+}
+
+// matchSkippingSpace reports whether value occurs at text[start:], allowing
+// whitespace between its characters, and returns the index just past the match.
+//
+// Whitespace is not allowed before the first or after the last character: that
+// would let the match swallow surrounding formatting.
+func matchSkippingSpace(text string, start int, value string) (int, bool) {
+	i, v := start, 0
+	for v < len(value) {
+		if i >= len(text) {
+			return 0, false
+		}
+		if text[i] == value[v] {
+			i++
+			v++
+			continue
+		}
+		// A gap is only allowed between characters, never before the first.
+		if v > 0 && isSpaceByte(text[i]) {
+			i++
+			continue
+		}
+		return 0, false
+	}
+	return i, true
+}
+
+func isSpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 // ResolveEnv expands "secret:NAME" references into plaintext values.
