@@ -72,8 +72,8 @@ MCP server 继承 Claude Code 启动时的项目目录作为 cwd，这就是 pro
 | `rdev_read` / `rdev_write` | 远端文件读写（替代 heredoc） |
 | `rdev_list` | 结构化列目录（替代 `ls` + 解析文本） |
 | `rdev_sync` | rsync push/pull |
-| `rdev_session` | 每 host 的 `cwd`/`env`/`remote_dir` 粘性状态 + 连接状态 |
-| `rdev_secrets` | 凭据注册 + 全局脱敏 |
+| `rdev_session` | 每 host 的 `cwd`/`env`/`remote_dir`/`secrets` 粘性状态 + 连接状态 |
+| `rdev_secrets` | 凭据注册 + 全局脱敏（也可在 `rdev_session` 里声明路径,自动注册） |
 
 ## 核心设计决策
 
@@ -157,6 +157,18 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 ```
 值经 agent 连接读取，直接进 store —— 不落本地磁盘、不进对话记录。
 不带 `host` 则读本地文件；**注意两侧凭据可能不同**，注册错的值会导致远端明文不被脱敏（假通过）。
+
+**声明式注册**（免去每个会话手动重注册）：store 是内存态的（有意为之，明文不落盘），
+但那意味着每开一个新 MCP 会话都得重新注册一遍——而**忘记注册的凭据就是会原样进对话记录的凭据**。
+所以 hosts.json 里可以只存**路径**：
+
+```jsonc
+{"name":"dev", "addr":"user@h", "secrets":{"gftoken":"~/.nexus/auth/gongfeng/key"}}
+```
+
+首次连接该主机时经 agent 读取并注册,**在第一条命令执行之前**完成——延迟注册会留下一个明文可外泄的窗口。
+存的是路径不是值,所以本地磁盘上依然没有任何凭据。已显式注册过的同名 secret 不会被覆盖(手动调用优先)。
+读取失败只在 stderr 警告、不阻断连接:一个凭据文件缺失不该让整台机器不可用。
 
 按长度降序替换：当一个 secret 是另一个的子串时，先替换短的会让长的漏出片段。
 
@@ -296,6 +308,7 @@ rdev hosts list                    # 含 scope / remote_dir / env
 rdev hosts add dev user@h -port 36000 -save          # project scope
 rdev hosts add prod user@h -global -save             # 全局可见
 rdev hosts add dev user@h -env PROXY=http://p:1 -remote-dir '~/.cache/myrdev' -no-login -save
+rdev hosts add dev user@h -secret gftoken='~/.nexus/auth/gongfeng/key' -save   # 只存路径,不存值
 
 # secrets 是 MCP 功能（store 在内存里，按进程隔离）。
 # CLI 这两条只用来验证凭据路径解析正确、且脱敏真的覆盖了远端的值：
@@ -320,7 +333,6 @@ rdev secrets check dev gftoken -path ~/.nexus/auth/gongfeng/key -- env    # → 
   所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够,不必为此起 job。
   真正缺的是长任务的**持续**推送——那个场景本来就该用 job + `job_logs`,不打算在 exec 上再造一套。
 - **`job_wait` 只等单个 job**。批量跑 N 个要 N 次调用串行等，缺 `wait_any` / 多 id 版本。
-- **secrets 不跨进程**。store 在内存里（有意为之，不落盘），但每个新 MCP 会话都要重新注册。
 - **`proto.Version` 仍是 1**。本轮加了 `job_rm` / `list` / `-state`，旧 agent 遇到新 op 会报 `unknown op` 而不是被识别为版本不匹配。靠 SHA-256 比对会自动重传，所以实际不会踩到——但如果哪天要支持「host 比 agent 新」，这里得先动。
 
 ## 开发

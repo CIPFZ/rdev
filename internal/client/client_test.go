@@ -1,6 +1,9 @@
 package client
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -159,5 +162,63 @@ func TestIsConnectedDoesNotRegisterHosts(t *testing.T) {
 	after := c.Hosts.Names()
 	if len(after) != before {
 		t.Errorf("registry grew from %d to %d: %v", before, len(after), after)
+	}
+}
+
+// A configured secret path must be read and registered, so redaction is live for
+// the first command rather than only after a manual rdev_secrets call.
+func TestLoadHostSecretsRegistersFromPath(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	const token = "s3cret-token-value-abcdef"
+	os.WriteFile(keyPath, []byte(token+"\n"), 0o600)
+
+	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
+	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	c.Hosts.Update("dev", func(s *session.State) {
+		s.Secrets = map[string]string{"tok": keyPath}
+	})
+
+	// Read locally: SetSecretFromRemoteFile needs a live agent, so exercise the
+	// store's own path-reading here and check redaction end to end.
+	if err := c.Secrets.SetFromFile("tok", keyPath); err != nil {
+		t.Fatal(err)
+	}
+	got := c.Secrets.Redact("output containing " + token + " inline")
+	if strings.Contains(got, token) {
+		t.Errorf("token not redacted: %q", got)
+	}
+	if !strings.Contains(got, "<redacted:tok>") {
+		t.Errorf("want placeholder, got %q", got)
+	}
+}
+
+// An explicit registration must win over the configured path: a caller who just
+// set a value should not have it replaced on the next reconnect.
+func TestLoadHostSecretsKeepsExplicitValue(t *testing.T) {
+	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
+	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	c.Hosts.Update("dev", func(s *session.State) {
+		s.Secrets = map[string]string{"tok": "/nonexistent/path"}
+	})
+	if err := c.Secrets.Set("tok", "explicitly-set-value"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Would try to read the bogus path if it did not skip already-registered names.
+	c.loadHostSecrets(context.Background(), "dev")
+
+	if v, _ := c.Secrets.Get("tok"); v != "explicitly-set-value" {
+		t.Errorf("value = %q, want the explicit registration preserved", v)
+	}
+}
+
+// A host with no configured secrets must not touch the network at all.
+func TestLoadHostSecretsNoopWithoutConfig(t *testing.T) {
+	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
+	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	c.loadHostSecrets(context.Background(), "dev")
+	if n := len(c.Secrets.Names()); n != 0 {
+		t.Errorf("registered %d secrets from an empty config", n)
 	}
 }

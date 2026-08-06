@@ -524,6 +524,7 @@ type SessionIn struct {
 	Cwd        string            `json:"cwd,omitempty" jsonschema:"Sticky working directory inherited by later calls on this host."`
 	Env        map[string]string `json:"env,omitempty" jsonschema:"Sticky environment variables merged into later calls."`
 	LoginShell *bool             `json:"login_shell,omitempty" jsonschema:"Default login-shell behaviour for this host."`
+	Secrets    map[string]string `json:"secrets,omitempty" jsonschema:"Credential files on this host to register for redaction on first connect, as {\"gftoken\": \"~/.nexus/auth/gongfeng/key\"}. Only the path is saved; the value is read over the connection each session and never reaches local disk."`
 	Scope      string            `json:"scope,omitempty" jsonschema:"Where to save: 'project' writes ./.rdev/hosts.json so the host is only visible while working in this directory, 'global' writes ~/.rdev/hosts.json. Defaults to the host's current scope, or project for a new host."`
 	Persist    bool              `json:"persist,omitempty" jsonschema:"Save the host registry to the scope's file."`
 }
@@ -536,8 +537,10 @@ type HostOut struct {
 	Cwd        string            `json:"cwd,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	LoginShell bool              `json:"login_shell"`
-	Scope      string            `json:"scope"`
-	Connected  bool              `json:"connected" jsonschema:"True when a pooled ssh connection to this host is already open, so the next call skips setup."`
+	// Secrets reports the configured credential paths, never their values.
+	Secrets   map[string]string `json:"secrets,omitempty"`
+	Scope     string            `json:"scope"`
+	Connected bool              `json:"connected" jsonschema:"True when a pooled ssh connection to this host is already open, so the next call skips setup."`
 }
 
 type SessionOut struct {
@@ -552,7 +555,9 @@ func registerSession(s *mcp.Server, c *client.Client) {
 		Name: "rdev_session",
 		Description: "Inspect or update per-host state. Setting cwd once removes the need to repeat it. " +
 			"Hosts saved with scope 'project' live in ./.rdev/hosts.json and are only reachable while " +
-			"working in that directory, which is the right choice for a machine that belongs to one codebase.",
+			"working in that directory, which is the right choice for a machine that belongs to one codebase. " +
+			"Use 'secrets' to declare credential files that should be registered for redaction automatically on " +
+			"every connect, so a token is masked without having to remember rdev_secrets each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionIn) (*mcp.CallToolResult, SessionOut, error) {
 		isNew := false
 		if in.Host != "" {
@@ -603,7 +608,7 @@ func registerSession(s *mcp.Server, c *client.Client) {
 			c.Hosts.SetScope(in.Host, scope)
 		}
 
-		if in.Host != "" && (in.Cwd != "" || len(in.Env) > 0 || in.LoginShell != nil) {
+		if in.Host != "" && (in.Cwd != "" || len(in.Env) > 0 || in.LoginShell != nil || len(in.Secrets) > 0) {
 			if _, err := c.Hosts.Host(in.Host); err != nil {
 				return nil, SessionOut{}, err
 			}
@@ -616,6 +621,9 @@ func registerSession(s *mcp.Server, c *client.Client) {
 				}
 				if in.LoginShell != nil {
 					st.LoginShell = *in.LoginShell
+				}
+				if len(in.Secrets) > 0 {
+					st.Secrets = session.MergeEnv(st.Secrets, in.Secrets)
 				}
 			})
 		}
@@ -650,6 +658,7 @@ func registerSession(s *mcp.Server, c *client.Client) {
 			out.Hosts = append(out.Hosts, HostOut{
 				Name: h.Name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
 				Cwd: st.Cwd, Env: st.Env, LoginShell: st.LoginShell,
+				Secrets:   st.Secrets,
 				Scope:     string(c.Hosts.ScopeOf(n)),
 				Connected: c.IsConnected(n),
 			})

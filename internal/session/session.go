@@ -29,6 +29,9 @@ type State struct {
 	// ~/.local/bin (uv, pipx, cargo) are invisible. Paying a small startup cost
 	// beats "command not found" on a tool that is plainly installed.
 	LoginShell bool `json:"login_shell"`
+	// Secrets maps a secret name to a file path on this host, read on first
+	// connect. Paths only; values never touch local disk.
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 // Scope identifies which config file a host is defined in.
@@ -81,6 +84,15 @@ type hostEntry struct {
 	// plain bool, "omitempty" would drop it and Load would restore the true
 	// default, silently discarding the caller's choice.
 	LoginShell *bool `json:"login_shell,omitempty"`
+	// Secrets names credential files on this host to register for redaction on
+	// first connect, as {"gftoken": "~/.nexus/auth/gongfeng/key"}.
+	//
+	// Only the path is stored. The value is read over the agent connection when
+	// the host is first used, so no plaintext reaches local disk -- which is the
+	// whole reason the store is in-memory. Without this, every new session had to
+	// re-register by hand, and a credential nobody remembered to register is a
+	// credential that leaks into a transcript verbatim.
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 // Load reads the global registry and then the project one, so a project can
@@ -138,7 +150,7 @@ func (r *Registry) loadFile(path string, scope Scope) error {
 		r.mu.Unlock()
 		// Apply persisted state in one update so a host loaded from disk starts
 		// with exactly the context it was saved with.
-		if e.Cwd != "" || len(e.Env) > 0 || e.LoginShell != nil {
+		if e.Cwd != "" || len(e.Env) > 0 || e.LoginShell != nil || len(e.Secrets) > 0 {
 			r.Update(e.Name, func(s *State) {
 				if e.Cwd != "" {
 					s.Cwd = e.Cwd
@@ -148,6 +160,9 @@ func (r *Registry) loadFile(path string, scope Scope) error {
 				}
 				if e.LoginShell != nil {
 					s.LoginShell = *e.LoginShell
+				}
+				if len(e.Secrets) > 0 {
+					s.Secrets = MergeEnv(s.Secrets, e.Secrets)
 				}
 			})
 		}
@@ -195,6 +210,12 @@ func (r *Registry) Save(scope Scope) error {
 			if !st.LoginShell {
 				no := false
 				e.LoginShell = &no
+			}
+			if len(st.Secrets) > 0 {
+				e.Secrets = make(map[string]string, len(st.Secrets))
+				for k, v := range st.Secrets {
+					e.Secrets[k] = v
+				}
 			}
 		}
 		hf.Hosts = append(hf.Hosts, e)
@@ -308,6 +329,12 @@ func (r *Registry) State(name string) State {
 		cp.Env = make(map[string]string, len(st.Env))
 		for k, v := range st.Env {
 			cp.Env[k] = v
+		}
+	}
+	if len(st.Secrets) > 0 {
+		cp.Secrets = make(map[string]string, len(st.Secrets))
+		for k, v := range st.Secrets {
+			cp.Secrets[k] = v
 		}
 	}
 	return cp

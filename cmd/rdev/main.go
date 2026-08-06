@@ -121,7 +121,8 @@ USAGE
   rdev write   <host> <path> [-mode 644]        (content from stdin)
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]
   rdev hosts   [list|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
-                                       [-env K=V]... [-no-login] [-global] [-save]]
+                                       [-env K=V]... [-secret NAME=PATH]...
+                                       [-no-login] [-global] [-save]]
   rdev secrets set-from-file <name> <path> [-host H]
   rdev secrets check <host> <name> [-path P] -- <argv...>
 
@@ -553,6 +554,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			Cwd        string            `json:"cwd,omitempty"`
 			Env        map[string]string `json:"env,omitempty"`
 			LoginShell bool              `json:"login_shell"`
+			Secrets    map[string]string `json:"secrets,omitempty"`
 			Scope      string            `json:"scope"`
 		}
 		var rows []row
@@ -564,7 +566,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			st := c.Hosts.State(n)
 			rows = append(rows, row{
 				h.Name, h.Addr, h.Port, h.RemoteDir,
-				st.Cwd, st.Env, st.LoginShell, string(c.Hosts.ScopeOf(n)),
+				st.Cwd, st.Env, st.LoginShell, st.Secrets, string(c.Hosts.ScopeOf(n)),
 			})
 		}
 		return printJSON(rows)
@@ -572,12 +574,12 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 
 	if args[0] == "add" {
 		fs, err := parseFlags(args[1:], map[string]bool{"save": true, "global": true, "no-login": true},
-			map[string]bool{"env": true})
+			map[string]bool{"env": true, "secret": true})
 		if err != nil {
 			return err
 		}
 		if len(fs.pos) < 2 {
-			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-no-login] [-global] [-save]")
+			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-global] [-save]")
 		}
 		// Project scope is the default: a host registered while working in a repo
 		// almost always belongs to that repo. -global opts into cross-project
@@ -601,14 +603,28 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			}
 			env[k] = v
 		}
+		// Only the path is recorded; the value is read over the connection each
+		// session, so no credential lands in hosts.json.
+		secretPaths := map[string]string{}
+		for _, kv := range fs.repeat["secret"] {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				return fmt.Errorf("-secret expects NAME=PATH, got %q", kv)
+			}
+			secretPaths[k] = v
+		}
+
 		cwd := fs.str("cwd")
-		if cwd != "" || len(env) > 0 || fs.bools["no-login"] {
+		if cwd != "" || len(env) > 0 || len(secretPaths) > 0 || fs.bools["no-login"] {
 			c.Hosts.Update(fs.pos[0], func(st *session.State) {
 				if cwd != "" {
 					st.Cwd = cwd
 				}
 				if len(env) > 0 {
 					st.Env = session.MergeEnv(st.Env, env)
+				}
+				if len(secretPaths) > 0 {
+					st.Secrets = session.MergeEnv(st.Secrets, secretPaths)
 				}
 				if fs.bools["no-login"] {
 					st.LoginShell = false

@@ -97,7 +97,44 @@ func (c *Client) conn(ctx context.Context, hostName string) (*transport.Conn, er
 	c.mu.Lock()
 	c.conns[host.Name] = conn
 	c.mu.Unlock()
+
+	// Register this host's declared credential files before returning the
+	// connection, so the very first command already has redaction in place. Doing
+	// it lazily would leave a window where a token could be echoed verbatim.
+	c.loadHostSecrets(ctx, host.Name)
 	return conn, nil
+}
+
+// loadHostSecrets reads the credential files a host declares and registers them
+// for redaction.
+//
+// Only paths are persisted, so the plaintext is fetched over the agent connection
+// and never touches local disk -- that is what makes an in-memory store workable
+// across sessions instead of requiring a manual re-register every time.
+//
+// Failures are deliberately quiet: a missing or unreadable credential file must not
+// stop the host from being usable, and the caller learns about it from the
+// unredacted output rather than from a failed dial. Already-registered names are
+// left alone so an explicit rdev_secrets call wins over the config.
+func (c *Client) loadHostSecrets(ctx context.Context, hostName string) {
+	st := c.Hosts.State(hostName)
+	if len(st.Secrets) == 0 {
+		return
+	}
+	for name, path := range st.Secrets {
+		if name == "" || path == "" {
+			continue
+		}
+		if _, exists := c.Secrets.Get(name); exists {
+			continue
+		}
+		if err := c.SetSecretFromRemoteFile(ctx, hostName, name, path); err != nil {
+			// Surfaced on stderr rather than swallowed: an unredacted credential is
+			// worth a warning, and stderr does not corrupt the MCP stdout stream.
+			fmt.Fprintf(os.Stderr, "rdev: warning: secret %q from %s:%s not registered: %v\n",
+				name, hostName, path, err)
+		}
+	}
 }
 
 // do sends a request, retrying once on transport failure.
