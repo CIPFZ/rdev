@@ -540,3 +540,55 @@ func TestShellQuoteSurvivesConcatenation(t *testing.T) {
 		}
 	}
 }
+
+// A stale agent must be rejected at the handshake with a version mismatch rather
+// than answering later requests with "unknown op", which reads as a protocol bug
+// instead of a stale binary.
+func TestHandshakeRejectsWrongProtocolVersion(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+
+	done := make(chan error, 1)
+	go func() {
+		resp, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		if err != nil {
+			done <- err
+			return
+		}
+		// Mirror Dial's check.
+		if resp.Ping == nil || resp.Ping.Version != proto.Version {
+			done <- fmt.Errorf("agent protocol %d, want %d", resp.Ping.Version, proto.Version)
+			return
+		}
+		done <- nil
+	}()
+
+	var req proto.Request
+	if err := requests.Decode(&req); err != nil {
+		t.Fatal(err)
+	}
+	// A version-1 agent, i.e. one built before job_rm/list/-state existed.
+	sendReply(t, replies, &proto.Response{
+		ID: req.ID, OK: true,
+		Ping: &proto.PingResult{Version: 1, OS: "linux", Arch: "amd64"},
+	})
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a version-1 agent should be rejected")
+		}
+		if !strings.Contains(err.Error(), "protocol") {
+			t.Errorf("err = %v, want it to name the protocol mismatch", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handshake never completed")
+	}
+}
+
+// Version must advance when ops are added, or a stale agent is indistinguishable
+// from a current one.
+func TestProtocolVersionCoversNewOps(t *testing.T) {
+	if proto.Version < 2 {
+		t.Errorf("Version = %d, but job_rm/list/-state/multi-wait were added after 1", proto.Version)
+	}
+}

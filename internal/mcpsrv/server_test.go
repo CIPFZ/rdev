@@ -427,3 +427,70 @@ func TestToJobOutCarriesOrphanState(t *testing.T) {
 		t.Errorf("ChildPID = %d, want 4242", out.ChildPID)
 	}
 }
+
+// Waiting on several ids must reach the wait path rather than being rejected as a
+// missing id, and each job's outcome comes back separately.
+func TestJobWaitAcceptsIDsWithoutSingleID(t *testing.T) {
+	cs := connect(t, newTestClient())
+
+	// No host is reachable here, so this fails at dial -- but a validation error
+	// would mean ids never got past the argument check.
+	isErr, msg := callTool(t, cs, "rdev_job_wait", JobWaitIn{
+		Host: "user@unreachable.invalid", IDs: []string{"a", "b"},
+	}, nil)
+	if !isErr {
+		t.Skip("unexpectedly reached a host")
+	}
+	if strings.Contains(msg, "job id required") {
+		t.Errorf("ids was not accepted: %q", msg)
+	}
+}
+
+func TestJobWaitStillRequiresAnID(t *testing.T) {
+	cs := connect(t, newTestClient())
+	isErr, msg := callTool(t, cs, "rdev_job_wait", JobWaitIn{Host: "dev"}, nil)
+	if !isErr {
+		t.Fatal("a wait with neither id nor ids should be rejected")
+	}
+	if !strings.Contains(msg, "job id required") {
+		t.Errorf("err = %q, want it to say an id is required", msg)
+	}
+}
+
+// The multi-job shape has to survive the schema: ids must be an array and the
+// result must carry a per-job list.
+func TestJobWaitSchemaExposesIDsArray(t *testing.T) {
+	cs := connect(t, newTestClient())
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "rdev_job_wait" {
+			continue
+		}
+		b, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Type json.RawMessage `json:"type"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(b, &schema); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := schema.Properties["ids"]; !ok {
+			t.Fatal("ids is missing from the rdev_job_wait schema")
+		}
+		if got := string(schema.Properties["ids"].Type); !strings.Contains(got, "array") {
+			t.Errorf("ids type = %s, want array", got)
+		}
+		if _, ok := schema.Properties["wait_any"]; !ok {
+			t.Error("wait_any is missing from the rdev_job_wait schema")
+		}
+		return
+	}
+	t.Fatal("rdev_job_wait not found")
+}

@@ -1380,3 +1380,254 @@ func TestReadTailBeyondScanCap(t *testing.T) {
 	}
 	t.Logf("returned %d lines under a capped scan", len(lines))
 }
+
+// Waiting on N jobs used to cost N serial blocking calls, each re-sending the
+// same context. One call now covers a batch under a shared deadline.
+func TestJobWaitManyReturnsAllOutcomes(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	// Two jobs with different exit codes, so results cannot be confused.
+	var ids []string
+	for _, code := range []int{0, 3} {
+		resp := handleSafely(&proto.Request{
+			Op: proto.OpJobStart,
+			Job: &proto.JobParams{
+				Spec: &proto.ExecParams{Argv: []string{"sh", "-c", fmt.Sprintf("exit %d", code)}},
+			},
+		}, state)
+		if !resp.OK {
+			t.Fatalf("job_start: %s", resp.Err)
+		}
+		ids = append(ids, resp.Job.Info.ID)
+	}
+
+	res, err := jobWait(&proto.JobParams{IDs: ids, WaitTimeoutSec: 20}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TimedOut {
+		t.Error("TimedOut set although both jobs finish immediately")
+	}
+	if len(res.Waited) != 2 {
+		t.Fatalf("got %d results, want one per requested id", len(res.Waited))
+	}
+
+	byID := map[string]*proto.WaitedJob{}
+	for _, w := range res.Waited {
+		byID[w.ID] = w
+	}
+	for i, want := range []int{0, 3} {
+		w := byID[ids[i]]
+		if w == nil {
+			t.Fatalf("no result for %s", ids[i])
+		}
+		if w.Err != "" {
+			t.Errorf("%s: unexpected err %q", ids[i], w.Err)
+			continue
+		}
+		if w.Info.State != proto.JobExited {
+			t.Errorf("%s: state = %q, want exited", ids[i], w.Info.State)
+		}
+		if w.Info.ExitCode != want {
+			t.Errorf("%s: exit = %d, want %d", ids[i], w.Info.ExitCode, want)
+		}
+	}
+}
+
+// One unknown id must not fail the whole call: the other jobs still have useful
+// answers, and a batch assembled from several places can easily carry a stale id.
+func TestJobWaitManyReportsBadIDPerJob(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	resp := handleSafely(&proto.Request{
+		Op:  proto.OpJobStart,
+		Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"true"}}},
+	}, state)
+	good := resp.Job.Info.ID
+
+	res, err := jobWait(&proto.JobParams{IDs: []string{good, "no-such-job"}, WaitTimeoutSec: 20}, state)
+	if err != nil {
+		t.Fatalf("a bad id should be reported per-job, not fail the call: %v", err)
+	}
+	if len(res.Waited) != 2 {
+		t.Fatalf("got %d results, want 2", len(res.Waited))
+	}
+	for _, w := range res.Waited {
+		switch w.ID {
+		case good:
+			if w.Err != "" {
+				t.Errorf("good job reported err %q", w.Err)
+			}
+		case "no-such-job":
+			if w.Err == "" {
+				t.Error("unknown id should carry an err")
+			}
+		}
+	}
+}
+
+// wait_any lets a caller react to the first finisher -- usually the first failure
+// in a batch -- without waiting out the slowest job.
+func TestJobWaitAnyReturnsBeforeSlowJob(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+
+	start := func(argv ...string) string {
+		resp := handleSafely(&proto.Request{
+			Op:  proto.OpJobStart,
+			Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: argv}},
+		}, state)
+		if !resp.OK {
+			t.Fatalf("job_start: %s", resp.Err)
+		}
+		return resp.Job.Info.ID
+	}
+	fast := start("true")
+	slow := start("sleep", "30")
+
+	begin := time.Now()
+	res, err := jobWait(&proto.JobParams{
+		IDs: []string{slow, fast}, WaitAny: true, WaitTimeoutSec: 20,
+	}, state)
+	elapsed := time.Since(begin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("waited %v; wait_any should return on the first finisher", elapsed)
+	}
+	if res.TimedOut {
+		t.Error("TimedOut set although one job finished")
+	}
+
+	// Every requested job is still reported, the unfinished one as running.
+	if len(res.Waited) != 2 {
+		t.Fatalf("got %d results, want 2", len(res.Waited))
+	}
+	var sawExited, sawRunning bool
+	for _, w := range res.Waited {
+		switch w.Info.State {
+		case proto.JobExited:
+			sawExited = true
+		case proto.JobRunning:
+			sawRunning = true
+		}
+	}
+	if !sawExited || !sawRunning {
+		t.Errorf("want one exited and one running, got %+v, %+v", res.Waited[0].Info, res.Waited[1].Info)
+	}
+
+	jobStop(&proto.JobParams{ID: slow, Signal: "KILL"}, state)
+}
+
+// A duplicated id would otherwise be polled twice per round for no benefit.
+func TestJobWaitManyDeduplicates(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+	resp := handleSafely(&proto.Request{
+		Op:  proto.OpJobStart,
+		Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"true"}}},
+	}, state)
+	id := resp.Job.Info.ID
+
+	res, err := jobWait(&proto.JobParams{IDs: []string{id, id, "", id}, WaitTimeoutSec: 20}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Waited) != 1 {
+		t.Errorf("got %d results, want 1 after dedup", len(res.Waited))
+	}
+}
+
+func TestJobWaitManyRejectsNoUsableIDs(t *testing.T) {
+	if _, err := jobWait(&proto.JobParams{IDs: []string{"", ""}}, t.TempDir()); err == nil {
+		t.Error("a list of empty ids should error rather than wait on nothing")
+	}
+}
+
+// A still-running job at deadline is reported as running, with TimedOut set, and
+// is left untouched so the caller can wait again.
+func TestJobWaitManyTimesOutWithoutAffectingJobs(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
+	resp := handleSafely(&proto.Request{
+		Op:  proto.OpJobStart,
+		Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"sleep", "30"}}},
+	}, state)
+	id := resp.Job.Info.ID
+
+	res, err := jobWait(&proto.JobParams{IDs: []string{id}, WaitTimeoutSec: 1}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TimedOut {
+		t.Error("TimedOut should be set when the budget expires")
+	}
+	if res.Waited[0].Info.State != proto.JobRunning {
+		t.Errorf("state = %q, want running: the wait must not disturb the job", res.Waited[0].Info.State)
+	}
+
+	jobStop(&proto.JobParams{ID: id, Signal: "KILL"}, state)
+}
+
+// The limit is applied before metadata is read, which is what makes listing a
+// host with thousands of jobs cheap.
+func TestJobListLimitAndTotals(t *testing.T) {
+	state := t.TempDir()
+	root := filepath.Join(state, "jobs")
+	os.MkdirAll(root, 0o755)
+	for i := 0; i < 12; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("2026010%d-000000-%04x", i%10, i))
+		os.MkdirAll(dir, 0o755)
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			ID: filepath.Base(dir), Argv: []string{"x"}, PID: 999999,
+			StartedAt: time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC).Format(time.RFC3339),
+		})
+	}
+
+	res, err := jobList(&proto.JobParams{Limit: 5}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.List) != 5 {
+		t.Errorf("got %d jobs, want 5", len(res.List))
+	}
+	if res.Total != 12 {
+		t.Errorf("Total = %d, want 12 so a caller knows what it did not see", res.Total)
+	}
+	if !res.Truncated {
+		t.Error("Truncated should be set when the limit hid jobs")
+	}
+	// Newest first.
+	for i := 1; i < len(res.List); i++ {
+		if res.List[i-1].StartedAt < res.List[i].StartedAt {
+			t.Errorf("results are not newest-first at %d", i)
+		}
+	}
+}
+
+func TestJobListUnlimitedReportsNoTruncation(t *testing.T) {
+	state := t.TempDir()
+	root := filepath.Join(state, "jobs")
+	os.MkdirAll(root, 0o755)
+	for i := 0; i < 3; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("20260101-00000%d-aaaa", i))
+		os.MkdirAll(dir, 0o755)
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			ID: filepath.Base(dir), Argv: []string{"x"}, PID: 999999,
+			StartedAt: "2026-01-01T00:00:00Z",
+		})
+	}
+	res, err := jobList(&proto.JobParams{}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Truncated {
+		t.Error("Truncated set although everything fit under the default limit")
+	}
+	if res.Total != 3 || len(res.List) != 3 {
+		t.Errorf("Total = %d, len = %d, want 3 and 3", res.Total, len(res.List))
+	}
+}
