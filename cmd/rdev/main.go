@@ -74,8 +74,12 @@ func main() {
 		err = cmdJob(ctx, c, os.Args[2:])
 	case "read":
 		err = cmdRead(ctx, c, os.Args[2:])
+	case "ls":
+		err = cmdList(ctx, c, os.Args[2:])
 	case "write":
 		err = cmdWrite(ctx, c, os.Args[2:])
+	case "secrets":
+		err = cmdSecrets(ctx, c, os.Args[2:])
 	case "sync":
 		err = cmdSync(ctx, c, os.Args[2:])
 	case "hosts":
@@ -106,15 +110,20 @@ USAGE
   rdev ping    <host>
   rdev exec    <host> [-cwd DIR] [-timeout N] -- <argv...>
   rdev job     start  <host> [-cwd DIR] [-label L] -- <argv...>
-  rdev job     list   <host>
+  rdev job     list   <host> [-limit N]
   rdev job     status <host> <job-id>
   rdev job     logs   <host> <job-id> [-stream stdout|stderr] [-tail N] [-grep S]
-  rdev job     wait   <host> <job-id> [-timeout N] [-tail N]
+  rdev job     wait   <host> <job-id>... [-any] [-timeout N] [-tail N]
   rdev job     stop   <host> <job-id> [-signal TERM|KILL] [-grace N]
+  rdev job     rm     <host> [<job-id>] [-older-than SEC] [-keep-last N]
   rdev read    <host> <path> [-limit N]
+  rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]
-  rdev hosts   [list|add <name> <addr> [-port N] [-cwd DIR] [-global] [-save]]
+  rdev hosts   [list|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
+                                       [-env K=V]... [-no-login] [-global] [-save]]
+  rdev secrets set-from-file <name> <path> [-host H]
+  rdev secrets check <host> <name> [-path P] -- <argv...>
 
 HOST
   A registered alias, or an ssh destination like user@1.2.3.4:2222.
@@ -277,14 +286,18 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(info)
 
 	case "list":
-		if len(rest) < 1 {
-			return errors.New("usage: rdev job list <host>")
-		}
-		jobs, err := c.JobList(ctx, rest[0])
+		fs, err := parseFlags(rest, nil, nil)
 		if err != nil {
 			return err
 		}
-		return printJSON(jobs)
+		if len(fs.pos) < 1 {
+			return errors.New("usage: rdev job list <host> [-limit N]")
+		}
+		res, err := c.JobList(ctx, fs.pos[0], fs.num("limit"))
+		if err != nil {
+			return err
+		}
+		return printJSON(res)
 
 	case "status":
 		if len(rest) < 2 {
@@ -329,20 +342,51 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(info)
 
 	case "wait":
-		fs, err := parseFlags(rest, nil, nil)
+		fs, err := parseFlags(rest, map[string]bool{"any": true}, nil)
 		if err != nil {
 			return err
 		}
 		if len(fs.pos) < 2 {
-			return errors.New("usage: rdev job wait <host> <job-id> [-timeout N] [-tail N]")
+			return errors.New("usage: rdev job wait <host> <job-id>... [-any] [-timeout N] [-tail N]")
 		}
-		res, err := c.JobWait(ctx, client.JobWaitOptions{
-			Host: fs.pos[0], ID: fs.pos[1],
-			TimeoutSec: fs.num("timeout"), TailOnExit: fs.num("tail"),
-		})
+		opts := client.JobWaitOptions{
+			Host:       fs.pos[0],
+			WaitAny:    fs.bools["any"],
+			TimeoutSec: fs.num("timeout"),
+			TailOnExit: fs.num("tail"),
+		}
+		// Several ids share one deadline in a single call, rather than costing a
+		// blocking round trip each.
+		if len(fs.pos) == 2 {
+			opts.ID = fs.pos[1]
+		} else {
+			opts.IDs = fs.pos[1:]
+		}
+
+		res, err := c.JobWait(ctx, opts)
 		if err != nil {
 			return err
 		}
+
+		if len(res.Waited) > 0 {
+			if err := printJSON(res); err != nil {
+				return err
+			}
+			if res.TimedOut {
+				return fmt.Errorf("still running after %dms; wait again", res.WaitedMS)
+			}
+			// Exit non-zero if any job failed, so shell && / || works off a batch.
+			for _, w := range res.Waited {
+				if w.Err != "" {
+					return fmt.Errorf("job %s: %s", w.ID, w.Err)
+				}
+				if w.Info != nil && w.Info.ExitCode != 0 {
+					os.Exit(w.Info.ExitCode)
+				}
+			}
+			return nil
+		}
+
 		if res.Logs != "" {
 			fmt.Fprintln(os.Stderr, res.Logs)
 		}
@@ -357,11 +401,52 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 			os.Exit(res.Info.ExitCode)
 		}
 		return nil
+
+	case "rm":
+		fs, err := parseFlags(rest, nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 1 {
+			return errors.New("usage: rdev job rm <host> [<job-id>] [-older-than SEC] [-keep-last N]")
+		}
+		opts := client.JobRmOptions{
+			Host:         fs.pos[0],
+			OlderThanSec: fs.num("older-than"),
+			KeepLast:     fs.num("keep-last"),
+		}
+		if len(fs.pos) > 1 {
+			opts.ID = fs.pos[1]
+		}
+		res, err := c.JobRm(ctx, opts)
+		if err != nil {
+			return err
+		}
+		return printJSON(res)
 	}
 	return fmt.Errorf("unknown job subcommand %q", sub)
 }
 
 // ---------- files ----------
+
+func cmdList(ctx context.Context, c *client.Client, args []string) error {
+	fs, err := parseFlags(args, nil, nil)
+	if err != nil {
+		return err
+	}
+	if len(fs.pos) < 1 {
+		return errors.New("usage: rdev ls <host> [<path>] [-limit N]")
+	}
+	path := "."
+	if len(fs.pos) > 1 {
+		path = fs.pos[1]
+	}
+	res, err := c.List(ctx, fs.pos[0], path, fs.num("limit"))
+	if err != nil {
+		return err
+	}
+	return printJSON(res)
+}
 
 func cmdRead(ctx context.Context, c *client.Client, args []string) error {
 	fs, err := parseFlags(args, nil, nil)
@@ -461,12 +546,14 @@ func cmdSync(ctx context.Context, c *client.Client, args []string) error {
 func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) == 0 || args[0] == "list" {
 		type row struct {
-			Name       string `json:"name"`
-			Addr       string `json:"addr"`
-			Port       int    `json:"port,omitempty"`
-			Cwd        string `json:"cwd,omitempty"`
-			LoginShell bool   `json:"login_shell"`
-			Scope      string `json:"scope"`
+			Name       string            `json:"name"`
+			Addr       string            `json:"addr"`
+			Port       int               `json:"port,omitempty"`
+			RemoteDir  string            `json:"remote_dir,omitempty"`
+			Cwd        string            `json:"cwd,omitempty"`
+			Env        map[string]string `json:"env,omitempty"`
+			LoginShell bool              `json:"login_shell"`
+			Scope      string            `json:"scope"`
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
@@ -475,18 +562,22 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 				continue
 			}
 			st := c.Hosts.State(n)
-			rows = append(rows, row{h.Name, h.Addr, h.Port, st.Cwd, st.LoginShell, string(c.Hosts.ScopeOf(n))})
+			rows = append(rows, row{
+				h.Name, h.Addr, h.Port, h.RemoteDir,
+				st.Cwd, st.Env, st.LoginShell, string(c.Hosts.ScopeOf(n)),
+			})
 		}
 		return printJSON(rows)
 	}
 
 	if args[0] == "add" {
-		fs, err := parseFlags(args[1:], map[string]bool{"save": true, "global": true}, nil)
+		fs, err := parseFlags(args[1:], map[string]bool{"save": true, "global": true, "no-login": true},
+			map[string]bool{"env": true})
 		if err != nil {
 			return err
 		}
 		if len(fs.pos) < 2 {
-			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-global] [-save]")
+			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-no-login] [-global] [-save]")
 		}
 		// Project scope is the default: a host registered while working in a repo
 		// almost always belongs to that repo. -global opts into cross-project
@@ -496,10 +587,33 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			scope = session.ScopeGlobal
 		}
 
-		c.Hosts.Add(transport.Host{Name: fs.pos[0], Addr: fs.pos[1], Port: fs.num("port")})
+		c.Hosts.Add(transport.Host{
+			Name: fs.pos[0], Addr: fs.pos[1], Port: fs.num("port"),
+			RemoteDir: fs.str("remote-dir"),
+		})
 		c.Hosts.SetScope(fs.pos[0], scope)
-		if cwd := fs.str("cwd"); cwd != "" {
-			c.Hosts.Update(fs.pos[0], func(st *session.State) { st.Cwd = cwd })
+
+		env := map[string]string{}
+		for _, kv := range fs.repeat["env"] {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				return fmt.Errorf("-env expects K=V, got %q", kv)
+			}
+			env[k] = v
+		}
+		cwd := fs.str("cwd")
+		if cwd != "" || len(env) > 0 || fs.bools["no-login"] {
+			c.Hosts.Update(fs.pos[0], func(st *session.State) {
+				if cwd != "" {
+					st.Cwd = cwd
+				}
+				if len(env) > 0 {
+					st.Env = session.MergeEnv(st.Env, env)
+				}
+				if fs.bools["no-login"] {
+					st.LoginShell = false
+				}
+			})
 		}
 		if fs.bools["save"] {
 			if err := c.Hosts.Save(scope); err != nil {
@@ -528,6 +642,85 @@ func cmdPing(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	return printJSON(res)
+}
+
+// cmdSecrets manages the redaction store.
+//
+// The store is in-memory and per-process, so registering a secret here only
+// affects this one command -- useless on its own. It exists to verify that a
+// credential file resolves and that redaction covers the value, which is
+// otherwise only testable through a live MCP session.
+func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: rdev secrets set-from-file <name> <path> [-host H] [-check-cmd ...]")
+	}
+
+	switch args[0] {
+	case "set-from-file":
+		fs, err := parseFlags(args[1:], nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 2 {
+			return errors.New("usage: rdev secrets set-from-file <name> <path> [-host H]")
+		}
+		name, path := fs.pos[0], fs.pos[1]
+
+		if host := fs.str("host"); host != "" {
+			if err := c.SetSecretFromRemoteFile(ctx, host, name, path); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "registered %q from %s:%s\n", name, host, path)
+		} else {
+			if err := c.Secrets.SetFromFile(name, path); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "registered %q from local:%s\n", name, path)
+		}
+		// Never print the value. Length is enough to confirm the right file was
+		// read without putting the credential in a terminal or a CI log.
+		if v, ok := c.Secrets.Get(name); ok {
+			fmt.Fprintf(os.Stderr, "value length %d\n", len(v))
+		}
+		return printJSON(map[string]any{"names": c.Secrets.Names()})
+
+	case "check":
+		// Runs a command and reports whether redaction caught the value, which is
+		// the only way to be sure the registered secret matches the remote one.
+		flagArgs, argv, err := splitArgv(args[1:])
+		if err != nil {
+			return err
+		}
+		fs, err := parseFlags(flagArgs, nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 2 || len(argv) == 0 {
+			return errors.New("usage: rdev secrets check <host> <name> [-path P] -- <argv...>")
+		}
+		host, name := fs.pos[0], fs.pos[1]
+		if path := fs.str("path"); path != "" {
+			if err := c.SetSecretFromRemoteFile(ctx, host, name, path); err != nil {
+				return err
+			}
+		}
+		if _, ok := c.Secrets.Get(name); !ok {
+			return fmt.Errorf("secret %q is not registered; pass -path to read it first", name)
+		}
+		res, err := c.Exec(ctx, client.ExecOptions{Host: host, Argv: argv, TimeoutSec: 60})
+		if err != nil {
+			return err
+		}
+		placeholder := "<redacted:" + name + ">"
+		masked := strings.Contains(res.Stdout, placeholder) || strings.Contains(res.Stderr, placeholder)
+		fmt.Print(res.Stdout)
+		fmt.Fprint(os.Stderr, res.Stderr)
+		return printJSON(map[string]any{"redacted": masked, "exit_code": res.ExitCode})
+
+	case "list":
+		return printJSON(map[string]any{"names": c.Secrets.Names()})
+	}
+	return fmt.Errorf("unknown secrets subcommand %q", args[0])
 }
 
 func printJSON(v any) error {

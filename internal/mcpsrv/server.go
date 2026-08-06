@@ -134,6 +134,11 @@ type JobOut struct {
 	ExitCode  int      `json:"exit_code,omitempty"`
 	StartedAt string   `json:"started_at"`
 	EndedAt   string   `json:"ended_at,omitempty"`
+	// Orphaned and ChildPID surface a job whose supervisor died while the work
+	// kept running. Without them an orphaned job is indistinguishable from a
+	// healthy one here, even though no exit code will ever be recorded for it.
+	Orphaned bool `json:"orphaned,omitempty" jsonschema:"The supervisor died but the command is still running. The job is observable and stoppable, but its exit code is lost."`
+	ChildPID int  `json:"child_pid,omitempty" jsonschema:"The surviving command's pid, reported only when the job is orphaned."`
 }
 
 func toJobOut(j *proto.JobInfo) JobOut {
@@ -143,15 +148,19 @@ func toJobOut(j *proto.JobInfo) JobOut {
 	return JobOut{
 		ID: j.ID, Label: j.Label, Argv: j.Argv, Cwd: j.Cwd, PID: j.PID,
 		State: j.State, ExitCode: j.ExitCode, StartedAt: j.StartedAt, EndedAt: j.EndedAt,
+		Orphaned: j.Orphaned, ChildPID: j.ChildPID,
 	}
 }
 
 type JobListIn struct {
-	Host string `json:"host"`
+	Host  string `json:"host"`
+	Limit int    `json:"limit,omitempty" jsonschema:"Max jobs to return, newest first. Default 100. Applied before metadata is read, so a small limit stays cheap on a host with many jobs."`
 }
 
 type JobListOut struct {
-	Jobs []JobOut `json:"jobs"`
+	Jobs      []JobOut `json:"jobs"`
+	Total     int      `json:"total" jsonschema:"Jobs on the host before limit was applied."`
+	Truncated bool     `json:"truncated,omitempty"`
 }
 
 type JobRefIn struct {
@@ -184,17 +193,42 @@ type JobStopIn struct {
 }
 
 type JobWaitIn struct {
-	Host       string `json:"host"`
-	ID         string `json:"id"`
-	TimeoutSec int    `json:"timeout_sec,omitempty" jsonschema:"How long to block, in seconds. Default 300, capped at 3600. If the job is still running when this expires you get timed_out=true and can call again."`
-	TailOnExit int    `json:"tail_on_exit,omitempty" jsonschema:"Return this many trailing stdout lines with the final status, saving a follow-up rdev_job_logs call."`
+	Host       string   `json:"host"`
+	ID         string   `json:"id,omitempty" jsonschema:"Wait on one job. Use ids to wait on several in a single call."`
+	IDs        []string `json:"ids,omitempty" jsonschema:"Wait on several jobs under one shared deadline. Much cheaper than one call per job."`
+	WaitAny    bool     `json:"wait_any,omitempty" jsonschema:"With ids, return as soon as any one job finishes instead of waiting for all. Use this to react to the first failure in a batch."`
+	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"How long to block, in seconds. Default 300, capped at 3600. If the job is still running when this expires you get timed_out=true and can call again."`
+	TailOnExit int      `json:"tail_on_exit,omitempty" jsonschema:"Return this many trailing stdout lines with the final status, saving a follow-up rdev_job_logs call."`
+}
+
+type WaitedJobOut struct {
+	ID   string `json:"id"`
+	Job  JobOut `json:"job"`
+	Err  string `json:"err,omitempty" jsonschema:"Why this job could not be waited on, usually an unknown id. Other jobs in the same call still report normally."`
+	Logs string `json:"logs,omitempty"`
 }
 
 type JobWaitOut struct {
-	Job      JobOut `json:"job"`
-	TimedOut bool   `json:"timed_out,omitempty" jsonschema:"True when the wait budget expired while the job was still running. The job is unaffected."`
-	WaitedMS int64  `json:"waited_ms"`
-	Logs     string `json:"logs,omitempty"`
+	Job JobOut `json:"job,omitempty" jsonschema:"Set when waiting on a single id."`
+	// Waited is set when ids was used.
+	Waited   []WaitedJobOut `json:"waited,omitempty"`
+	TimedOut bool           `json:"timed_out,omitempty" jsonschema:"True when the wait budget expired while a job was still running. The jobs are unaffected."`
+	WaitedMS int64          `json:"waited_ms"`
+	Logs     string         `json:"logs,omitempty"`
+}
+
+type JobRmIn struct {
+	Host         string `json:"host"`
+	ID           string `json:"id,omitempty" jsonschema:"Remove this one job. Omit to sweep using the filters below."`
+	OlderThanSec int    `json:"older_than_sec,omitempty" jsonschema:"Remove finished jobs that ended more than this many seconds ago."`
+	KeepLast     int    `json:"keep_last,omitempty" jsonschema:"Retain this many of the newest finished jobs. With older_than_sec, a job must satisfy both filters to be removed."`
+}
+
+type JobRmOut struct {
+	Removed      []string `json:"removed,omitempty"`
+	RemovedCount int      `json:"removed_count"`
+	Skipped      []string `json:"skipped,omitempty" jsonschema:"Jobs left alone because they are still running."`
+	FreedBytes   int64    `json:"freed_bytes"`
 }
 
 func registerJobs(s *mcp.Server, c *client.Client) {
@@ -219,12 +253,16 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 		Name:        "rdev_job_list",
 		Description: "List jobs on a host, newest first, including ones started by earlier sessions.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobListIn) (*mcp.CallToolResult, JobListOut, error) {
-		jobs, err := c.JobList(ctx, in.Host)
+		res, err := c.JobList(ctx, in.Host, in.Limit)
 		if err != nil {
 			return nil, JobListOut{}, err
 		}
-		out := JobListOut{Jobs: make([]JobOut, 0, len(jobs))}
-		for _, j := range jobs {
+		out := JobListOut{
+			Jobs:      make([]JobOut, 0, len(res.Jobs)),
+			Total:     res.Total,
+			Truncated: res.Truncated,
+		}
+		for _, j := range res.Jobs {
 			out.Jobs = append(out.Jobs, toJobOut(j))
 		}
 		return nil, out, nil
@@ -281,27 +319,54 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 		Name: "rdev_job_wait",
 		Description: "Block until a job finishes, then return its final state. " +
 			"Prefer this over repeatedly calling rdev_job_status: one call covers a long batch. " +
+			"Pass several ids to wait on a whole batch under one deadline instead of one call per job. " +
 			"It runs on a separate connection, so other commands to the same host still work while waiting. " +
 			"If the job outlives timeout_sec you get timed_out=true and can call again; the job is never affected.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobWaitIn) (*mcp.CallToolResult, JobWaitOut, error) {
 		res, err := c.JobWait(ctx, client.JobWaitOptions{
-			Host: in.Host, ID: in.ID,
+			Host: in.Host, ID: in.ID, IDs: in.IDs, WaitAny: in.WaitAny,
 			TimeoutSec: in.TimeoutSec, TailOnExit: in.TailOnExit,
 		})
 		if err != nil {
 			return nil, JobWaitOut{}, err
 		}
-		return nil, JobWaitOut{
-			Job:      toJobOut(res.Info),
+		out := JobWaitOut{
 			TimedOut: res.TimedOut,
 			WaitedMS: res.WaitedMS,
 			Logs:     res.Logs,
+		}
+		for _, w := range res.Waited {
+			out.Waited = append(out.Waited, WaitedJobOut{
+				ID: w.ID, Job: toJobOut(w.Info), Err: w.Err, Logs: w.Logs,
+			})
+		}
+		if res.Info != nil {
+			out.Job = toJobOut(res.Info)
+		}
+		return nil, out, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "rdev_job_rm",
+		Description: "Delete job records to reclaim disk. Pass an id to remove one job, " +
+			"or older_than_sec / keep_last to sweep finished ones. " +
+			"Job logs are unbounded, so a host running batches needs this periodically. " +
+			"Running jobs are never removed and come back in 'skipped'.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobRmIn) (*mcp.CallToolResult, JobRmOut, error) {
+		res, err := c.JobRm(ctx, client.JobRmOptions{
+			Host: in.Host, ID: in.ID,
+			OlderThanSec: in.OlderThanSec, KeepLast: in.KeepLast,
+		})
+		if err != nil {
+			return nil, JobRmOut{}, err
+		}
+		return nil, JobRmOut{
+			Removed: res.Removed, Skipped: res.Skipped,
+			FreedBytes: res.FreedBytes, RemovedCount: len(res.Removed),
 		}, nil
 	})
 }
 
 // ---------- files ----------
-
 type ReadIn struct {
 	Host   string `json:"host"`
 	Path   string `json:"path" jsonschema:"Remote path. Supports a leading ~."`
@@ -327,6 +392,28 @@ type WriteIn struct {
 type WriteOut struct {
 	Path         string `json:"path"`
 	BytesWritten int    `json:"bytes_written"`
+}
+
+type ListIn struct {
+	Host  string `json:"host"`
+	Path  string `json:"path" jsonschema:"Remote directory. Supports a leading ~."`
+	Limit int    `json:"limit,omitempty" jsonschema:"Max entries to return. Default 1000."`
+}
+
+type EntryOut struct {
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	Mode    string `json:"mode"`
+	IsDir   bool   `json:"is_dir,omitempty"`
+	Symlink bool   `json:"symlink,omitempty" jsonschema:"Size and is_dir describe the link itself, not its target."`
+	ModTime string `json:"mod_time"`
+}
+
+type ListOut struct {
+	Path      string     `json:"path"`
+	Entries   []EntryOut `json:"entries"`
+	Total     int        `json:"total" jsonschema:"Entry count before limit was applied."`
+	Truncated bool       `json:"truncated,omitempty"`
 }
 
 const defaultReadLimit = 65536
@@ -359,6 +446,29 @@ func registerFiles(s *mcp.Server, c *client.Client) {
 			return nil, WriteOut{}, err
 		}
 		return nil, WriteOut{Path: res.Path, BytesWritten: res.BytesWritten}, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "rdev_list",
+		Description: "List a remote directory as structured entries. " +
+			"Prefer this over exec'ing ls: its output format varies by platform and locale, " +
+			"and filenames with spaces or newlines make the parse ambiguous.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListIn) (*mcp.CallToolResult, ListOut, error) {
+		res, err := c.List(ctx, in.Host, in.Path, in.Limit)
+		if err != nil {
+			return nil, ListOut{}, err
+		}
+		out := ListOut{
+			Path: res.Path, Total: res.Total, Truncated: res.Truncated,
+			Entries: make([]EntryOut, 0, len(res.Entries)),
+		}
+		for _, e := range res.Entries {
+			out.Entries = append(out.Entries, EntryOut{
+				Name: e.Name, Size: e.Size, Mode: e.Mode,
+				IsDir: e.IsDir, Symlink: e.Symlink, ModTime: e.ModTime,
+			})
+		}
+		return nil, out, nil
 	})
 }
 
@@ -408,6 +518,7 @@ type SessionIn struct {
 
 	Addr       string            `json:"addr,omitempty" jsonschema:"Register or update the ssh destination, e.g. user@1.2.3.4."`
 	Port       int               `json:"port,omitempty"`
+	RemoteDir  string            `json:"remote_dir,omitempty" jsonschema:"Directory holding the agent binary and job records. Defaults to ~/.cache/rdev. Changing it starts a fresh job history, since existing jobs live under the old path."`
 	Cwd        string            `json:"cwd,omitempty" jsonschema:"Sticky working directory inherited by later calls on this host."`
 	Env        map[string]string `json:"env,omitempty" jsonschema:"Sticky environment variables merged into later calls."`
 	LoginShell *bool             `json:"login_shell,omitempty" jsonschema:"Default login-shell behaviour for this host."`
@@ -419,10 +530,12 @@ type HostOut struct {
 	Name       string            `json:"name"`
 	Addr       string            `json:"addr"`
 	Port       int               `json:"port,omitempty"`
+	RemoteDir  string            `json:"remote_dir,omitempty"`
 	Cwd        string            `json:"cwd,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	LoginShell bool              `json:"login_shell"`
 	Scope      string            `json:"scope"`
+	Connected  bool              `json:"connected" jsonschema:"True when a pooled ssh connection to this host is already open, so the next call skips setup."`
 }
 
 type SessionOut struct {
@@ -447,7 +560,24 @@ func registerSession(s *mcp.Server, c *client.Client) {
 		}
 
 		if in.Host != "" && in.Addr != "" {
-			c.Hosts.Add(transport.Host{Name: in.Host, Addr: in.Addr, Port: in.Port})
+			c.Hosts.Add(transport.Host{
+				Name: in.Host, Addr: in.Addr, Port: in.Port, RemoteDir: in.RemoteDir,
+			})
+		} else if in.Host != "" && in.RemoteDir != "" {
+			// Updating only the state directory: keep the existing destination
+			// rather than requiring the caller to repeat it.
+			h, err := c.Hosts.Host(in.Host)
+			if err != nil {
+				return nil, SessionOut{}, err
+			}
+			h.RemoteDir = in.RemoteDir
+			c.Hosts.Add(h)
+		}
+		// A live connection was started against the previous address and state
+		// directory, so redefining either must retire it rather than let the next
+		// call reuse stale settings.
+		if in.Host != "" && (in.Addr != "" || in.RemoteDir != "") {
+			c.Disconnect(in.Host)
 		}
 
 		// Default a brand-new host to project scope: a machine you register while
@@ -516,9 +646,10 @@ func registerSession(s *mcp.Server, c *client.Client) {
 			}
 			st := c.Hosts.State(n)
 			out.Hosts = append(out.Hosts, HostOut{
-				Name: h.Name, Addr: h.Addr, Port: h.Port,
+				Name: h.Name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
 				Cwd: st.Cwd, Env: st.Env, LoginShell: st.LoginShell,
-				Scope: string(c.Hosts.ScopeOf(n)),
+				Scope:     string(c.Hosts.ScopeOf(n)),
+				Connected: c.IsConnected(n),
 			})
 		}
 		return nil, out, nil

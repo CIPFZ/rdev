@@ -32,13 +32,6 @@ type Client struct {
 
 	mu    sync.Mutex
 	conns map[string]*transport.Conn
-	// waitConns are separate connections used only for blocking job_wait calls.
-	//
-	// Conn.Do serializes request/response pairs over a single agent pipe, so a
-	// multi-minute wait on the shared connection would block every other command
-	// to that host. Waiting gets its own pipe so the caller can still inspect
-	// logs or run commands while a batch finishes.
-	waitConns map[string]*transport.Conn
 	// dialing serializes connection setup per host. MCP dispatches tool calls
 	// concurrently, and without this several goroutines would bootstrap the same
 	// host at once, racing on the agent upload's temp file.
@@ -47,12 +40,11 @@ type Client struct {
 
 func New(lookup AgentLookup) *Client {
 	return &Client{
-		Hosts:     session.NewRegistry(),
-		Secrets:   secrets.New(),
-		lookup:    lookup,
-		conns:     make(map[string]*transport.Conn),
-		waitConns: make(map[string]*transport.Conn),
-		dialing:   make(map[string]*sync.Mutex),
+		Hosts:   session.NewRegistry(),
+		Secrets: secrets.New(),
+		lookup:  lookup,
+		conns:   make(map[string]*transport.Conn),
+		dialing: make(map[string]*sync.Mutex),
 	}
 }
 
@@ -276,18 +268,36 @@ func (c *Client) redactJob(j *proto.JobInfo) *proto.JobInfo {
 	return j
 }
 
-func (c *Client) JobList(ctx context.Context, host string) ([]*proto.JobInfo, error) {
-	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpJobList, Job: &proto.JobParams{}})
+// JobListResult is a page of jobs plus how many exist in total.
+type JobListResult struct {
+	Jobs      []*proto.JobInfo
+	Total     int
+	Truncated bool
+}
+
+// JobList reports jobs, newest first, bounded by limit.
+//
+// The limit is applied on the remote side before metadata is read, so listing a
+// host that has accumulated thousands of jobs stays cheap.
+func (c *Client) JobList(ctx context.Context, host string, limit int) (*JobListResult, error) {
+	resp, err := c.do(ctx, host, &proto.Request{
+		Op:  proto.OpJobList,
+		Job: &proto.JobParams{Limit: limit},
+	})
 	if err != nil {
 		return nil, c.redactErr(err)
 	}
 	if resp.Job == nil {
-		return nil, nil
+		return &JobListResult{}, nil
 	}
 	for _, j := range resp.Job.List {
 		c.redactJob(j)
 	}
-	return resp.Job.List, nil
+	return &JobListResult{
+		Jobs:      resp.Job.List,
+		Total:     resp.Job.Total,
+		Truncated: resp.Job.Truncated,
+	}, nil
 }
 
 func (c *Client) JobStatus(ctx context.Context, host, id string) (*proto.JobInfo, error) {
@@ -350,10 +360,22 @@ func (c *Client) JobStop(ctx context.Context, host, id, signal string, graceSec 
 type JobWaitOptions struct {
 	Host string
 	ID   string
+	// IDs waits on several jobs in one call. Takes precedence over ID.
+	IDs []string
+	// WaitAny returns as soon as one of IDs finishes rather than all of them.
+	WaitAny bool
 	// TimeoutSec bounds the wait. The agent clamps it to one hour.
 	TimeoutSec int
 	// TailOnExit returns this many trailing stdout lines with the final status.
 	TailOnExit int
+}
+
+// WaitedJob is one job's outcome in a multi-job wait.
+type WaitedJob struct {
+	ID   string
+	Info *proto.JobInfo
+	Err  string
+	Logs string
 }
 
 // JobWaitResult is a finished (or still-running) job plus wait bookkeeping.
@@ -362,94 +384,61 @@ type JobWaitResult struct {
 	TimedOut bool
 	WaitedMS int64
 	Logs     string
+	// Waited is populated instead of Info when several ids were requested.
+	Waited []WaitedJob
 }
 
 // JobWait blocks until a job finishes or the wait budget expires.
 //
-// It runs on a dedicated connection so it does not stall other commands to the
-// same host. A TimedOut result leaves the job untouched; call again to keep
-// waiting.
+// It shares the host's pooled connection: requests are multiplexed by ID, so a
+// multi-minute wait no longer blocks other commands and needs no separate pipe.
+// A TimedOut result leaves the job untouched; call again to keep waiting.
+//
+// With several ids, one call covers the batch under a shared deadline rather than
+// costing one blocking round trip per job.
 func (c *Client) JobWait(ctx context.Context, opts JobWaitOptions) (*JobWaitResult, error) {
-	if opts.ID == "" {
+	if opts.ID == "" && len(opts.IDs) == 0 {
 		return nil, errors.New("job id required")
 	}
 
-	conn, err := c.waitConn(ctx, opts.Host)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := conn.Do(ctx, &proto.Request{
+	resp, err := c.do(ctx, opts.Host, &proto.Request{
 		Op: proto.OpJobWait,
 		Job: &proto.JobParams{
 			ID:             opts.ID,
+			IDs:            opts.IDs,
+			WaitAny:        opts.WaitAny,
 			WaitTimeoutSec: opts.TimeoutSec,
 			TailOnExit:     opts.TailOnExit,
 		},
 	})
 	if err != nil {
-		// Drop the wait connection: a failed blocking call may have left the
-		// stream out of sync, and the next wait should start clean.
-		c.dropWaitConn(conn, opts.Host)
 		return nil, c.redactErr(err)
 	}
-	if resp.Job == nil || resp.Job.Info == nil {
-		return nil, fmt.Errorf("job %s not found", opts.ID)
+	if resp.Job == nil {
+		return nil, errors.New("agent returned no wait result")
 	}
-	return &JobWaitResult{
-		Info:     c.redactJob(resp.Job.Info),
+
+	out := &JobWaitResult{
 		TimedOut: resp.Job.TimedOut,
 		WaitedMS: resp.Job.WaitedMS,
 		Logs:     c.Secrets.Redact(resp.Job.Logs),
-	}, nil
-}
-
-// waitConn returns the host's dedicated wait connection, dialing on first use.
-func (c *Client) waitConn(ctx context.Context, hostName string) (*transport.Conn, error) {
-	host, err := c.Hosts.Host(hostName)
-	if err != nil {
-		return nil, err
 	}
-
-	c.mu.Lock()
-	existing, ok := c.waitConns[host.Name]
-	c.mu.Unlock()
-	if ok {
-		return existing, nil
-	}
-
-	// Reuse the same per-host setup lock as the main pool: bootstrap writes a
-	// shared remote temp file regardless of which pool the connection lands in.
-	lock := c.dialLock(host.Name)
-	lock.Lock()
-	defer lock.Unlock()
-
-	c.mu.Lock()
-	existing, ok = c.waitConns[host.Name]
-	c.mu.Unlock()
-	if ok {
-		return existing, nil
-	}
-
-	conn, err := transport.Dial(ctx, host, c.lookup)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	c.waitConns[host.Name] = conn
-	c.mu.Unlock()
-	return conn, nil
-}
-
-func (c *Client) dropWaitConn(conn *transport.Conn, hostName string) {
-	c.mu.Lock()
-	if host, err := c.Hosts.Host(hostName); err == nil {
-		if c.waitConns[host.Name] == conn {
-			delete(c.waitConns, host.Name)
+	if len(resp.Job.Waited) > 0 {
+		for _, w := range resp.Job.Waited {
+			out.Waited = append(out.Waited, WaitedJob{
+				ID:   w.ID,
+				Info: c.redactJob(w.Info),
+				Err:  c.Secrets.Redact(w.Err),
+				Logs: c.Secrets.Redact(w.Logs),
+			})
 		}
+		return out, nil
 	}
-	c.mu.Unlock()
-	conn.Close()
+	if resp.Job.Info == nil {
+		return nil, fmt.Errorf("job %s not found", opts.ID)
+	}
+	out.Info = c.redactJob(resp.Job.Info)
+	return out, nil
 }
 
 // SetSecretFromRemoteFile registers a secret read from a file on a remote host.
@@ -637,18 +626,126 @@ func (c *Client) Ping(ctx context.Context, host string) (*proto.PingResult, erro
 	return resp.Ping, nil
 }
 
+// JobRmOptions selects jobs to delete. Either ID, or a filtered sweep.
+type JobRmOptions struct {
+	Host string
+	// ID removes one job. When empty, the filters below drive a sweep.
+	ID string
+	// OlderThanSec removes finished jobs that ended more than this long ago.
+	OlderThanSec int
+	// KeepLast retains this many of the newest finished jobs. Combined with
+	// OlderThanSec, a job must satisfy both filters to be removed.
+	KeepLast int
+}
+
+// JobRmResult reports what a removal freed.
+type JobRmResult struct {
+	Removed    []string
+	Skipped    []string
+	FreedBytes int64
+}
+
+// JobRm deletes job records to reclaim disk.
+//
+// Job logs are unbounded, so a machine running batches accumulates them until the
+// disk fills. Running jobs are never removed; they come back in Skipped.
+func (c *Client) JobRm(ctx context.Context, opts JobRmOptions) (*JobRmResult, error) {
+	if opts.ID == "" && opts.OlderThanSec <= 0 && opts.KeepLast <= 0 {
+		return nil, errors.New("job_rm needs an id, older_than_sec, or keep_last")
+	}
+	resp, err := c.do(ctx, opts.Host, &proto.Request{
+		Op: proto.OpJobRm,
+		Job: &proto.JobParams{
+			ID:           opts.ID,
+			OlderThanSec: opts.OlderThanSec,
+			KeepLast:     opts.KeepLast,
+		},
+	})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.Job == nil {
+		return nil, errors.New("agent returned no removal result")
+	}
+	return &JobRmResult{
+		Removed:    resp.Job.Removed,
+		Skipped:    resp.Job.Skipped,
+		FreedBytes: resp.Job.FreedBytes,
+	}, nil
+}
+
+// List reads a remote directory as structured entries.
+//
+// Prefer this over exec'ing `ls`: output format varies by platform and locale,
+// and filenames containing spaces or newlines make the parse ambiguous.
+func (c *Client) List(ctx context.Context, host, path string, limit int) (*proto.ListResult, error) {
+	resp, err := c.do(ctx, host, &proto.Request{
+		Op:   proto.OpList,
+		List: &proto.ListParams{Path: path, Limit: limit},
+	})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.List == nil {
+		return nil, errors.New("agent returned no listing")
+	}
+	// A path can carry a credential (a token in a directory name), and so can a
+	// filename, so redact both.
+	resp.List.Path = c.Secrets.Redact(resp.List.Path)
+	for i := range resp.List.Entries {
+		resp.List.Entries[i].Name = c.Secrets.Redact(resp.List.Entries[i].Name)
+	}
+	return resp.List, nil
+}
+
+// IsConnected reports whether a pooled connection to the host is already open.
+//
+// Callers use this to show whether the next request pays setup cost. It does not
+// probe the network: a connection can be pooled but dead, which `do` handles by
+// reconnecting on first failure.
+//
+// Deliberately does not resolve through Hosts.Host: that auto-registers anything
+// shaped like an ssh destination, so a status query on a typo'd name would leave
+// a permanent phantom host in the listing.
+func (c *Client) IsConnected(hostName string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.conns[hostName]
+	return ok
+}
+
+// Disconnect closes and forgets a host's pooled connection.
+//
+// Needed when a host's definition changes: the open agent session was started
+// against the old address and state directory, so reusing it would silently
+// apply stale settings. Reports whether anything was open.
+//
+// Like IsConnected, this looks the name up in the pool directly rather than
+// through Hosts.Host, which would auto-register an unknown ssh-style name.
+// Both are only called with names that are already registered.
+func (c *Client) Disconnect(hostName string) bool {
+	c.mu.Lock()
+	conn, ok := c.conns[hostName]
+	if ok {
+		delete(c.conns, hostName)
+	}
+	c.mu.Unlock()
+
+	if !ok {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // Close tears down all pooled connections.
 func (c *Client) Close() {
 	c.mu.Lock()
-	conns := make([]*transport.Conn, 0, len(c.conns)+len(c.waitConns))
+	conns := make([]*transport.Conn, 0, len(c.conns))
 	for _, conn := range c.conns {
 		conns = append(conns, conn)
 	}
-	for _, conn := range c.waitConns {
-		conns = append(conns, conn)
-	}
 	c.conns = make(map[string]*transport.Conn)
-	c.waitConns = make(map[string]*transport.Conn)
 	c.mu.Unlock()
 
 	for _, conn := range conns {
