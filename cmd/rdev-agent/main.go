@@ -17,15 +17,19 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -59,20 +63,39 @@ func main() {
 		return // unreachable: runSupervisor exits
 	}
 
-	state, err := stateDir()
+	// -state <dir> tells the agent where its job records live. The host passes
+	// the same directory it installed the binary into, so a custom RemoteDir
+	// cannot leave the two sides reading different paths. Absent, it falls back
+	// to the default so an agent started by hand still works.
+	stateArg := ""
+	if len(os.Args) > 2 && os.Args[1] == stateFlag {
+		stateArg = os.Args[2]
+	}
+
+	state, err := stateDir(stateArg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rdev-agent: %v\n", err)
 		os.Exit(1)
 	}
 
 	in := bufio.NewReaderSize(os.Stdin, 1<<20)
-	out := bufio.NewWriter(os.Stdout)
-	defer out.Flush()
+	// Replies are written from many goroutines, so the writer is guarded: a
+	// response is one line, and interleaved writes would corrupt the framing the
+	// host relies on.
+	w := &respWriter{out: bufio.NewWriter(os.Stdout)}
+
+	// Handlers run concurrently. Requests are matched to replies by ID, so a slow
+	// exec no longer blocks unrelated calls to the same host -- previously one
+	// 60-second command stalled every other request, since both this loop and the
+	// host's connection were strictly serial.
+	var wg sync.WaitGroup
+	// Bound concurrency so a burst cannot fork unbounded work on a shared dev box.
+	sem := make(chan struct{}, maxConcurrentRequests)
 
 	for {
 		line, err := readLine(in)
 		if err != nil {
-			return // EOF or transport error: the host closed the pipe.
+			break // EOF or transport error: the host closed the pipe.
 		}
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
@@ -80,11 +103,101 @@ func main() {
 
 		var req proto.Request
 		if err := json.Unmarshal(line, &req); err != nil {
-			writeResp(out, &proto.Response{OK: false, Err: "malformed request: " + err.Error()})
+			w.write(&proto.Response{OK: false, Err: "malformed request: " + err.Error()})
 			continue
 		}
-		writeResp(out, handle(&req, state))
+
+		// job_wait blocks for minutes by design. Letting it hold a concurrency
+		// slot would let a few waits starve everything else, and it is cheap
+		// (a polling sleep), so it runs outside the limit.
+		bounded := req.Op != proto.OpJobWait
+
+		wg.Add(1)
+		go func(req proto.Request) {
+			defer wg.Done()
+			if bounded {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+			}
+			w.write(handleSafely(&req, state))
+		}(req)
 	}
+
+	// Drain briefly so a handler that is already nearly done still gets its reply
+	// out. The wait is bounded because a long op -- job_wait can be budgeted for an
+	// hour -- would otherwise keep this process alive long after the host went
+	// away, leaving an idle agent per dropped connection.
+	//
+	// Abandoning those handlers is safe: the host has closed the pipe, so their
+	// replies have nowhere to go, and jobs are detached with setsid, so no actual
+	// work is tied to this process's lifetime.
+	drained := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(shutdownDrainTimeout):
+	}
+	w.flush()
+}
+
+// shutdownDrainTimeout bounds the post-disconnect drain. Long enough for an
+// in-flight reply to be written, short enough that a dropped ssh session does not
+// leave an agent lingering.
+const shutdownDrainTimeout = 2 * time.Second
+
+// maxConcurrentRequests bounds in-flight handlers. High enough that normal
+// parallel tool calls never queue, low enough that a runaway caller cannot fork
+// hundreds of processes on a machine someone else is using.
+const maxConcurrentRequests = 16
+
+// respWriter serializes replies onto the single stdout pipe.
+type respWriter struct {
+	mu  sync.Mutex
+	out *bufio.Writer
+}
+
+func (w *respWriter) write(resp *proto.Response) {
+	b, err := json.Marshal(resp)
+	if err != nil {
+		b, _ = json.Marshal(&proto.Response{ID: resp.ID, OK: false, Err: "marshal failed: " + err.Error()})
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.out.Write(b)
+	w.out.WriteByte('\n')
+	w.out.Flush() // flush per reply: the host blocks waiting for this line
+}
+
+func (w *respWriter) flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.out.Flush()
+}
+
+// handleSafely runs handle and converts a panic into an error reply.
+//
+// The agent serves every request for a host on one process, and a running job's
+// only observer is that process. A nil map, a bad slice length, or any other
+// latent panic in one handler would otherwise take down the serve loop, drop the
+// host's pooled connections, and leave detached jobs unobservable. Turning it
+// into a failed request keeps the blast radius at the one call that caused it.
+func handleSafely(req *proto.Request, state string) (resp *proto.Response) {
+	defer func() {
+		if r := recover(); r != nil {
+			// The stack goes to stderr, which the host captures and surfaces in
+			// transport errors, so a panic stays diagnosable.
+			fmt.Fprintf(os.Stderr, "rdev-agent: panic handling op %q: %v\n%s\n", req.Op, r, debug.Stack())
+			resp = &proto.Response{
+				ID:  req.ID,
+				OK:  false,
+				Err: fmt.Sprintf("agent panic handling %q: %v", req.Op, r),
+			}
+		}
+	}()
+	return handle(req, state)
 }
 
 // readLine reads one newline-terminated record, growing past bufio's buffer so
@@ -104,16 +217,6 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 			return buf, nil
 		}
 	}
-}
-
-func writeResp(out *bufio.Writer, resp *proto.Response) {
-	b, err := json.Marshal(resp)
-	if err != nil {
-		b, _ = json.Marshal(&proto.Response{ID: resp.ID, OK: false, Err: "marshal failed: " + err.Error()})
-	}
-	out.Write(b)
-	out.WriteByte('\n')
-	out.Flush() // flush per reply: the host blocks waiting for this line
 }
 
 func handle(req *proto.Request, state string) *proto.Response {
@@ -141,6 +244,12 @@ func handle(req *proto.Request, state string) *proto.Response {
 			break
 		}
 		resp.Cat, err = doWrite(req.Cat)
+	case proto.OpList:
+		if req.List == nil {
+			err = errors.New("list params required")
+			break
+		}
+		resp.List, err = doList(req.List)
 	default:
 		// Job ops are dispatched by doJob, which owns the list of names it
 		// handles. Routing anything unrecognized there rather than duplicating
@@ -394,9 +503,10 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 	data := buf[:n]
 
 	res := &proto.ReadResult{Size: info.Size(), EOF: p.Offset+int64(n) >= info.Size()}
-	// Base64 anything that is not valid UTF-8 so binary content survives the
-	// JSON round-trip instead of being mangled into replacement runes.
-	if isPrintableUTF8(data) {
+	// Base64 anything that would not survive the JSON round-trip, so binary or
+	// non-UTF-8 content arrives intact instead of being mangled into
+	// replacement runes.
+	if isJSONSafeText(data) {
 		res.Content = string(data)
 	} else {
 		res.Content = base64.StdEncoding.EncodeToString(data)
@@ -449,43 +559,114 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	return &proto.WriteResult{Path: path, BytesWritten: n}, nil
 }
 
+// readFull fills buf, stopping at EOF rather than treating it as an error.
+//
+// A short read is normal here: the file may have been truncated between Stat and
+// Read, so the caller relies on the returned count instead of the buffer length.
 func readFull(f *os.File, buf []byte) (int, error) {
 	total := 0
 	for total < len(buf) {
 		n, err := f.Read(buf[total:])
 		total += n
-		if err != nil {
-			if err.Error() == "EOF" {
-				return total, nil
-			}
-			if n == 0 {
-				return total, nil
-			}
-		}
-		if n == 0 {
+		if errors.Is(err, io.EOF) || n == 0 {
 			return total, nil
+		}
+		if err != nil {
+			return total, err
 		}
 	}
 	return total, nil
 }
 
-func isPrintableUTF8(b []byte) bool {
-	for _, c := range b {
-		if c == 0 {
-			return false
-		}
+// isJSONSafeText reports whether data can round-trip through JSON unchanged.
+//
+// Both checks matter. encoding/json replaces invalid UTF-8 with U+FFFD, so
+// sending Latin-1 or a truncated multi-byte sequence as a string would silently
+// corrupt the content -- the exact mangling base64 exists to avoid. NUL bytes
+// survive JSON but signal a binary file, where a text reply is not what the
+// caller wants anyway.
+func isJSONSafeText(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
 	}
-	return true
+	return !bytes.ContainsRune(b, 0)
 }
 
-func stateDir() (string, error) {
+// defaultListLimit bounds a listing so a directory with a million entries does
+// not blow up the reply.
+const defaultListLimit = 1000
+
+// doList reads a directory into structured entries.
+//
+// This exists so callers stop running `ls -la` and parsing its output: the format
+// varies by platform and locale, and filenames with spaces or newlines make the
+// parse ambiguous. Entries here carry real types.
+func doList(p *proto.ListParams) (*proto.ListResult, error) {
+	path := expandHome(p.Path)
+	if path == "" {
+		path = "."
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := p.Limit
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+
+	res := &proto.ListResult{Path: path, Total: len(entries)}
+	for _, e := range entries {
+		if len(res.Entries) >= limit {
+			res.Truncated = true
+			break
+		}
+		de := proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
+		// Report the link itself rather than its target: resolving it may dangle
+		// or cross a mount, and the caller can stat the target if it cares.
+		de.Symlink = e.Type()&os.ModeSymlink != 0
+		if info, err := e.Info(); err == nil {
+			de.Size = info.Size()
+			de.Mode = info.Mode().String()
+			de.ModTime = info.ModTime().UTC().Format(time.RFC3339)
+		}
+		res.Entries = append(res.Entries, de)
+	}
+	return res, nil
+}
+
+// stateFlag is the argv[1] value that overrides the agent's state directory.
+const stateFlag = "-state"
+
+// stateDir resolves the directory holding job records, creating it as needed.
+//
+// dir may be empty (use the default), absolute, or "~"-prefixed: the host stores
+// RemoteDir in whichever form the user wrote it, and the agent is the only side
+// that can expand "~" correctly for the remote account.
+func stateDir(dir string) (string, error) {
+	if dir != "" {
+		resolved := expandHome(dir)
+		if !filepath.IsAbs(resolved) {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", err
+			}
+			resolved = filepath.Join(home, resolved)
+		}
+		if err := os.MkdirAll(filepath.Join(resolved, "jobs"), 0o755); err != nil {
+			return "", err
+		}
+		return resolved, nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".cache", "rdev")
-	if err := os.MkdirAll(filepath.Join(dir, "jobs"), 0o755); err != nil {
+	d := filepath.Join(home, ".cache", "rdev")
+	if err := os.MkdirAll(filepath.Join(d, "jobs"), 0o755); err != nil {
 		return "", err
 	}
-	return dir, nil
+	return d, nil
 }

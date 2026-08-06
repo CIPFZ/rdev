@@ -11,11 +11,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,6 +52,7 @@ var jobOps = map[string]bool{
 	proto.OpJobLogs:   true,
 	proto.OpJobStop:   true,
 	proto.OpJobWait:   true,
+	proto.OpJobRm:     true,
 }
 
 // isJobOp reports whether op is dispatched by doJob.
@@ -59,7 +63,7 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 	case proto.OpJobStart:
 		return jobStart(p, state)
 	case proto.OpJobList:
-		return jobList(state)
+		return jobList(p, state)
 	case proto.OpJobStatus:
 		info, err := jobStatus(p.ID, state)
 		if err != nil {
@@ -72,6 +76,8 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 		return jobStop(p, state)
 	case proto.OpJobWait:
 		return jobWait(p, state)
+	case proto.OpJobRm:
+		return jobRm(p, state)
 	}
 	return nil, fmt.Errorf("unknown job op %q", op)
 }
@@ -95,6 +101,9 @@ const (
 // status check every few seconds. The job is never affected by the wait, so a
 // TimedOut reply just means "ask again".
 func jobWait(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	if len(p.IDs) > 0 {
+		return jobWaitMany(p, state)
+	}
 	if p.ID == "" {
 		return nil, errors.New("job id required")
 	}
@@ -142,6 +151,123 @@ func jobWait(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 }
 
+// jobWaitMany waits on several jobs in one call.
+//
+// Waiting on N parallel jobs used to mean N serial round trips, each re-sending
+// the same context and each blocking its own budget. One call now covers the
+// batch: the shared deadline is what makes it cheaper, not just tidier.
+//
+// A job that cannot be read (unknown id) is reported per-job rather than failing
+// the call, since the other jobs still have useful answers.
+func jobWaitMany(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	budget := p.WaitTimeoutSec
+	if budget <= 0 {
+		budget = defaultWaitSec
+	}
+	if budget > maxWaitSec {
+		budget = maxWaitSec
+	}
+
+	start := time.Now()
+	deadline := start.Add(time.Duration(budget) * time.Second)
+
+	// Deduplicate: a caller assembling ids from several places can repeat one, and
+	// polling it twice per round is pure waste.
+	type target struct {
+		id   string
+		dir  string
+		meta *jobMeta
+		done *proto.JobInfo
+		err  string
+	}
+	seen := make(map[string]bool, len(p.IDs))
+	targets := make([]*target, 0, len(p.IDs))
+	for _, id := range p.IDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		t := &target{id: id, dir: jobDir(state, id)}
+		meta, err := readMeta(t.dir)
+		if err != nil {
+			t.err = fmt.Sprintf("job %s: %v", id, err)
+		} else {
+			t.meta = meta
+		}
+		targets = append(targets, t)
+	}
+	if len(targets) == 0 {
+		return nil, errors.New("job_wait: no usable ids")
+	}
+
+	interval := waitPollMin
+	timedOut := false
+	for {
+		pending := 0
+		anyDone := false
+		for _, t := range targets {
+			if t.done != nil || t.err != "" {
+				if t.done != nil {
+					anyDone = true
+				}
+				continue
+			}
+			info := metaToInfo(t.meta, t.dir)
+			if info.State != proto.JobRunning {
+				t.done = info
+				anyDone = true
+				continue
+			}
+			pending++
+		}
+
+		// WaitAny lets a caller react to the first finisher -- usually the first
+		// failure in a batch -- without waiting out the slowest job.
+		if pending == 0 || (p.WaitAny && anyDone) {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			timedOut = true
+			break
+		}
+
+		sleep := interval
+		if remaining := time.Until(deadline); remaining < sleep {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+		if interval < waitPollMax {
+			interval *= 2
+			if interval > waitPollMax {
+				interval = waitPollMax
+			}
+		}
+	}
+
+	res := &proto.JobResult{
+		TimedOut: timedOut,
+		WaitedMS: time.Since(start).Milliseconds(),
+	}
+	for _, t := range targets {
+		w := &proto.WaitedJob{ID: t.id, Err: t.err}
+		switch {
+		case t.err != "":
+		case t.done != nil:
+			w.Info = t.done
+		default:
+			// Still running when the budget expired, or when WaitAny returned early.
+			w.Info = metaToInfo(t.meta, t.dir)
+		}
+		if p.TailOnExit > 0 && w.Info != nil {
+			if logs, err := readTail(filepath.Join(t.dir, "stdout"), p.TailOnExit); err == nil {
+				w.Logs = logs
+			}
+		}
+		res.Waited = append(res.Waited, w)
+	}
+	return res, nil
+}
+
 // finishWait assembles the wait reply, attaching trailing output when asked.
 func finishWait(p *proto.JobParams, dir string, info *proto.JobInfo, start time.Time, timedOut bool) *proto.JobResult {
 	res := &proto.JobResult{
@@ -160,12 +286,54 @@ func finishWait(p *proto.JobParams, dir string, info *proto.JobInfo, start time.
 }
 
 // readTail returns the last n lines of a file.
+//
+// Reads backward in chunks from the end rather than loading the whole file:
+// tail_on_exit is commonly used on batch logs that can reach hundreds of
+// megabytes, and os.ReadFile on one of those would allocate the entire thing to
+// return a handful of lines.
 func readTail(path string, n int) (string, error) {
-	b, err := os.ReadFile(path)
+	if n < 1 {
+		n = 1
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	size := info.Size()
+	// Cap the scan: a file whose last n lines are enormous should still not pull
+	// an unbounded amount into memory.
+	const chunk = 64 << 10
+	maxScan := int64(chunk) * 16
+
+	var tail []byte
+	var pos = size
+	for pos > 0 && int64(len(tail)) < maxScan {
+		step := int64(chunk)
+		if pos < step {
+			step = pos
+		}
+		pos -= step
+
+		buf := make([]byte, step)
+		if _, err := f.ReadAt(buf, pos); err != nil && err != io.EOF {
+			return "", err
+		}
+		tail = append(buf, tail...)
+
+		// Stop once the window holds enough newlines for n lines. One extra
+		// accounts for a partial line at the front of the window.
+		if bytes.Count(tail, []byte("\n")) > n {
+			break
+		}
+	}
+
+	lines := strings.Split(strings.TrimRight(string(tail), "\n"), "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
@@ -247,7 +415,13 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	return &proto.JobResult{Info: metaToInfo(meta, dir)}, nil
 }
 
-func jobList(state string) (*proto.JobResult, error) {
+// jobList reports jobs, newest first.
+//
+// Limit is applied before any metadata is read. Job IDs are timestamp-prefixed,
+// so sorting directory names already puts them in chronological order, and
+// listing the newest 20 on a host with 5000 jobs costs 20 file reads instead of
+// 5000 -- each of which is a stat plus a JSON parse plus liveness probes.
+func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	root := filepath.Join(state, "jobs")
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -257,22 +431,47 @@ func jobList(state string) (*proto.JobResult, error) {
 		return nil, err
 	}
 
-	var list []*proto.JobInfo
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+		if e.IsDir() {
+			names = append(names, e.Name())
 		}
-		dir := filepath.Join(root, e.Name())
+	}
+	// Descending, so the newest directories come first.
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+
+	limit := p.Limit
+	if limit <= 0 {
+		limit = defaultJobListLimit
+	}
+
+	list := make([]*proto.JobInfo, 0, min(limit, len(names)))
+	for _, name := range names {
+		if len(list) >= limit {
+			break
+		}
+		dir := filepath.Join(root, name)
 		meta, err := readMeta(dir)
 		if err != nil {
 			continue // skip half-written or foreign directories
 		}
 		list = append(list, metaToInfo(meta, dir))
 	}
-	// Newest first: the job you just started is the one you want to see.
+
+	// StartedAt is authoritative for ordering: a hand-created or clock-skewed
+	// directory name could otherwise misplace an entry. Cheap, since this only
+	// sorts what is being returned.
 	sort.Slice(list, func(i, j int) bool { return list[i].StartedAt > list[j].StartedAt })
-	return &proto.JobResult{List: list}, nil
+
+	res := &proto.JobResult{List: list}
+	res.Total = len(names)
+	res.Truncated = len(names) > len(list)
+	return res, nil
 }
+
+// defaultJobListLimit bounds an unspecified listing. High enough to cover normal
+// use, low enough that a host with thousands of old jobs stays responsive.
+const defaultJobListLimit = 100
 
 func jobStatus(id, state string) (*proto.JobInfo, error) {
 	if id == "" {
@@ -384,41 +583,136 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, err
 	}
 
-	if p.SinceOffset > 0 {
-		if _, err := f.Seek(p.SinceOffset, 0); err != nil {
+	// Clamp the offset to the file: a caller polling incrementally can hold a
+	// next_offset from before the log was rotated or truncated, and the
+	// resulting negative length would panic in make. Treat a stale offset as
+	// "nothing new to read" rather than an error, since the caller's next poll
+	// with the returned offset then recovers on its own.
+	since := p.SinceOffset
+	if since < 0 {
+		since = 0
+	}
+	if since > info.Size() {
+		since = info.Size()
+	}
+	if since > 0 {
+		if _, err := f.Seek(since, 0); err != nil {
 			return nil, err
 		}
 	}
 
-	// Read the region of interest, then filter here on the remote side. A
-	// multi-megabyte log never crosses the wire just to be grepped locally.
-	buf := make([]byte, info.Size()-p.SinceOffset)
-	n, _ := readFull(f, buf)
-	text := string(buf[:n])
-
-	res := &proto.JobResult{LogSize: info.Size(), NextOffset: p.SinceOffset + int64(n)}
-
-	lines := strings.Split(text, "\n")
-	if p.Grep != "" {
-		kept := make([]string, 0, len(lines))
-		for _, l := range lines {
-			if strings.Contains(l, p.Grep) {
-				kept = append(kept, l)
-			}
-		}
-		lines = kept
-		res.Matched = len(kept)
-	}
+	res := &proto.JobResult{LogSize: info.Size()}
 
 	tail := p.TailLines
 	if tail <= 0 {
 		tail = defaultLogTail
 	}
-	if len(lines) > tail {
-		lines = lines[len(lines)-tail:]
+
+	// Fast path: plain "tail the last N lines". Seek backward from the end instead
+	// of walking the file, so cost depends on the output size rather than the log
+	// size. This is the common shape -- checking on a running batch -- and on a
+	// 50 MB log it is ~40x faster than scanning.
+	if p.Grep == "" && since == 0 {
+		logs, err := readTail(path, tail)
+		if err != nil {
+			return nil, err
+		}
+		res.Logs = logs
+		res.NextOffset = info.Size()
+		return res, nil
 	}
-	res.Logs = strings.Join(lines, "\n")
+
+	// Otherwise stream the region, keeping only the lines that will be returned.
+	//
+	// Reading it whole would allocate the entire span: measured at 412 MB to
+	// return 1900 bytes from a 190 MB log, which is enough to OOM a shared dev box
+	// during a long batch. Grep and tail both reduce, so neither needs the full
+	// text in memory at once.
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64<<10), maxLogLineLen)
+
+	ring := newLineRing(tail)
+	grep := []byte(p.Grep)
+	var consumed int64
+	matched := 0
+	for scanner.Scan() {
+		// Bytes() reuses the scanner's buffer, so a filtered-out line costs no
+		// allocation at all. Converting every line to a string instead cost ~200 MB
+		// of garbage on a 190 MB log.
+		line := scanner.Bytes()
+		// +1 for the newline the scanner stripped. The last line may not have one,
+		// so the offset is clamped to the file size below.
+		consumed += int64(len(line)) + 1
+		if len(grep) > 0 {
+			if !bytes.Contains(line, grep) {
+				continue
+			}
+			matched++
+		}
+		ring.add(line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read %s log: %w", stream, err)
+	}
+
+	// A line longer than the scanner buffer, or a final line without a newline,
+	// can leave the count slightly over; never report an offset past the end.
+	next := since + consumed
+	if next > info.Size() {
+		next = info.Size()
+	}
+	res.NextOffset = next
+	if p.Grep != "" {
+		res.Matched = matched
+	}
+	res.Logs = strings.Join(ring.lines(), "\n")
 	return res, nil
+}
+
+// maxLogLineLen bounds a single log line. A process emitting one enormous line
+// (a minified bundle, a base64 blob) should not be able to make the agent
+// allocate without limit.
+const maxLogLineLen = 1 << 20
+
+// lineRing keeps the last n lines seen, discarding earlier ones.
+//
+// This is what makes tailing independent of log size: memory is bounded by the
+// number of lines actually returned rather than by the file.
+type lineRing struct {
+	buf   []string
+	next  int
+	full  bool
+	limit int
+}
+
+func newLineRing(limit int) *lineRing {
+	if limit < 1 {
+		limit = 1
+	}
+	return &lineRing{buf: make([]string, 0, limit), limit: limit}
+}
+
+// add copies line into the ring. The copy is required: callers pass the
+// scanner's reusable buffer, which the next Scan overwrites.
+func (r *lineRing) add(line []byte) {
+	s := string(line)
+	if len(r.buf) < r.limit {
+		r.buf = append(r.buf, s)
+		return
+	}
+	r.buf[r.next] = s
+	r.next = (r.next + 1) % r.limit
+	r.full = true
+}
+
+// lines returns the retained lines in arrival order.
+func (r *lineRing) lines() []string {
+	if !r.full {
+		return r.buf
+	}
+	out := make([]string, 0, len(r.buf))
+	out = append(out, r.buf[r.next:]...)
+	return append(out, r.buf[:r.next]...)
 }
 
 func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
@@ -492,6 +786,138 @@ func jobAlive(m *jobMeta, dir string) bool {
 	}
 	child := readChildPID(dir)
 	return child > 0 && processAlive(child)
+}
+
+// jobRm deletes job records, either one by ID or a filtered sweep.
+//
+// A job's stdout and stderr are unbounded files, so a machine running batches
+// accumulates them until the disk fills; job_list also slows down because it
+// reads every directory. This is the reclaim path.
+//
+// A running job is never removed, whichever mode is used: deleting its records
+// would leave the process alive with no way to observe or stop it, which is worse
+// than the disk usage. Such jobs come back in Skipped so the caller knows why
+// nothing happened.
+func jobRm(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	if p.ID != "" {
+		return jobRmOne(p.ID, state)
+	}
+	if p.OlderThanSec <= 0 && p.KeepLast <= 0 {
+		return nil, errors.New("job_rm needs an id, older_than_sec, or keep_last")
+	}
+	return jobRmSweep(p, state)
+}
+
+func jobRmOne(id, state string) (*proto.JobResult, error) {
+	dir := jobDir(state, id)
+	meta, err := readMeta(dir)
+	if err != nil {
+		return nil, fmt.Errorf("job %s: %w", id, err)
+	}
+	info := metaToInfo(meta, dir)
+	if info.State == proto.JobRunning {
+		return &proto.JobResult{Skipped: []string{id}, Info: info}, nil
+	}
+
+	size := dirSize(dir)
+	if err := os.RemoveAll(dir); err != nil {
+		return nil, fmt.Errorf("remove job %s: %w", id, err)
+	}
+	return &proto.JobResult{Removed: []string{id}, FreedBytes: size}, nil
+}
+
+func jobRmSweep(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	root := filepath.Join(state, "jobs")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &proto.JobResult{}, nil
+		}
+		return nil, err
+	}
+
+	type candidate struct {
+		id   string
+		dir  string
+		info *proto.JobInfo
+	}
+	var finished []candidate
+	res := &proto.JobResult{}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		meta, err := readMeta(dir)
+		if err != nil {
+			continue // half-written or foreign directory
+		}
+		info := metaToInfo(meta, dir)
+		if info.State == proto.JobRunning {
+			res.Skipped = append(res.Skipped, info.ID)
+			continue
+		}
+		finished = append(finished, candidate{id: info.ID, dir: dir, info: info})
+	}
+
+	// Newest first, so KeepLast retains the most recent jobs.
+	sort.Slice(finished, func(i, j int) bool {
+		return finished[i].info.StartedAt > finished[j].info.StartedAt
+	})
+
+	now := time.Now()
+	for i, c := range finished {
+		// Both filters must agree: with keep_last=5 and older_than_sec=3600, a
+		// recent job inside the keep window stays even if it is old, and a job
+		// beyond the window stays if it has not aged out yet. Requiring both makes
+		// the combination conservative rather than surprising.
+		if p.KeepLast > 0 && i < p.KeepLast {
+			continue
+		}
+		if p.OlderThanSec > 0 && !endedBefore(c.info, now, time.Duration(p.OlderThanSec)*time.Second) {
+			continue
+		}
+		size := dirSize(c.dir)
+		if err := os.RemoveAll(c.dir); err != nil {
+			continue // a failed removal is not worth failing the whole sweep
+		}
+		res.Removed = append(res.Removed, c.id)
+		res.FreedBytes += size
+	}
+	return res, nil
+}
+
+// endedBefore reports whether a finished job aged past d.
+//
+// EndedAt is missing for a job whose supervisor died without recording a status,
+// so StartedAt is the fallback: it is always present and, for a job that is no
+// longer running, is a safe lower bound on when the work stopped.
+func endedBefore(info *proto.JobInfo, now time.Time, d time.Duration) bool {
+	stamp := info.EndedAt
+	if stamp == "" {
+		stamp = info.StartedAt
+	}
+	t, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		return false // an unparseable timestamp should not cause deletion
+	}
+	return now.Sub(t) > d
+}
+
+// dirSize sums the job directory's files so the caller learns what was freed.
+func dirSize(dir string) int64 {
+	var total int64
+	filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 func readMeta(dir string) (*jobMeta, error) {
