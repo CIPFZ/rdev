@@ -1631,3 +1631,86 @@ func TestJobListUnlimitedReportsNoTruncation(t *testing.T) {
 		t.Errorf("Total = %d, len = %d, want 3 and 3", res.Total, len(res.List))
 	}
 }
+
+// A timed-out command must still return what it printed before the kill.
+//
+// This is what makes a bounded exec usable for watching progress: the output up to
+// the deadline is the answer, so a caller does not have to switch to a job just to
+// see whether anything happened. Discarding it would make a timeout indistinguishable
+// from a command that produced nothing.
+func TestExecTimeoutPreservesPartialOutput(t *testing.T) {
+	res, err := doExec(&proto.ExecParams{
+		Argv:       []string{"sh", "-c", "echo early; echo second >&2; sleep 30"},
+		TimeoutSec: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TimedOut {
+		t.Fatal("TimedOut should be set")
+	}
+	if !strings.Contains(res.Stdout, "early") {
+		t.Errorf("stdout = %q, want the pre-kill output retained", res.Stdout)
+	}
+	if !strings.Contains(res.Stderr, "second") {
+		t.Errorf("stderr = %q, want the pre-kill output retained", res.Stderr)
+	}
+	// ExitCode is meaningless for a killed process; TimedOut is the signal.
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 to mark it as unset", res.ExitCode)
+	}
+}
+
+// Truncation accounting must stay correct when a timeout also fires, or a caller
+// cannot tell how much output it did not see.
+func TestExecTimeoutStillReportsTrueOutputSize(t *testing.T) {
+	res, err := doExec(&proto.ExecParams{
+		Argv:           []string{"sh", "-c", "printf 'x%.0s' $(seq 1 5000); sleep 30"},
+		TimeoutSec:     1,
+		MaxOutputBytes: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TimedOut || !res.Truncated {
+		t.Errorf("TimedOut = %v, Truncated = %v, want both", res.TimedOut, res.Truncated)
+	}
+	if len(res.Stdout) != 100 {
+		t.Errorf("len(stdout) = %d, want the 100-byte cap", len(res.Stdout))
+	}
+	if res.StdoutBytes != 5000 {
+		t.Errorf("StdoutBytes = %d, want the true size 5000", res.StdoutBytes)
+	}
+}
+
+// The timeout kill goes to the process group, so a command that backgrounds work
+// does not leave orphans running on the remote after the call returns.
+func TestExecTimeoutKillsGrandchildren(t *testing.T) {
+	// The marker rides along as a shell variable so pgrep can find this test's
+	// process without matching an unrelated sleep.
+	const marker = "rdev_test_orphan_marker"
+	res, err := doExec(&proto.ExecParams{
+		// The inner sleep is a grandchild: killing only the direct child would
+		// leave it running.
+		Argv:       []string{"sh", "-c", marker + "=1 sh -c 'sleep 45' & echo started; wait"},
+		TimeoutSec: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TimedOut {
+		t.Fatal("TimedOut should be set")
+	}
+
+	// Give the kill a moment to be reaped, then confirm nothing survived.
+	time.Sleep(300 * time.Millisecond)
+	check, err := doExec(&proto.ExecParams{
+		Argv: []string{"sh", "-c", "pgrep -f " + marker + " | wc -l"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(check.Stdout); got != "0" {
+		t.Errorf("%s survivors = %s, want 0: the group kill missed a grandchild", marker, got)
+	}
+}

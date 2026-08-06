@@ -314,7 +314,11 @@ rdev secrets check dev gftoken -path ~/.nexus/auth/gongfeng/key -- env    # → 
 
 ## 还没做的
 
-- **`exec` 没有流式输出**。60s 内的命令要跑完才返回。介于「秒级 exec」和「分钟级 job」之间的场景（跑测试看进度）只能起 job 再 poll logs，绕。
+- **`exec` 没有真正的流式输出**。命令跑完(或超时)才返回,期间拿不到增量。
+  不过实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
+  且 kill 走进程组、能覆盖孙进程(测过 `sh -c 'sleep 45' &` 不留孤儿)。
+  所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够,不必为此起 job。
+  真正缺的是长任务的**持续**推送——那个场景本来就该用 job + `job_logs`,不打算在 exec 上再造一套。
 - **`job_wait` 只等单个 job**。批量跑 N 个要 N 次调用串行等，缺 `wait_any` / 多 id 版本。
 - **secrets 不跨进程**。store 在内存里（有意为之，不落盘），但每个新 MCP 会话都要重新注册。
 - **`proto.Version` 仍是 1**。本轮加了 `job_rm` / `list` / `-state`，旧 agent 遇到新 op 会报 `unknown op` 而不是被识别为版本不匹配。靠 SHA-256 比对会自动重传，所以实际不会踩到——但如果哪天要支持「host 比 agent 新」，这里得先动。

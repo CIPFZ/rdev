@@ -75,7 +75,9 @@ func registerExec(s *mcp.Server, c *client.Client) {
 		Description: "Run a command on a remote host and wait for it. " +
 			"argv is a string array that is exec'd directly, so no shell parses it and quoting is never needed. " +
 			"A non-zero exit_code is returned as data, not an error. " +
-			"For commands longer than a minute use rdev_job_start instead.",
+			"On timeout you still get whatever the command printed before it was killed, with timed_out set, " +
+			"so a bounded exec is a reasonable way to peek at a slow command. " +
+			"For anything expected to outlive the timeout use rdev_job_start instead, since a killed command loses its work.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ExecIn) (*mcp.CallToolResult, ExecOut, error) {
 		timeout := in.TimeoutSec
 		if timeout == 0 {

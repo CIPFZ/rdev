@@ -189,6 +189,10 @@ type ExecResult struct {
 	Truncated   bool  `json:"truncated,omitempty"`
 	// TimedOut reports that the child was killed by TimeoutSec rather than
 	// exiting on its own. ExitCode is meaningless in that case.
+	//
+	// Stdout and Stderr still carry whatever was produced before the kill, so a
+	// bounded exec doubles as a way to peek at a slow command. Discarding it would
+	// make a timeout indistinguishable from a command that printed nothing.
 	TimedOut   bool  `json:"timed_out,omitempty"`
 	DurationMS int64 `json:"duration_ms"`
 }
