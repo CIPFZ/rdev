@@ -10,7 +10,13 @@ package proto
 // Version is bumped whenever the wire format changes incompatibly. The host
 // compares it against the agent's reported version during handshake and
 // re-uploads the agent binary on mismatch.
-const Version = 1
+//
+// 2 added job_rm, list, the -state flag, multi-id job_wait, and a job_list limit.
+// A version-1 agent answers those with "unknown op", which is a confusing way to
+// learn the binary is stale; the handshake now says so directly. In practice the
+// SHA-256 comparison replaces an old agent before this matters, so the check is a
+// backstop for the case where the two sides genuinely disagree.
+const Version = 2
 
 // Op names carried in Request.Op.
 const (
@@ -24,6 +30,8 @@ const (
 	OpJobLogs   = "job_logs"
 	OpJobStop   = "job_stop"
 	OpJobWait   = "job_wait"
+	OpJobRm     = "job_rm"
+	OpList      = "list"
 )
 
 // Job states reported by the agent.
@@ -42,6 +50,7 @@ type Request struct {
 	Read *ReadParams  `json:"read,omitempty"`
 	Cat  *WriteParams `json:"write,omitempty"`
 	Job  *JobParams   `json:"job,omitempty"`
+	List *ListParams  `json:"list,omitempty"`
 }
 
 // ExecParams describes a foreground command.
@@ -96,11 +105,17 @@ type WriteParams struct {
 type JobParams struct {
 	// ID identifies an existing job for status, logs, and stop.
 	ID string `json:"id,omitempty"`
+	// IDs waits on several jobs at once in job_wait. Without it, waiting on N
+	// parallel jobs costs N serial calls, each re-sending the same context.
+	IDs []string `json:"ids,omitempty"`
 	// Spec starts a new job. Its TimeoutSec and MaxOutputBytes are ignored:
 	// jobs outlive the request, and their output goes to files on disk.
 	Spec *ExecParams `json:"spec,omitempty"`
 	// Label is a human-readable tag recorded with the job.
 	Label string `json:"label,omitempty"`
+	// WaitAny returns as soon as one of IDs finishes, instead of waiting for all
+	// of them. Useful for reacting to the first failure in a batch.
+	WaitAny bool `json:"wait_any,omitempty"`
 
 	// Stream selects "stdout" or "stderr" for job_logs.
 	Stream string `json:"stream,omitempty"`
@@ -124,6 +139,18 @@ type JobParams struct {
 	// TailOnExit returns this many trailing stdout lines with the final status,
 	// saving a follow-up job_logs round trip.
 	TailOnExit int `json:"tail_on_exit,omitempty"`
+
+	// OlderThanSec removes finished jobs that ended more than this long ago,
+	// instead of removing one job by ID. Job logs are unbounded, so without a
+	// reclaim path the state directory grows for the life of the machine.
+	OlderThanSec int `json:"older_than_sec,omitempty"`
+	// KeepLast retains this many of the most recent finished jobs, removing the
+	// rest. Combined with OlderThanSec, a job must satisfy both to be removed.
+	KeepLast int `json:"keep_last,omitempty"`
+
+	// Limit caps how many jobs job_list returns, newest first. Applied before
+	// metadata is read, so a small limit is cheap on a host with many jobs.
+	Limit int `json:"limit,omitempty"`
 }
 
 // Response is one JSON-encoded line read from the agent's stdout.
@@ -137,6 +164,7 @@ type Response struct {
 	Read *ReadResult  `json:"read,omitempty"`
 	Cat  *WriteResult `json:"write,omitempty"`
 	Job  *JobResult   `json:"job,omitempty"`
+	List *ListResult  `json:"list,omitempty"`
 }
 
 // PingResult reports agent identity for the handshake.
@@ -206,6 +234,10 @@ type JobResult struct {
 	Info *JobInfo   `json:"info,omitempty"`
 	List []*JobInfo `json:"list,omitempty"`
 
+	// Waited holds one entry per requested job when job_wait was given IDs. Each
+	// carries the same Logs treatment as a single wait.
+	Waited []*WaitedJob `json:"waited,omitempty"`
+
 	// Logs fields, set for job_logs.
 	Logs string `json:"logs,omitempty"`
 	// NextOffset is the byte offset to pass as SinceOffset on the next poll.
@@ -220,4 +252,62 @@ type JobResult struct {
 	TimedOut bool `json:"timed_out,omitempty"`
 	// WaitedMS is how long job_wait actually blocked.
 	WaitedMS int64 `json:"waited_ms,omitempty"`
+
+	// Removed lists job IDs deleted by job_rm.
+	Removed []string `json:"removed,omitempty"`
+	// FreedBytes is the disk space reclaimed by job_rm.
+	FreedBytes int64 `json:"freed_bytes,omitempty"`
+	// Skipped lists jobs that matched the filter but were left alone because they
+	// are still running. Removing a live job's records would orphan the process
+	// with no way to observe or stop it.
+	Skipped []string `json:"skipped,omitempty"`
+
+	// Total is the number of jobs on the host before Limit was applied, so a
+	// caller can tell a listing was cut short.
+	Total int `json:"total,omitempty"`
+	// Truncated reports that Limit hid some jobs.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// WaitedJob is one job's outcome in a multi-job wait.
+type WaitedJob struct {
+	ID   string   `json:"id"`
+	Info *JobInfo `json:"info,omitempty"`
+	// Err explains why this particular job could not be waited on (typically an
+	// unknown id). One bad id does not fail the whole call, since the other jobs
+	// still have useful answers.
+	Err string `json:"err,omitempty"`
+	// Logs is the trailing output when TailOnExit was requested.
+	Logs string `json:"logs,omitempty"`
+}
+
+// DirEntry is one item in a directory listing.
+type DirEntry struct {
+	Name string `json:"name"`
+	// Size is the file size in bytes; meaningless for directories.
+	Size  int64  `json:"size"`
+	Mode  string `json:"mode"`
+	IsDir bool   `json:"is_dir,omitempty"`
+	// Symlink marks an entry that is a symbolic link. Size and IsDir describe the
+	// link itself, not its target, since resolving it may cross a mount or dangle.
+	Symlink bool `json:"symlink,omitempty"`
+	// ModTime is RFC3339 in UTC.
+	ModTime string `json:"mod_time"`
+}
+
+// ListParams reads a remote directory.
+type ListParams struct {
+	Path string `json:"path"`
+	// Limit caps the number of entries returned. 0 means the agent default.
+	Limit int `json:"limit,omitempty"`
+}
+
+// ListResult carries a directory listing.
+type ListResult struct {
+	Path    string     `json:"path"`
+	Entries []DirEntry `json:"entries"`
+	// Total is the full entry count before Limit was applied, so a caller can
+	// tell a listing was cut short.
+	Total     int  `json:"total"`
+	Truncated bool `json:"truncated,omitempty"`
 }
