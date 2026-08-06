@@ -203,3 +203,72 @@ func TestScopeDefaultsToGlobalForUnknownHost(t *testing.T) {
 		t.Errorf("ScopeOf() = %q, want global as the default", got)
 	}
 }
+
+// rdev_session reported saved=true while dropping env and login_shell, so a
+// caller's sticky context silently vanished on restart.
+func TestSaveRoundTripsEnvAndLoginShell(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	r := NewRegistry()
+	r.Add(transport.Host{Name: "dev", Addr: "u@h", Port: 36000})
+	r.SetScope("dev", ScopeGlobal)
+	r.Update("dev", func(s *State) {
+		s.Cwd = "~/proj"
+		s.Env = map[string]string{"PROXY": "http://p:1", "TOKEN": "secret:tok"}
+		s.LoginShell = false
+	})
+	if err := r.Save(ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := NewRegistry()
+	if err := fresh.Load(); err != nil {
+		t.Fatal(err)
+	}
+	st := fresh.State("dev")
+	if st.Cwd != "~/proj" {
+		t.Errorf("Cwd = %q, want ~/proj", st.Cwd)
+	}
+	if st.Env["PROXY"] != "http://p:1" {
+		t.Errorf("Env[PROXY] = %q, want it persisted", st.Env["PROXY"])
+	}
+	// A secret reference is stored by name and resolved at request time, so it
+	// must survive verbatim rather than being expanded on save.
+	if st.Env["TOKEN"] != "secret:tok" {
+		t.Errorf("Env[TOKEN] = %q, want the unresolved reference", st.Env["TOKEN"])
+	}
+	if st.LoginShell {
+		t.Error("LoginShell = true, want the saved false to survive")
+	}
+}
+
+// The default is true, so an absent field must not be read as false.
+func TestLoadDefaultsLoginShellTrueWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	r := NewRegistry()
+	r.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	r.SetScope("dev", ScopeGlobal)
+	r.Update("dev", func(s *State) { s.Cwd = "~/x" })
+	if err := r.Save(ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, ".rdev", "hosts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "login_shell") {
+		t.Errorf("a default-true login_shell should not be written: %s", b)
+	}
+
+	fresh := NewRegistry()
+	if err := fresh.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !fresh.State("dev").LoginShell {
+		t.Error("LoginShell = false, want the true default when the field is absent")
+	}
+}

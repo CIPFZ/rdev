@@ -70,6 +70,17 @@ type hostEntry struct {
 	Port      int    `json:"port,omitempty"`
 	RemoteDir string `json:"remote_dir,omitempty"`
 	Cwd       string `json:"cwd,omitempty"`
+	// Env is the host's sticky environment. Persisted so a caller that sets it
+	// once does not have to re-set it every session.
+	//
+	// Values are stored verbatim, including any "secret:NAME" references, which
+	// resolve at request time. Never put a plaintext credential here: this file
+	// is 0600 but it is still a file on disk.
+	Env map[string]string `json:"env,omitempty"`
+	// LoginShell is a pointer so an explicit false survives a round trip. With a
+	// plain bool, "omitempty" would drop it and Load would restore the true
+	// default, silently discarding the caller's choice.
+	LoginShell *bool `json:"login_shell,omitempty"`
 }
 
 // Load reads the global registry and then the project one, so a project can
@@ -125,8 +136,20 @@ func (r *Registry) loadFile(path string, scope Scope) error {
 		r.mu.Lock()
 		r.scopes[e.Name] = scope
 		r.mu.Unlock()
-		if e.Cwd != "" {
-			r.Update(e.Name, func(s *State) { s.Cwd = e.Cwd })
+		// Apply persisted state in one update so a host loaded from disk starts
+		// with exactly the context it was saved with.
+		if e.Cwd != "" || len(e.Env) > 0 || e.LoginShell != nil {
+			r.Update(e.Name, func(s *State) {
+				if e.Cwd != "" {
+					s.Cwd = e.Cwd
+				}
+				if len(e.Env) > 0 {
+					s.Env = MergeEnv(s.Env, e.Env)
+				}
+				if e.LoginShell != nil {
+					s.LoginShell = *e.LoginShell
+				}
+			})
 		}
 	}
 	return nil
@@ -161,6 +184,18 @@ func (r *Registry) Save(scope Scope) error {
 		e := hostEntry{Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir}
 		if st, ok := r.state[name]; ok {
 			e.Cwd = st.Cwd
+			if len(st.Env) > 0 {
+				e.Env = make(map[string]string, len(st.Env))
+				for k, v := range st.Env {
+					e.Env[k] = v
+				}
+			}
+			// Only record a non-default value: writing login_shell:true into
+			// every entry is noise, since true is what an absent field means.
+			if !st.LoginShell {
+				no := false
+				e.LoginShell = &no
+			}
 		}
 		hf.Hosts = append(hf.Hosts, e)
 	}
