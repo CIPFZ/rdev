@@ -541,10 +541,11 @@ func TestShellQuoteSurvivesConcatenation(t *testing.T) {
 	}
 }
 
-// A stale agent must be rejected at the handshake with a version mismatch rather
-// than answering later requests with "unknown op", which reads as a protocol bug
-// instead of a stale binary.
-func TestHandshakeRejectsWrongProtocolVersion(t *testing.T) {
+// An agent older than the host must be rejected at the handshake rather than
+// answering a later request with "unknown op", which reads as a protocol bug
+// instead of a stale binary. The reverse direction is allowed; see
+// TestHandshakeAcceptsNewerCompatibleAgent.
+func TestHandshakeRejectsOlderAgent(t *testing.T) {
 	c, requests, replies, _ := newTestConn(t)
 
 	done := make(chan error, 1)
@@ -555,7 +556,7 @@ func TestHandshakeRejectsWrongProtocolVersion(t *testing.T) {
 			return
 		}
 		// Mirror Dial's check.
-		if resp.Ping == nil || resp.Ping.Version != proto.Version {
+		if !resp.Ping.Compatible(proto.Version) {
 			done <- fmt.Errorf("agent protocol %d, want %d", resp.Ping.Version, proto.Version)
 			return
 		}
@@ -569,7 +570,7 @@ func TestHandshakeRejectsWrongProtocolVersion(t *testing.T) {
 	// A version-1 agent, i.e. one built before job_rm/list/-state existed.
 	sendReply(t, replies, &proto.Response{
 		ID: req.ID, OK: true,
-		Ping: &proto.PingResult{Version: 1, OS: "linux", Arch: "amd64"},
+		Ping: &proto.PingResult{Version: 1, MinVersion: 1, OS: "linux", Arch: "amd64"},
 	})
 
 	select {
@@ -590,5 +591,131 @@ func TestHandshakeRejectsWrongProtocolVersion(t *testing.T) {
 func TestProtocolVersionCoversNewOps(t *testing.T) {
 	if proto.Version < 2 {
 		t.Errorf("Version = %d, but job_rm/list/-state/multi-wait were added after 1", proto.Version)
+	}
+}
+
+// Compatibility is a range, not an exact match. The case that matters is an agent
+// one version ahead of its host: two people sharing a dev box, the newer rdev
+// uploaded the binary last. New ops are additive, so the older host can still work
+// -- rejecting it outright was needless breakage.
+func TestHandshakeAcceptsNewerCompatibleAgent(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+
+	done := make(chan error, 1)
+	go func() {
+		resp, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		if err != nil {
+			done <- err
+			return
+		}
+		if !resp.Ping.Compatible(proto.Version) {
+			done <- fmt.Errorf("rejected: agent %d-%d, host %d",
+				resp.Ping.MinVersion, resp.Ping.Version, proto.Version)
+			return
+		}
+		done <- nil
+	}()
+
+	var req proto.Request
+	if err := requests.Decode(&req); err != nil {
+		t.Fatal(err)
+	}
+	// An agent that speaks one format newer while still serving ours.
+	sendReply(t, replies, &proto.Response{
+		ID: req.ID, OK: true,
+		Ping: &proto.PingResult{Version: proto.Version + 1, MinVersion: proto.MinVersion},
+	})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("a newer agent that still serves our format should be accepted: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handshake never completed")
+	}
+}
+
+func TestPingCompatibleMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		agentMin int
+		agentVer int
+		hostVer  int
+		wantOK   bool
+	}{
+		{"exact match", 1, 2, 2, true},
+		{"agent one ahead, still serves host", 1, 3, 2, true},
+		{"agent far ahead, still serves host", 1, 9, 2, true},
+		{"agent ahead but dropped our format", 3, 4, 2, false},
+		{"agent behind the host", 1, 1, 2, false},
+		// A build predating MinVersion reports 0, which must read as "exactly Version"
+		// rather than "serves everything from 0".
+		{"legacy agent, same version", 0, 2, 2, true},
+		{"legacy agent, older version", 0, 1, 2, false},
+		{"legacy agent, newer version", 0, 3, 2, false},
+	}
+	for _, c := range cases {
+		p := &proto.PingResult{Version: c.agentVer, MinVersion: c.agentMin}
+		if got := p.Compatible(c.hostVer); got != c.wantOK {
+			t.Errorf("%s: agent %d-%d vs host %d = %v, want %v",
+				c.name, c.agentMin, c.agentVer, c.hostVer, got, c.wantOK)
+		}
+	}
+}
+
+func TestPingCompatibleRejectsNil(t *testing.T) {
+	var p *proto.PingResult
+	if p.Compatible(proto.Version) {
+		t.Error("a nil ping must not be treated as compatible")
+	}
+}
+
+// An older agent must be rejected with a message that names the direction and the
+// fix, since the alternative is a confusing "unknown op" partway through a session.
+func TestHandshakeErrorNamesTheFix(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.agentPath = "/home/u/.cache/rdev/rdev-agent"
+
+	done := make(chan error, 1)
+	go func() {
+		resp, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		if err != nil {
+			done <- err
+			return
+		}
+		if !resp.Ping.Compatible(proto.Version) {
+			if resp.Ping.Version < proto.Version {
+				done <- fmt.Errorf(
+					"remote agent at %s speaks protocol %d but this rdev needs %d; "+
+						"it was installed by an older rdev -- run 'make agents && make build' and reconnect",
+					c.agentPath, resp.Ping.Version, proto.Version)
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	var req proto.Request
+	if err := requests.Decode(&req); err != nil {
+		t.Fatal(err)
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: req.ID, OK: true,
+		Ping: &proto.PingResult{Version: 1, MinVersion: 1},
+	})
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a protocol-1 agent should be rejected")
+		}
+		for _, want := range []string{"make agents", c.agentPath} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %q, want it to mention %q", err, want)
+			}
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handshake never completed")
 	}
 }

@@ -7,16 +7,24 @@
 // exists, so keep it when adding ops.
 package proto
 
-// Version is bumped whenever the wire format changes incompatibly. The host
-// compares it against the agent's reported version during handshake and
-// re-uploads the agent binary on mismatch.
+// Version is the wire format this build speaks. It is bumped whenever the format
+// changes in a way an older peer cannot handle.
 //
 // 2 added job_rm, list, the -state flag, multi-id job_wait, and a job_list limit.
-// A version-1 agent answers those with "unknown op", which is a confusing way to
-// learn the binary is stale; the handshake now says so directly. In practice the
-// SHA-256 comparison replaces an old agent before this matters, so the check is a
-// backstop for the case where the two sides genuinely disagree.
 const Version = 2
+
+// MinVersion is the oldest wire format this build can still serve.
+//
+// Compatibility is a range, not an exact match. An agent one version ahead of its
+// host is normally fine -- new ops are additive, and the host simply does not use
+// them -- so rejecting it outright would break the case where two machines share a
+// dev box and the newer rdev uploaded the binary last. The host checks that its own
+// Version falls within the agent's [MinVersion, Version] range and proceeds if it
+// does.
+//
+// Raise this only when support for an older format is genuinely dropped, which
+// forces the peer to upgrade instead of failing at an arbitrary later op.
+const MinVersion = 1
 
 // Op names carried in Request.Op.
 const (
@@ -169,12 +177,36 @@ type Response struct {
 
 // PingResult reports agent identity for the handshake.
 type PingResult struct {
-	Version int    `json:"version"`
-	Binary  string `json:"binary"`
-	Home    string `json:"home"`
-	OS      string `json:"os"`
-	Arch    string `json:"arch"`
-	PID     int    `json:"pid"`
+	// Version is the wire format the agent speaks.
+	Version int `json:"version"`
+	// MinVersion is the oldest format the agent still serves. Zero from a build
+	// that predates the field, which the host reads as "exactly Version".
+	MinVersion int    `json:"min_version,omitempty"`
+	Binary     string `json:"binary"`
+	Home       string `json:"home"`
+	OS         string `json:"os"`
+	Arch       string `json:"arch"`
+	PID        int    `json:"pid"`
+}
+
+// Compatible reports whether an agent advertising this ping can serve a host
+// speaking hostVersion.
+//
+// An agent newer than the host is accepted as long as it still serves the host's
+// format: new ops are additive, so the host just does not use them. An agent older
+// than the host is rejected, because the host may issue an op it does not have --
+// which would otherwise surface as a confusing "unknown op" partway through a
+// session instead of at connect time.
+func (p *PingResult) Compatible(hostVersion int) bool {
+	if p == nil {
+		return false
+	}
+	min := p.MinVersion
+	if min == 0 {
+		// A build predating MinVersion serves exactly one format.
+		min = p.Version
+	}
+	return hostVersion >= min && hostVersion <= p.Version
 }
 
 // ExecResult reports the outcome of a foreground command.

@@ -166,19 +166,30 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		return nil, fmt.Errorf("start agent: %w", err)
 	}
 
-	// Handshake: confirms the binary runs and speaks our protocol version.
+	// Handshake: confirms the binary runs and speaks a format we can use.
 	resp, err := c.Do(ctx, &proto.Request{Op: proto.OpPing})
 	if err != nil {
 		c.Close()
 		return nil, fmt.Errorf("agent handshake: %w", err)
 	}
-	if resp.Ping == nil || resp.Ping.Version != proto.Version {
+	if !resp.Ping.Compatible(proto.Version) {
 		c.Close()
-		got := 0
-		if resp.Ping != nil {
-			got = resp.Ping.Version
+		if resp.Ping == nil {
+			return nil, errors.New("agent handshake returned no identity")
 		}
-		return nil, fmt.Errorf("agent protocol %d, want %d", got, proto.Version)
+		// Name the direction and the fix. An "agent protocol N, want M" alone leaves
+		// the caller guessing which side to update, and the answer is almost always
+		// the same: rebuild so the embedded agent matches.
+		if resp.Ping.Version < proto.Version {
+			return nil, fmt.Errorf(
+				"remote agent at %s speaks protocol %d but this rdev needs %d; "+
+					"it was installed by an older rdev -- run 'make agents && make build' and reconnect",
+				c.agentPath, resp.Ping.Version, proto.Version)
+		}
+		return nil, fmt.Errorf(
+			"remote agent at %s speaks protocol %d-%d and cannot serve this rdev's %d; "+
+				"a newer rdev installed it -- update this rdev to match",
+			c.agentPath, resp.Ping.MinVersion, resp.Ping.Version, proto.Version)
 	}
 	return c, nil
 }

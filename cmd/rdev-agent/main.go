@@ -45,7 +45,8 @@ const (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
-		fmt.Printf("rdev-agent proto=%d %s/%s\n", proto.Version, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("rdev-agent proto=%d-%d %s/%s\n",
+			proto.MinVersion, proto.Version, runtime.GOOS, runtime.GOARCH)
 		return
 	}
 
@@ -255,7 +256,11 @@ func handle(req *proto.Request, state string) *proto.Response {
 		// handles. Routing anything unrecognized there rather than duplicating
 		// the set here means adding a job op cannot be half-wired.
 		if !isJobOp(req.Op) {
-			err = fmt.Errorf("unknown op %q", req.Op)
+			// Say what this most likely means. An unadorned "unknown op" reads as a
+			// protocol bug, when in practice it means the host is newer than the
+			// binary it is talking to.
+			err = fmt.Errorf("unknown op %q (this agent speaks protocol %d; "+
+				"if the host is newer, rebuild and re-upload it)", req.Op, proto.Version)
 			break
 		}
 		if req.Job == nil {
@@ -278,12 +283,13 @@ func doPing() *proto.PingResult {
 	home, _ := os.UserHomeDir()
 	bin, _ := os.Executable()
 	return &proto.PingResult{
-		Version: proto.Version,
-		Binary:  bin,
-		Home:    home,
-		OS:      runtime.GOOS,
-		Arch:    runtime.GOARCH,
-		PID:     os.Getpid(),
+		Version:    proto.Version,
+		MinVersion: proto.MinVersion,
+		Binary:     bin,
+		Home:       home,
+		OS:         runtime.GOOS,
+		Arch:       runtime.GOARCH,
+		PID:        os.Getpid(),
 	}
 }
 
