@@ -158,6 +158,7 @@ USAGE
                                        [-global] [-save]]
   rdev secrets set-from-file <name> <path> [-host H]
   rdev secrets check <host> <name> [-path P] -- <argv...>
+  rdev secrets list
   rdev version                            build id + every embedded agent's SHA-256
 
 HOST
@@ -169,6 +170,10 @@ HOST
 NOTES
   Everything after -- is passed as a literal argv array; no shell parses it,
   so quotes, $(...), and spaces are safe without escaping.
+
+  "secrets" has no "set": the store is in-memory and per-process, so a value
+  registered by a CLI command is gone when it exits. The MCP rdev_secrets tool
+  does offer it, because "rdev serve" stays alive to use the value.
 `)
 }
 
@@ -706,9 +711,17 @@ func cmdPing(ctx context.Context, c *client.Client, args []string) error {
 // affects this one command -- useless on its own. It exists to verify that a
 // credential file resolves and that redaction covers the value, which is
 // otherwise only testable through a live MCP session.
+//
+// There is deliberately no `secrets set <name> <value>`, even though the MCP tool
+// has that action. Not for shell-history reasons, though that is a real secondary
+// concern: it simply cannot work. The MCP action is useful because `rdev serve` is
+// a long-lived process that goes on to use the registered value, whereas this
+// command would register a secret, print its length, and exit -- taking the store
+// with it. Offering it would look like the MCP capability while doing nothing, so
+// the gap is documented instead of filled.
 func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: rdev secrets set-from-file <name> <path> [-host H] [-check-cmd ...]")
+		return errors.New(secretsUsage)
 	}
 
 	switch args[0] {
@@ -776,8 +789,28 @@ func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
 	case "list":
 		return printJSON(map[string]any{"names": c.Secrets.Names()})
 	}
-	return fmt.Errorf("unknown secrets subcommand %q", args[0])
+	// Name the valid subcommands. "unknown secrets subcommand" alone sends the
+	// reader to the source, and the one people reach for -- `set` -- is absent by
+	// design, so silence about it reads as a missing feature.
+	if args[0] == "set" {
+		return errors.New(
+			"rdev has no `secrets set`: this store is in-memory and per-process, so a value " +
+				"registered by one CLI command is gone when it exits.\n" +
+				"To check that a credential file resolves and that redaction covers it:\n" +
+				"  rdev secrets set-from-file <name> <path> [-host H]\n" +
+				"  rdev secrets check <host> <name> [-path P] -- <argv...>\n" +
+				"The MCP rdev_secrets tool does offer action=set, because `rdev serve` is a " +
+				"long-lived process that goes on to use the value.")
+	}
+	return fmt.Errorf("unknown secrets subcommand %q\n%s", args[0], secretsUsage)
 }
+
+// secretsUsage lists what `rdev secrets` actually accepts. Shared by the empty-args
+// and unknown-subcommand paths so the two cannot drift apart.
+const secretsUsage = `usage:
+  rdev secrets set-from-file <name> <path> [-host H]   register from a file and report its length
+  rdev secrets check <host> <name> [-path P] -- <argv...>   run a command and report whether redaction caught the value
+  rdev secrets list                                    names currently registered in this process`
 
 func printJSON(v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")

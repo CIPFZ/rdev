@@ -272,3 +272,40 @@ func TestLoadDefaultsLoginShellTrueWhenAbsent(t *testing.T) {
 		t.Error("LoginShell = false, want the true default when the field is absent")
 	}
 }
+
+// ForceAgentUpload suppresses the downgrade refusal, so it has to survive a save
+// and reload: a flag that silently reverted to false on the next session would
+// bring back the agent flip-flop it was set to stop.
+func TestSaveRoundTripsForceAgentUpload(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	r := NewRegistry()
+	r.Add(transport.Host{Name: "shared", Addr: "u@h", ForceAgentUpload: true})
+	r.SetScope("shared", ScopeGlobal)
+	r.Add(transport.Host{Name: "normal", Addr: "u@h2"})
+	r.SetScope("normal", ScopeGlobal)
+	if err := r.Save(ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := NewRegistry()
+	if err := fresh.Load(); err != nil {
+		t.Fatal(err)
+	}
+	h, err := fresh.Host("shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.ForceAgentUpload {
+		t.Error("ForceAgentUpload did not survive the round trip")
+	}
+	// And the default stays off: forcing uploads everywhere would defeat the check.
+	other, err := fresh.Host("normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.ForceAgentUpload {
+		t.Error("a host that never asked for it must not come back with ForceAgentUpload set")
+	}
+}

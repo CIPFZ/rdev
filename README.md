@@ -425,9 +425,25 @@ rdev hosts add dev user@h -env PROXY=http://p:1 -remote-dir '~/.cache/myrdev' -n
 rdev hosts add dev user@h -secret apptoken='~/.config/myapp/token' -save   # 只存路径,不存值
 
 # secrets 是 MCP 功能（store 在内存里，按进程隔离）。
-# CLI 这两条只用来验证凭据路径解析正确、且脱敏真的覆盖了远端的值：
+# CLI 这三条只用来验证凭据路径解析正确、且脱敏真的覆盖了远端的值：
 rdev secrets set-from-file apptoken ~/.config/myapp/token -host dev   # 只打印长度，不打印值
 rdev secrets check dev apptoken -path ~/.config/myapp/token -- env    # → {"redacted": true}
+rdev secrets list                                                     # 本进程已注册的名字
+```
+
+**CLI 故意没有 `secrets set <name> <value>`**，尽管 MCP 侧有 `action=set`。理由不是「避免密钥进 shell history」（那是个次要顾虑），而是它**做不到**：CLI 会注册、打印长度、然后进程退出，store 随之消失 —— 看起来提供了 MCP 的能力，实际什么也没做。MCP 侧有意义是因为 `rdev serve` 是长生命周期进程，注册完还会接着用那个值。
+
+所以 `rdev secrets set` 现在返回一条解释这件事的错误,并指向真正能用的三条:
+
+```
+$ rdev secrets set -name x -value y
+rdev: rdev has no `secrets set`: this store is in-memory and per-process, so a value
+registered by one CLI command is gone when it exits.
+To check that a credential file resolves and that redaction covers it:
+  rdev secrets set-from-file <name> <path> [-host H]
+  rdev secrets check <host> <name> [-path P] -- <argv...>
+The MCP rdev_secrets tool does offer action=set, because `rdev serve` is a
+long-lived process that goes on to use the value.
 ```
 
 `--` 之后的一切都作为字面 argv 传递，本地 shell 也不会二次解析。
