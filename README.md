@@ -105,6 +105,7 @@ Claude Code (本地)
 
 Go 静态编译 → 远端**零运行时依赖**（实测目标机 tmux/screen/jq 全无、无 Go）。
 四个平台的 agent 二进制 `go:embed` 进 rdev，按远端 `uname` 自动选择，SHA-256 比对决定是否重传。
+支持的组合见[平台支持](#平台支持)。
 
 ### 3. 作业用 supervisor 模式托管
 
@@ -135,6 +136,8 @@ supervisor 在 detached session 内，比 SSH 连接活得久，负责 `wait()` 
 - **退避轮询**。agent 侧 200ms → 3s 退避，跑一小时的 job 每分钟几次 stat，而不是每秒十次。
 
 `tail_on_exit` 顺带回传尾部日志，省一次 `job_logs` 往返。
+
+批量场景传 `ids` 而不是 `id`，N 个 job 共享一个 deadline，省掉 N 次串行等待。加 `wait_any` 则任一结束就返回——批量跑最想知道的往往是**第一个失败**，等全部结束才发现就浪费了。
 
 ### 5. login shell 用位置参数 trampoline
 
@@ -212,6 +215,21 @@ job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直�
 
 **运行中的 job 永不删除**，会出现在 `skipped` 里——删掉记录会让进程继续跑而无法观测和停止，比占磁盘更糟。
 
+### 9. 协议兼容是区间，不是精确相等
+
+`proto.Version` 现在是 2（`job_rm` / `list` / `-state` / 多 id `job_wait` / `job_list limit`），并且多了一个 `MinVersion`。
+
+握手不再要求两侧版本号相等，而是检查 **host 自己的 `Version` 落在 agent 的 `[MinVersion, Version]` 区间内**。因为新 op 是加法：agent 比 host 新完全可用，host 只是不去调那些新 op 而已。而「agent 比 host 新」恰恰是最常见的情况——两个人共用一台开发机，谁最后连上就由谁的 rdev 覆盖了远端二进制。要是坚持精确相等，另一个人立刻就连不上了。
+
+反过来 agent 比 host 旧才是真问题（新 op 会返回 `unknown op`），所以错误消息**分方向给结论**，而不是丢一个 `protocol N, want M` 让人猜该动哪边：
+
+```
+remote agent at ... speaks protocol 1 but this rdev needs 2;
+it was installed by an older rdev -- run 'make agents && make build' and reconnect
+```
+
+`MinVersion` 只在真的放弃老格式支持时才抬——抬早了等于把还能用的 peer 挡在门外。
+
 ## 实测验证
 
 全部在真实远端（TencentOS x86_64，SSH 跳板 36000 端口）跑过。
@@ -244,6 +262,9 @@ job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直�
 | **job_wait 阻塞** | ✅ 5s 的 job 阻塞 6s 返回 `exited exit_code=3` |
 | **wait 不阻塞其他命令** | ✅ 同 MCP 进程内 wait 阻塞 12s 期间 `exec` 0.2s 返回 |
 | **wait 超时不影响 job** | ✅ `timed_out=true` + `state=running`，可再等 |
+| **多 id `job_wait`** | ✅ `ids` 共享一个 deadline，逐 job 报结果；坏 id 只影响那一条 |
+| **`wait_any`** | ✅ 快的 job 一结束就返回，不等慢的 |
+| **握手接受更新的 agent** | ✅ host v2 连 `[1,3]` 的 agent 通过；agent 比 host 旧则报错并指明该重建哪边 |
 
 **本轮新增能力（agent 直连管道实测 + 单测）：**
 
@@ -269,8 +290,8 @@ job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直�
 
 **性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
 
-**单元测试：**`go test ./... -race` 全绿，132 项
-（agent 65、mcpsrv 20、session 13、transport 12、secrets 11、client 11）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
+**单元测试：**`go test ./... -race` 全绿，163 项
+（agent 79、mcpsrv 23、session 13、secrets 14、transport 20、client 14）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
 
 开发过程中测试抓到 7 个真 bug：
 1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
@@ -333,6 +354,24 @@ rdev secrets check dev gftoken -path ~/.nexus/auth/gongfeng/key -- env    # → 
 
 `--` 之后的一切都作为字面 argv 传递，本地 shell 也不会二次解析。
 
+## 平台支持
+
+本地和远端是**两套独立要求**，agent 只被交叉编译成四个 POSIX 组合。
+
+| | 本地（跑 rdev） | 远端（跑 rdev-agent） |
+|---|---|---|
+| **Linux** amd64 / arm64 | ✅ | ✅ |
+| **macOS** amd64 / arm64 | ✅ | ✅ |
+| **Windows** | ❌ 未验证 | ❌ 不支持 |
+
+所以 macOS ↔ Linux 四种方向任意组合都可以（本地 mac 连 Linux 开发机是主用法，实测在 TencentOS x86_64 上跑过；mac 连 mac、Linux 连 Linux 也在支持范围内）。**Windows 两侧都不行**，原因不同：
+
+**远端不支持**，是硬性的。agent 的作业模型建立在 POSIX 进程语义上——`Setsid` 把 job detach 出去（决策 3），`syscall.Kill(-pgid)` 按进程组停子进程，`Kill(pid, 0)` 探活。这些在 `GOOS=windows` 下根本不编译，`mapPlatform` 也只认 `uname -s` 的 `linux` / `darwin`，其他值直接报 `unsupported remote OS`。另外 login shell trampoline（决策 5）也假定了 `bash -lc`。Windows 上要重做的不是几个 syscall，而是整套 job 生命周期（Job Objects 而不是进程组），属于另一个工程。
+
+**本地未验证**，是选择性的。`rdev` 自身能 `GOOS=windows` 编过，但它调用外部 `ssh` 并依赖 `ControlMaster` 做连接复用——OpenSSH for Windows 至今不支持连接复用，而复用正是热连接 0.55s 的来源。`rdev_sync` 还依赖 `rsync`，Windows 不随系统提供。没在 Windows 上跑过，所以不宣称支持；WSL2 里当 Linux 本地端用是可行的路。
+
+**要连 Windows 远端的话**，那台机器上的 WSL2 / Cygwin sshd 是可行的绕法（对 rdev 来说它就是个 Linux 远端），但没测过。
+
 ## v1 明确不做
 
 - ❌ 交互式 PTY / TUI 转发 — 复杂度高，Claude 用不上，人肉需求直接用 `ssh`
@@ -347,8 +386,7 @@ rdev secrets check dev gftoken -path ~/.nexus/auth/gongfeng/key -- env    # → 
   且 kill 走进程组、能覆盖孙进程(测过 `sh -c 'sleep 45' &` 不留孤儿)。
   所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够,不必为此起 job。
   真正缺的是长任务的**持续**推送——那个场景本来就该用 job + `job_logs`,不打算在 exec 上再造一套。
-- **`job_wait` 只等单个 job**。批量跑 N 个要 N 次调用串行等，缺 `wait_any` / 多 id 版本。
-- **`proto.Version` 仍是 1**。本轮加了 `job_rm` / `list` / `-state`，旧 agent 遇到新 op 会报 `unknown op` 而不是被识别为版本不匹配。靠 SHA-256 比对会自动重传，所以实际不会踩到——但如果哪天要支持「host 比 agent 新」，这里得先动。
+- **Windows 两侧都不支持**，见[平台支持](#平台支持)。远端是硬性的（job 模型依赖 POSIX 进程组），本地是没验证过（缺 ssh 连接复用和 rsync）。
 
 ## 开发
 
