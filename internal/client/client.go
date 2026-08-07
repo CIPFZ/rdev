@@ -233,7 +233,9 @@ func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error
 
 	resp.Exec.Stdout = c.Secrets.Redact(resp.Exec.Stdout)
 	resp.Exec.Stderr = c.Secrets.Redact(resp.Exec.Stderr)
-	return &ExecResult{ExecResult: resp.Exec, Cwd: params.Cwd}, nil
+	// Cwd too: it is echoed back from the request, and a path under a credential
+	// directory is a plausible way for a registered value to appear here.
+	return &ExecResult{ExecResult: resp.Exec, Cwd: c.Secrets.Redact(params.Cwd)}, nil
 }
 
 // buildExecParams layers session state under per-call values and resolves any
@@ -657,10 +659,15 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	runErr := cmd.Run()
 
 	res := &SyncResult{
-		Stdout:  c.Secrets.Redact(out.String()),
-		Stderr:  c.Secrets.Redact(errBuf.String()),
-		DryRun:  opts.DryRun,
-		Command: "rsync " + strings.Join(args, " "),
+		Stdout: c.Secrets.Redact(out.String()),
+		Stderr: c.Secrets.Redact(errBuf.String()),
+		DryRun: opts.DryRun,
+		// Redacted like the streams above. This echoes the assembled argv, and argv
+		// is caller-supplied: an --exclude pattern or a path can carry a credential.
+		// Leaving one field of the same struct unscrubbed is exactly the accident
+		// decision 6 exists to prevent -- redaction has to be at the boundary, not
+		// per field, or the next field added inherits the gap.
+		Command: c.Secrets.Redact("rsync " + strings.Join(args, " ")),
 	}
 	var ee *exec.ExitError
 	if errors.As(runErr, &ee) {

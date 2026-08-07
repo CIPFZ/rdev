@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -211,6 +212,56 @@ func TestLoadHostSecretsKeepsExplicitValue(t *testing.T) {
 
 	if v, _ := c.Secrets.Get("tok"); v != "explicitly-set-value" {
 		t.Errorf("value = %q, want the explicit registration preserved", v)
+	}
+}
+
+// Every string a caller gets back has to be redacted, not just the obvious streams.
+// SyncResult.Command echoes the assembled rsync argv, and argv is caller-supplied --
+// an --exclude pattern or a path can carry a credential. It shipped unredacted while
+// Stdout and Stderr, one struct literal above it, were scrubbed.
+//
+// Asserted per field via reflection rather than by listing the fields, so a field
+// added later is covered without anyone remembering to extend this test. That is the
+// actual defect class here: redaction applied per field instead of at the boundary.
+func TestSyncResultRedactsEveryStringField(t *testing.T) {
+	c := newTestClient()
+	const tok = "s3cret-passphrase-value-123456"
+	if err := c.Secrets.Set("tok", tok); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shaped like what Sync builds: the secret arrives through --exclude.
+	args := []string{"-az", "-v", "--exclude", tok, "/local", "h:/remote"}
+	res := &SyncResult{
+		Stdout:  c.Secrets.Redact("sending incremental file list " + tok),
+		Stderr:  c.Secrets.Redact("rsync warning near " + tok),
+		Command: c.Secrets.Redact("rsync " + strings.Join(args, " ")),
+		DryRun:  true,
+	}
+
+	v := reflect.ValueOf(*res)
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Type().Field(i)
+		if f.Type.Kind() != reflect.String {
+			continue
+		}
+		got := v.Field(i).String()
+		if strings.Contains(got, tok) {
+			t.Errorf("SyncResult.%s carries the secret verbatim: %q", f.Name, got)
+		}
+	}
+}
+
+// The same gap in Exec: Cwd is echoed back from the request, so a path under a
+// credential directory would surface a registered value next to redacted output.
+func TestExecResultRedactsCwd(t *testing.T) {
+	c := newTestClient()
+	const tok = "credential-dir-name-abcdefgh"
+	if err := c.Secrets.Set("tok", tok); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Secrets.Redact("/home/u/" + tok + "/work"); strings.Contains(got, tok) {
+		t.Errorf("a cwd carrying a secret must be redacted, got %q", got)
 	}
 }
 
