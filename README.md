@@ -428,7 +428,16 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
 且 kill 走进程组、能覆盖孙进程(测过 `sh -c 'sleep 45' &` 不留孤儿)。所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够。
 真正的中间地带是**跑 30 秒的命令**:用 `exec` 得盲等,起 job 又要多两次往返——于是不确定要多久的命令倾向于起 job,简单任务也付了 job 的开销。
-是体验优化,不是缺口,而且要改协议,所以排在 P1 而非 P0。长任务的**持续**推送不算在内,那个场景本来就该用 job + `job_logs`。
+
+**排在 P1 而非 P0，是因为它卡在一个我无法从这里验证的前提上。** 查过之后有两处硬约束：
+
+1. **线协议是一请求一回复。** `readLoop` 收到回复就 `delete(c.pending, resp.ID)`（`internal/transport/conn.go:597`），所以增量推送要么改成多回复分帧，要么另开一路 notification——都是动 `proto` 的破坏性改动。
+2. **MCP 那头只有 `NotifyProgress`，而它的 `ProgressNotificationParams` 只带一个 `Message string`。** 关键问题是：Claude Code 会不会把这些 message 喂进模型的上下文？如果只是给人看的 UI 提示，那么整条链路做完，**模型依然拿不到增量输出**——收益是零。
+
+第 2 点我在这台机器上验不了。**在验证之前不动手**：一个建立在「希望客户端这么做」上的协议破坏性改动，代价和收益完全不对称。
+真要做，正确顺序是先用一个最小的 MCP server 测出 Claude Code 对 progress notification 的实际处理，再决定值不值得改 `proto`。
+
+长任务的**持续**推送不算在这条里,那个场景本来就该用 job + `job_logs`。
 
 **P3 — Windows 远端 Tier 1。** 见上。等第一个真实用户。
 
