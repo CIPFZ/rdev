@@ -469,3 +469,22 @@ internal/mcpsrv/     MCP 工具定义
 internal/secrets/    凭据脱敏
 internal/session/    host 注册表 + 粘性状态
 ```
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
+
+依赖的许可证都与 MIT 兼容（都是宽松型，无 copyleft）：
+
+| 依赖 | 许可 |
+|---|---|
+| `modelcontextprotocol/go-sdk` | Apache-2.0 / MIT 混合（见下） |
+| `google/jsonschema-go`、`segmentio/asm`、`segmentio/encoding` | MIT |
+| `yosida95/uritemplate` | BSD-3-Clause |
+| `golang.org/x/{oauth2,sync,sys,time}` | BSD-3-Clause（Go Authors） |
+
+唯一的直接依赖 MCP SDK **不是纯 MIT**：该项目正在从 MIT 迁移到 Apache-2.0，新代码是
+Apache-2.0，尚未取得转授权同意的原贡献仍是 MIT。两者都允许在 MIT 项目里使用。
+只是如果将来要分发**含 SDK 代码**的产物（本项目不这么做——`go.mod` 引用而非 vendor），
+Apache-2.0 的第 4 条要求保留其 NOTICE 和变更声明。
+
