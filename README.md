@@ -226,6 +226,14 @@ job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直�
 
 **运行中的 job 永不删除**，会出现在 `skipped` 里——删掉记录会让进程继续跑而无法观测和停止，比占磁盘更糟。
 
+**并发删除是幂等的。** job 记录有多个写者：每个 rdev 进程各起一个 agent，共享同一个 `~/.cache/rdev/jobs/`；而单个 agent 内部每个请求也各跑在自己的 goroutine 里（`maxConcurrentRequests`）。原先「读 meta 判断是否 running，再删目录」两步之间没有锁，产生两种错误答案：在删除之后才读到的那个调用会冒出裸的 `meta.json: no such file or directory`；而所有在删除之前读到的调用**都报成功**——`os.RemoveAll` 对已不存在的路径返回 `nil`，于是 6 个并发删除报 6 次删除、6 倍的 `freed_bytes`。后者更糟，因为它看起来是对的。
+
+现在每个 job 由 `<state>/.job-locks/<id>.lock` 上的 `flock` 保护，覆盖 `job_rm`（单个和 sweep）、`job_stop` 的状态写入、以及 supervisor 记录退出码的那一步。锁文件放在 `jobs/` **之外**：放在 job 目录里会被它自己序列化的那次 `RemoveAll` 删掉，而放在 `jobs/` 下又会被 `job_list` 的 `Total` 计数进去。
+
+记录已经不存在的 job 现在回到 `missing` 字段，而不是报错——和 `skipped`（还活着，故意保留）是两种不同的原因，不该混在一个字段里。调用方要的是「这个 job 不存在」这个状态,而它确实已经达成了。
+
+（锁**只**加在 agent 侧。锁的是文件，不是连接，所以 `internal/transport` 里没有任何相关代码。Windows 远端本来就不支持——见下面的平台一节，`GOOS=windows` 下 agent 连编译都过不了——所以这里不需要 `flock` 的回退实现。）
+
 ### 9. 协议兼容是区间，不是精确相等
 
 `proto.Version` 现在是 2（`job_rm` / `list` / `-state` / 多 id `job_wait` / `job_list limit`），并且多了一个 `MinVersion`。

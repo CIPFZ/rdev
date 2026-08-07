@@ -297,6 +297,11 @@ type JobResult struct {
 	// are still running. Removing a live job's records would orphan the process
 	// with no way to observe or stop it.
 	Skipped []string `json:"skipped,omitempty"`
+	// Missing lists jobs whose records were already gone. Distinct from Skipped:
+	// that means "alive, deliberately kept", this means "nothing left to delete".
+	// Reported rather than raised as an error so a repeated or concurrent job_rm
+	// is idempotent -- the caller asked for the job to be absent, and it is.
+	Missing []string `json:"missing,omitempty"`
 
 	// Total is the number of jobs on the host before Limit was applied, so a
 	// caller can tell a listing was cut short.

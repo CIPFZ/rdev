@@ -69,9 +69,26 @@ func runSupervisor(jobDir string, argv []string) {
 		code = -1
 	}
 
-	writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
-		"exit_code": code,
-		"ended_at":  time.Now().UTC().Format(time.RFC3339),
-	})
+	// Under the job lock, and only if the record is still there. A job_rm running
+	// right now sees a live supervisor and skips the job, but this write happens
+	// after the child is reaped -- so without the lock it can land just after a
+	// removal that saw the job as finished, leaving a directory holding only
+	// status.json. job_list skips such a directory silently, so the job would
+	// simply vanish rather than report its exit code.
+	writeStatus := func() error {
+		if !jobExists(jobDir) {
+			return nil
+		}
+		return writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
+			"exit_code": code,
+			"ended_at":  time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	if err := withJobLock(jobDir, writeStatus); err != nil {
+		// Locking failed, but an unrecorded exit code is a worse outcome than an
+		// unsynchronized one: metaToInfo would have to fall back to a pid probe
+		// and report "unknown" forever.
+		writeStatus()
+	}
 	os.Exit(code)
 }

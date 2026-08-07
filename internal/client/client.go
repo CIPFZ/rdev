@@ -708,15 +708,19 @@ type JobRmOptions struct {
 
 // JobRmResult reports what a removal freed.
 type JobRmResult struct {
-	Removed    []string
-	Skipped    []string
+	Removed []string
+	Skipped []string
+	// Missing holds IDs whose records were already gone. A removal is idempotent,
+	// so a repeated or concurrent rm reports this rather than failing.
+	Missing    []string
 	FreedBytes int64
 }
 
 // JobRm deletes job records to reclaim disk.
 //
 // Job logs are unbounded, so a machine running batches accumulates them until the
-// disk fills. Running jobs are never removed; they come back in Skipped.
+// disk fills. Running jobs are never removed; they come back in Skipped. A job
+// that was already gone comes back in Missing, not as an error.
 func (c *Client) JobRm(ctx context.Context, opts JobRmOptions) (*JobRmResult, error) {
 	if opts.ID == "" && opts.OlderThanSec <= 0 && opts.KeepLast <= 0 {
 		return nil, errors.New("job_rm needs an id, older_than_sec, or keep_last")
@@ -738,6 +742,7 @@ func (c *Client) JobRm(ctx context.Context, opts JobRmOptions) (*JobRmResult, er
 	return &JobRmResult{
 		Removed:    resp.Job.Removed,
 		Skipped:    resp.Job.Skipped,
+		Missing:    resp.Job.Missing,
 		FreedBytes: resp.Job.FreedBytes,
 	}, nil
 }

@@ -192,11 +192,21 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	// Write-then-rename so a reader never observes a partial record.
-	tmp := path + ".tmp"
+	//
+	// The temp name carries the pid: a fixed "<path>.tmp" is shared state between
+	// every writer of that path, and two of them interleaving would let one
+	// rename the other's half-written bytes into place. Writers of one job's
+	// status now hold the job lock, but the supervisor writes child.json outside
+	// it, and a unique name costs nothing.
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp) // do not leave the temp file behind on a failed rename
+		return err
+	}
+	return nil
 }
 
 func readJSON(path string, v any) error {

@@ -39,22 +39,56 @@ func jobRm(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	return jobRmSweep(p, state)
 }
 
+// jobRmOne removes a single job by ID.
+//
+// The liveness check and the deletion happen under the job lock, which is what
+// makes the "never remove a running job" rule actually hold: unlocked, a job could
+// start being waited on, or finish and be removed by someone else, between the
+// read and the RemoveAll.
+//
+// An already-absent job is reported in Missing rather than returned as an error.
+// Two callers racing on the same ID both asked for it to be gone, and it is; the
+// old behaviour leaked a bare ENOENT from meta.json to whichever one lost.
 func jobRmOne(id, state string) (*proto.JobResult, error) {
 	dir := jobDir(state, id)
-	meta, err := readMeta(dir)
-	if err != nil {
-		return nil, fmt.Errorf("job %s: %w", id, err)
-	}
-	info := metaToInfo(meta, dir)
-	if info.State == proto.JobRunning {
-		return &proto.JobResult{Skipped: []string{id}, Info: info}, nil
-	}
+	res := &proto.JobResult{}
 
-	size := dirSize(dir)
-	if err := os.RemoveAll(dir); err != nil {
-		return nil, fmt.Errorf("remove job %s: %w", id, err)
+	err := withJobLock(dir, func() error {
+		// Read inside the lock. A meta read from outside it says nothing about
+		// what is on disk by the time the removal runs.
+		meta, err := readMeta(dir)
+		if err != nil {
+			// Absent directory, or a record removed from under a stale read:
+			// idempotently "already gone". A directory that is present but
+			// unreadable is a different problem and still an error.
+			if !jobExists(dir) || os.IsNotExist(err) {
+				res.Missing = []string{id}
+				return nil
+			}
+			return fmt.Errorf("job %s: %w", id, err)
+		}
+		info := metaToInfo(meta, dir)
+		if info.State == proto.JobRunning {
+			res.Skipped = []string{id}
+			res.Info = info
+			return nil
+		}
+
+		size := dirSize(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("remove job %s: %w", id, err)
+		}
+		res.Removed = []string{id}
+		res.FreedBytes = size
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return &proto.JobResult{Removed: []string{id}, FreedBytes: size}, nil
+	if len(res.Removed) > 0 {
+		removeJobLock(dir)
+	}
+	return res, nil
 }
 
 func jobRmSweep(p *proto.JobParams, state string) (*proto.JobResult, error) {
@@ -109,12 +143,37 @@ func jobRmSweep(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		if p.OlderThanSec > 0 && !endedBefore(c.info, now, time.Duration(p.OlderThanSec)*time.Second) {
 			continue
 		}
-		size := dirSize(c.dir)
-		if err := os.RemoveAll(c.dir); err != nil {
-			continue // a failed removal is not worth failing the whole sweep
+
+		// Each candidate is locked and re-examined at deletion time. The scan
+		// above ran unlocked -- locking it wholesale would serialize a 5000-job
+		// sweep against every concurrent job_start -- so its liveness verdict is
+		// only a filter, and a job that started being waited on, or that another
+		// agent already removed, must not be acted on from that stale read.
+		var removed bool
+		lockErr := withJobLock(c.dir, func() error {
+			meta, err := readMeta(c.dir)
+			if err != nil {
+				return nil // already gone, or unreadable: nothing to reclaim
+			}
+			if metaToInfo(meta, c.dir).State == proto.JobRunning {
+				res.Skipped = append(res.Skipped, c.id)
+				return nil
+			}
+			size := dirSize(c.dir)
+			if err := os.RemoveAll(c.dir); err != nil {
+				return err // a failed removal is not worth failing the whole sweep
+			}
+			res.Removed = append(res.Removed, c.id)
+			res.FreedBytes += size
+			removed = true
+			return nil
+		})
+		if lockErr != nil {
+			continue
 		}
-		res.Removed = append(res.Removed, c.id)
-		res.FreedBytes += size
+		if removed {
+			removeJobLock(c.dir)
+		}
 	}
 	return res, nil
 }

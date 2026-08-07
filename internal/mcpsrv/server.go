@@ -301,6 +301,7 @@ type JobRmOut struct {
 	Removed      []string `json:"removed,omitempty"`
 	RemovedCount int      `json:"removed_count"`
 	Skipped      []string `json:"skipped,omitempty" jsonschema:"Jobs left alone because they are still running."`
+	Missing      []string `json:"missing,omitempty" jsonschema:"Jobs whose records were already gone. Removal is idempotent, so this is not an error."`
 	FreedBytes   int64    `json:"freed_bytes"`
 }
 
@@ -433,7 +434,7 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 			return nil, JobRmOut{}, err
 		}
 		return nil, JobRmOut{
-			Removed: res.Removed, Skipped: res.Skipped,
+			Removed: res.Removed, Skipped: res.Skipped, Missing: res.Missing,
 			FreedBytes: res.FreedBytes, RemovedCount: len(res.Removed),
 		}, nil
 	})

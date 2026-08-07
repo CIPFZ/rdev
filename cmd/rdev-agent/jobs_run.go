@@ -159,11 +159,23 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 
 	// Record the kill so status reports JobKilled rather than a bare exit.
+	//
+	// Under the lock, and re-checking the record: a concurrent job_rm may have
+	// removed this job while the grace period elapsed above, and recreating
+	// status.json in a deleted directory would resurrect a half-job that
+	// job_list then reports with no meta.json. Signalling itself stays outside
+	// the lock -- it addresses a pgid, not a file, and holding a lock across a
+	// multi-second grace wait would block an unrelated job_rm for no reason.
 	if !jobAlive(meta, dir) {
-		writeJSON(filepath.Join(dir, "status.json"), map[string]any{
-			"exit_code": -1,
-			"ended_at":  time.Now().UTC().Format(time.RFC3339),
-			"killed":    true,
+		withJobLock(dir, func() error {
+			if !jobExists(dir) {
+				return nil
+			}
+			return writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+				"exit_code": -1,
+				"ended_at":  time.Now().UTC().Format(time.RFC3339),
+				"killed":    true,
+			})
 		})
 	}
 	return &proto.JobResult{Info: metaToInfo(meta, dir)}, nil
