@@ -8,6 +8,8 @@ package mcpsrv
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -29,6 +31,18 @@ func New(c *client.Client) *mcp.Server {
 		Version: Version,
 	}, nil)
 
+	// Redaction backstop. Every handler already scrubs the fields it returns, but
+	// that is a per-field discipline and it has failed once: SyncResult.Command
+	// shipped a credential verbatim while Stdout, two lines above it in the same
+	// struct literal, was scrubbed. Forgetting produces no error anywhere, and the
+	// cost of forgetting is a plaintext credential in the transcript.
+	//
+	// This runs over the serialized result instead, so a field added later -- or a
+	// whole new tool -- is covered without anyone remembering. It is a second line
+	// of defence, not a replacement: per-field scrubbing stays, because a caller
+	// using internal/client directly (the CLI does) never passes through here.
+	s.AddReceivingMiddleware(redactResults(c))
+
 	registerExec(s, c)
 	registerJobs(s, c)
 	registerFiles(s, c)
@@ -36,6 +50,63 @@ func New(c *client.Client) *mcp.Server {
 	registerSession(s, c)
 	registerSecrets(s, c)
 	return s
+}
+
+// redactResults scrubs registered secrets from tool results on their way out.
+//
+// It works on the marshalled JSON rather than walking struct fields: by the time a
+// result reaches middleware the SDK has already turned the typed Out value into
+// StructuredContent, so one pass covers every field of every tool, including ones
+// that do not exist yet.
+//
+// Only tools/call is touched. Other methods carry no remote output, and running the
+// scan over list responses would cost bytes for nothing.
+func redactResults(c *client.Client) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			if method != "tools/call" {
+				return res, err
+			}
+			// Errors travel to the caller as text too, so they need the same scrub.
+			if err != nil {
+				err = errors.New(c.Secrets.Redact(err.Error()))
+			}
+			ctr, ok := res.(*mcp.CallToolResult)
+			if !ok || ctr == nil {
+				return res, err
+			}
+			redactCallToolResult(c, ctr)
+			return ctr, err
+		}
+	}
+}
+
+// redactCallToolResult rewrites the two places a result carries text.
+//
+// StructuredContent holds the JSON the model reads; Content holds the text
+// fallback the SDK derives from it. Both have to be scrubbed -- a client reading
+// either one must not see a credential, and missing one of them would make the leak
+// depend on which field the client happens to prefer.
+func redactCallToolResult(c *client.Client, ctr *mcp.CallToolResult) {
+	if raw, ok := ctr.StructuredContent.(json.RawMessage); ok {
+		// Redact the JSON text directly. A secret is scrubbed the same whether it
+		// sits in a value, a key, or spans an escape -- and reserializing to apply it
+		// per-string would risk changing the shape of a validated payload.
+		if scrubbed := c.Secrets.Redact(string(raw)); scrubbed != string(raw) {
+			ctr.StructuredContent = json.RawMessage(scrubbed)
+		}
+	}
+	for i, content := range ctr.Content {
+		tc, ok := content.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+		if scrubbed := c.Secrets.Redact(tc.Text); scrubbed != tc.Text {
+			// Copy rather than mutate: the same Content value may be shared.
+			ctr.Content[i] = &mcp.TextContent{Meta: tc.Meta, Annotations: tc.Annotations, Text: scrubbed}
+		}
+	}
 }
 
 // ---------- exec ----------

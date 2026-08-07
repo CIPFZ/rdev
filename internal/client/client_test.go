@@ -197,8 +197,17 @@ func TestLoadHostSecretsRegistersFromPath(t *testing.T) {
 
 // An explicit registration must win over the configured path: a caller who just
 // set a value should not have it replaced on the next reconnect.
+//
+// The value assertion alone proves nothing here -- a failed refetch is deliberately
+// quiet and leaves the old value in place, so "skipped" and "tried and lost" look
+// identical. Confirmed by mutation: with the guard deleted this test still passed.
+// The warning is the observable, so both are checked.
 func TestLoadHostSecretsKeepsExplicitValue(t *testing.T) {
+	var warnings []string
 	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
+	c.warn = func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
 	c.Hosts.Update("dev", func(s *session.State) {
 		s.Secrets = map[string]string{"tok": "/nonexistent/path"}
@@ -212,6 +221,9 @@ func TestLoadHostSecretsKeepsExplicitValue(t *testing.T) {
 
 	if v, _ := c.Secrets.Get("tok"); v != "explicitly-set-value" {
 		t.Errorf("value = %q, want the explicit registration preserved", v)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none: the configured path must not be read at all", warnings)
 	}
 }
 

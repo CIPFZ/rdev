@@ -154,10 +154,16 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 注册过的值在**所有**返回值里被替换成 `<redacted:name>`（stdout/stderr/日志/错误消息/job argv/rsync 命令行/cwd）。
 用 `env: {"TOKEN":"secret:name"}` 可以把明文注入远端环境，而值从不出现在调用或结果里。
 
-> **实现上其实是逐字段调 `Redact`，不是真正的边界拦截。** 这个差别不是学术问题：`SyncResult.Command`
-> 就漏了一轮（见 bug 17），而它和已脱敏的 `Stdout` 在同一个结构体字面量里。逐字段的写法意味着
-> **每加一个返回字段都要记得脱敏**，而漏掉不会有任何报错。回归测试因此改用反射遍历所有 string 字段，
-> 让新字段自动进入覆盖范围。真正的修法是在序列化边界统一过一遍，但那要动 MCP SDK 的输出路径，还没做。
+**两道防线，因为逐字段脱敏被证明会漏。** `SyncResult.Command` 漏过一轮（见 bug 17），
+而它和已脱敏的 `Stdout` 在同一个结构体字面量里——漏掉不会有任何报错，代价是明文凭据进对话记录。
+
+1. **逐字段 `Redact`**（各 handler 内）。CLI 直接用 `internal/client`、不走 MCP，所以这层必须留着。
+2. **MCP 边界兜底**（`AddReceivingMiddleware`）。跑在**已序列化**的 `structuredContent` 和文本 fallback 上，
+   所以「新加一个字段」甚至「新加一个工具」都自动覆盖，不依赖谁记得。
+
+第 2 层是实测出来的，不是推的：`rdev_session` 的 `cwd` **本来就没有**逐字段脱敏，
+关掉中间件后测试立刻在真实 MCP 往返里抓到明文（`TestMiddlewareRedactsUnscrubbedResultField`）。
+只拦 `tools/call`——`tools/list` 不含远端输出，扫它是白付字节。
 
 **远端凭据直接注册**（推荐）：
 ```jsonc
@@ -273,6 +279,8 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 | **首次连接 host key 未信任** | ✅ 附带取 key / 核对指纹的下一步，并明确劝阻 `StrictHostKeyChecking=no` |
 | **自解释的 ssh 错误不加料** | ✅ 域名解析失败 / 连接被拒 / **host key 变更**原样返回 |
 | **secrets 跨断连存活** | ✅ store 是进程级的，重连后脱敏照旧；重载路径幂等（已注册的名字不重取） |
+| **MCP 边界兜底脱敏** | ✅ 真实 MCP 往返：未逐字段脱敏的 `cwd` 在 `structuredContent` 和文本 fallback 里都被替换；关掉中间件立刻抓到明文 |
+| **`tools/list` 不受影响** | ✅ 中间件只拦 `tools/call`，工具名和 schema 原样通过 |
 
 **本轮新增能力（agent 直连管道实测 + 单测）：**
 
@@ -298,8 +306,8 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 
 **性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
 
-**单元测试：**`go test ./... -race` 全绿，171 项
-（agent 79、transport 24、mcpsrv 23、client 18、secrets 14、session 13）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
+**单元测试：**`go test ./... -race` 全绿，173 项
+（agent 79、mcpsrv 25、transport 24、client 18、secrets 14、session 13）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
 
 开发过程中测试抓到 7 个真 bug：
 1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
@@ -339,7 +347,7 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
     唯一的线索其实是运行时间：3.08s vs 0.45s——因为没有守卫它会真的去 dial。
 
 17. **`SyncResult.Command` 回传未脱敏的 rsync argv。** 就在 `Stdout` / `Stderr` 两行**下面**——同一个结构体字面量，上面两个字段过了 `Redact`，它没过。而 argv 是调用方给的：`--exclude` 模式和路径都可能带凭据。实测确认同一个 secret 在 `Stdout` 里是 `<redacted:tok>`、在 `Command` 里是明文。`ExecResult.Cwd` 是同一类（从请求回显），也一起补了。
-    根因是**脱敏按字段做而不是在边界做**——所以回归测试用反射遍历结构体的每个 string 字段，而不是列出字段名：这样以后新加的字段自动被覆盖，不依赖谁记得来改测试。变异验证过：把 `Command` 改回不脱敏，测试失败。
+    根因是**脱敏按字段做而不是在边界做**——所以除了修这两处，还加了 MCP 边界兜底（见决策 6）。加完之后又发现 `rdev_session` 的 `cwd` **本来也没脱敏**，也就是说同一个 bug 当时至少有两个实例，我只看到了一个。这正是「逐字段」这个写法的问题：修掉看得见的那个，剩下的仍然静默存在。
 
 ## CLI
 
@@ -430,7 +438,7 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 
 ## 还没做的（按优先级）
 
-已完成的两项留在这里作为记录：**首次连接的 host key 提示**（见上节）和 **secrets 跨断连存活**（结论是本来就安全，但补了测试；那轮还抓到一个假测试和一个真泄露，见 bug 台账 16、17）。
+已完成的项留在这里作为记录：**首次连接的 host key 提示**、**secrets 跨断连存活**（结论是本来就安全，但补了测试）、**脱敏加 MCP 边界兜底**（见决策 6；bug 17 暴露了逐字段写法会漏，现在新字段自动覆盖）。那几轮还抓到一个假测试和一个真泄露，见 bug 台账 16、17。
 
 **P1 — `exec` 的流式输出。** 命令跑完(或超时)才返回,期间拿不到增量。
 实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
@@ -446,8 +454,6 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 真要做，正确顺序是先用一个最小的 MCP server 测出 Claude Code 对 progress notification 的实际处理，再决定值不值得改 `proto`。
 
 长任务的**持续**推送不算在这条里,那个场景本来就该用 job + `job_logs`。
-
-**P2 — 脱敏改成真正的边界拦截。** 现在是逐字段调 `Redact`（见决策 6 的注），bug 17 已经证明这个写法会漏。反射测试能在**已有**结构体上兜住，但拦不住「新加一个返回类型、忘了写测试」。正确做法是在序列化边界统一过一遍，代价是要接进 MCP SDK 的输出路径。
 
 **P3 — Windows 远端 Tier 1。** 见上。等第一个真实用户。
 

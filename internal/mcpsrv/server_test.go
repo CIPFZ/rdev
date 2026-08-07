@@ -494,3 +494,85 @@ func TestJobWaitSchemaExposesIDsArray(t *testing.T) {
 	}
 	t.Fatal("rdev_job_wait not found")
 }
+
+// The middleware backstop must scrub a secret that no handler remembered to
+// redact. This is the whole point of it: per-field scrubbing already failed once
+// (SyncResult.Command), and the next omission should be caught by the boundary
+// rather than by someone noticing a credential in a transcript.
+//
+// Driven through a real MCP round trip -- the value has to survive handler,
+// serialization, middleware, and transport to prove the interception point is real
+// and not just a function that happens to be called.
+func TestMiddlewareRedactsUnscrubbedResultField(t *testing.T) {
+	c := newTestClient()
+	const token = "unscrubbed-credential-value-1234"
+	if err := c.Secrets.Set("tok", token); err != nil {
+		t.Fatal(err)
+	}
+	cs := connect(t, c)
+
+	// Cwd is echoed straight back by the session handler with no redaction of its
+	// own, which makes it a faithful stand-in for a field someone forgot.
+	if isErr, msg := callTool(t, cs, "rdev_session",
+		SessionIn{Host: "dev", Addr: "u@h", Cwd: "/data/" + token}, nil); isErr {
+		t.Fatal(msg)
+	}
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "rdev_session",
+		Arguments: SessionIn{Host: "dev"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check the raw wire payload, not a decoded struct: a client may read either
+	// structuredContent or the text fallback, so neither may carry the value.
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), token) {
+		t.Errorf("secret reached structuredContent: %s", raw)
+	}
+	// Without the angle brackets: encoding/json escapes < and > to </>, so
+	// matching the literal "<redacted:tok>" fails against a correctly scrubbed
+	// payload. The name is the part that has to be there.
+	if !strings.Contains(string(raw), "redacted:tok") {
+		t.Errorf("want the placeholder in structuredContent, got: %s", raw)
+	}
+	for _, content := range res.Content {
+		tc, ok := content.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+		if strings.Contains(tc.Text, token) {
+			t.Errorf("secret reached the text fallback: %s", tc.Text)
+		}
+	}
+}
+
+// Non-tool methods must pass through untouched. Scanning list responses would cost
+// bytes on every schema fetch and they carry no remote output.
+func TestMiddlewareLeavesToolListIntact(t *testing.T) {
+	c := newTestClient()
+	if err := c.Secrets.Set("tok", "irrelevant-value-here-0987"); err != nil {
+		t.Fatal(err)
+	}
+	cs := connect(t, c)
+
+	tools, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The exact count is asserted by TestAllToolsAreRegistered; here it only has to
+	// come back non-empty and undamaged by the middleware.
+	if len(tools.Tools) == 0 {
+		t.Error("ListTools returned nothing")
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name == "" || tool.InputSchema == nil {
+			t.Errorf("tool %+v lost its name or schema passing through middleware", tool)
+		}
+	}
+}
