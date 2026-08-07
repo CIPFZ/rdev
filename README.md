@@ -354,10 +354,30 @@ If the builds are from different branches, or you mean to roll back, force it:
 | **断连后 agent 及时退出** | ✅ 在途 3600s `job_wait` 不再挡住关闭，2.1s 退出（此前 >15s 仍挂着） |
 | **在途回复仍被冲刷** | ✅ 1s 的 exec 在 stdin 关闭后回复照样送出 |
 
+**本轮（并发安全 + 构建标识）实测：**
+
+| 验证项 | 结果 |
+|---|---|
+| **两个独立 rdev 进程并发 `job rm` 同一个 job** | ✅ 一方 `removed` + `freed=213`，另一方 `missing`。此前一方吐裸 errno、或双方都谎报成功 |
+| **`job rm` 幂等** | ✅ 重复删除回 `missing`，不再 `meta.json: no such file or directory` |
+| **运行中 job 并发删不掉** | ✅ 真实 host 上 `skipped`，记录保留；停掉后才 `removed` |
+| **`.job-locks` 不污染列表** | ✅ 远端 `Total=106` 与实际 106 个 job 目录一致，3 个锁文件不计入 |
+| **锁在**同进程**内也生效** | ✅ 变异测试：把 `Flock` 摘掉，`6 racers claimed to remove`、`5 goroutines inside the lock` 立刻失败 |
+| **`rdev version`** | ✅ 自身 stamp + 4 个内嵌 agent 的 SHA-256 前 12 位 |
+| **`make check-agents`** | ✅ 改一行源码不重建 agent → 4 个平台全部 `STALE` 并给出下一步 |
+| **构建可复现** | ✅ 同源两次 `-trimpath` 构建 SHA-256 完全一致（`check-agents` 用内容比对的前提） |
+| **拒绝降级（真实 host）** | ✅ 装入 clean 2027 stamp 的 agent 后，声称 2020 的 rdev 被拒，错误里同时给出两侧 stamp |
+| **拒绝发生在上传之前** | ✅ 单测断言 ssh 调用里没有 `dd of=`——不是先覆盖再报错 |
+| **`-force-agent-upload`** | ✅ 同一个被拒的 rdev 装上了，且**不再**发起 `-version` 探测；`hosts list` 显示该标记 |
+| **正常升级不受影响** | ✅ 2020 stamp → 当前 commit 自动上传，无需 force |
+| **不可比时放行** | ✅ 无 stamp / 无时间戳 / 任一侧 dirty，全部继续上传（否则损坏的远端 agent 将无法修复） |
+| **warm 连接仍是 0 次额外 round trip** | ✅ hash 相同时不探版本也不上传（单测断言 ssh 调用为空） |
+| **`secrets set` 说明缺席原因** | ✅ 解释 store 是进程级的，并指向 `set-from-file` / `check` / `list` |
+
 **性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
 
-**单元测试：**`go test ./... -race` 全绿，175 项
-（agent 79、mcpsrv 25、transport 24、client 20、secrets 14、session 13）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
+**单元测试：**`go test ./... -race` 全绿，201 项
+（agent 87、transport 33、mcpsrv 25、client 20、secrets 14、session 14、buildinfo 8）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
 
 开发过程中测试抓到 7 个真 bug：
 1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
@@ -509,6 +529,8 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 ## 还没做的（按优先级）
 
 已完成的项留在这里作为记录：**首次连接的 host key 提示**、**secrets 跨断连存活**（结论是本来就安全，但补了测试）、**脱敏加 MCP 边界兜底**（见决策 6；bug 17 暴露了逐字段写法会漏，现在新字段自动覆盖）。那几轮还抓到一个假测试和一个真泄露，见 bug 台账 16、17。
+
+本轮完成：**job 记录并发安全**（决策 8，flock；实测过的两种错误答案里，「全员谎报删除成功」比裸 errno 更危险）、**拒绝静默降级 agent**（决策 10；hash 比不出新旧，所以最后连上的永远赢）、**构建标识 + `make check-agents`**（`rdev version` 现在能回答「我这个二进制带的什么 agent」）、**`secrets` CLI 面对齐**（`set` 不是漏了而是做不到，写下来了）。
 
 **P1 — `exec` 的流式输出。** 命令跑完(或超时)才返回,期间拿不到增量。
 实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
