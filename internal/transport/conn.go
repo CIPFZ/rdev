@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -43,6 +44,10 @@ type Host struct {
 	// connect when empty.
 	GOOS   string
 	GOARCH string
+	// ForceAgentUpload installs the local agent even when the installed one is
+	// newer. The escape hatch for the case the refusal cannot distinguish: a
+	// deliberate rollback, or an agent stamped from someone else's branch.
+	ForceAgentUpload bool
 }
 
 // remoteDir returns the agent state directory, defaulting when unset.
@@ -417,11 +422,20 @@ func newBufReader(r io.Reader) *bufio.Reader { return bufio.NewReaderSize(r, 1<<
 
 // ensureAgent uploads the agent when the remote copy is missing or stale.
 //
-// Staleness is decided by content hash rather than mtime or version string, so
-// a rebuilt binary is always picked up and an unchanged one is never re-sent.
+// Two checks, in this order, because they answer different questions:
 //
-// installedSHA comes from the connect probe, so the common case -- agent already
-// current -- costs no ssh round trips at all here.
+//  1. Content hash. Identical bytes means nothing to do, and this costs no ssh
+//     round trip at all -- installedSHA comes from the connect probe. It is the
+//     reason a warm connect never re-sends 9 MB.
+//  2. Build stamp, only when the hashes differ. A hash says "different"; it
+//     cannot say "older". Without this, whoever connects last wins, forever:
+//     two people sharing a dev box overwrite each other's agent on every
+//     connect, and so do two windows of one person's own rdev. That is not
+//     hypothetical -- a 15:39 MCP server repeatedly reverted an agent built at
+//     16:00 for a full afternoon.
+//
+// A refusal is the default rather than a silent downgrade, since the failure it
+// prevents is invisible while it happens and confusing afterwards.
 func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA string) error {
 	want := bin.SHA256
 	if want == "" {
@@ -430,6 +444,14 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 	}
 	if installedSHA != "" && installedSHA == want {
 		return nil // already current
+	}
+
+	// Only reached when an upload is actually on the table, so the extra round
+	// trip is paid on first connect and after a rebuild, not on every warm one.
+	if installedSHA != "" && !c.host.ForceAgentUpload {
+		if err := c.checkNotDowngrade(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Upload to a unique temp name, then chmod and rename in one round trip. The
@@ -449,6 +471,71 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 		return fmt.Errorf("install agent: %w", err)
 	}
 	return nil
+}
+
+// agentVersionTimeout bounds the installed agent's -version call.
+//
+// This execs a binary that may be truncated, may be a half-finished upload, or
+// may not be an agent at all, so it needs a deadline of its own: without one, a
+// binary that hangs on startup would hang the whole connect with no explanation.
+// Generous relative to what the call does (print two lines and exit), because the
+// budget covers ssh round-trip latency to a jump host, not local work.
+const agentVersionTimeout = 10 * time.Second
+
+// checkNotDowngrade refuses to replace an installed agent built after this one.
+//
+// The comparison cannot happen at ping time, which would be the natural place:
+// ping requires the agent to be running, and by then the upload has already
+// overwritten the binary whose identity was in question. So the installed agent
+// is asked directly, before anything is written.
+//
+// Every uncertain case proceeds with the upload rather than blocking. An agent
+// too old to carry a stamp, a build from a dirty tree, an unreadable binary --
+// none of these are evidence of a downgrade, and a bootstrap that refuses to
+// repair a broken remote agent would be worse than the problem being solved.
+func (c *Conn) checkNotDowngrade(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, agentVersionTimeout)
+	defer cancel()
+
+	out, err := c.runSSH(ctx, shellQuote(c.agentPath), "-version")
+	if err != nil {
+		// Cannot run it: assume it is broken and let the upload fix it.
+		return nil
+	}
+	return downgradeError(buildinfo.ParseVersionOutput(out), buildinfo.Current(), c.host)
+}
+
+// downgradeError reports why installed must not be replaced by local, or nil when
+// the upload should proceed.
+//
+// Separated from the ssh call so the decision is testable without a remote host:
+// which cases proceed and which refuse is the whole substance of this feature.
+func downgradeError(installed, local buildinfo.Build, host Host) error {
+	// Anything unknown proceeds. An agent too old to carry a stamp, an unstamped
+	// local build (plain `go build`), a dirty tree on either side -- none is
+	// evidence of a downgrade, and a bootstrap that refused to repair a broken
+	// remote agent would be worse than the problem being solved.
+	if !installed.Known() || !local.Known() {
+		return nil
+	}
+	if !installed.NewerThan(local) {
+		return nil
+	}
+
+	// Deliberately does not assert that the remote agent is "ahead" as a fact
+	// about branches. Commit dates order two builds, but two people on different
+	// branches of a shared box are divergent rather than sequential, and a date
+	// comparison still picks a winner. The message states what was compared and
+	// lets the reader decide which case they are in.
+	return fmt.Errorf(
+		"refusing to replace the agent on %s: the installed one was built later than this rdev\n"+
+			"  installed: %s\n"+
+			"  this rdev: %s\n"+
+			"Overwriting it is what makes two rdev processes flip one agent back and forth.\n"+
+			"If this rdev is simply stale, rebuild it:  make all\n"+
+			"If the builds are from different branches, or you mean to roll back, force it:\n"+
+			"  rdev hosts add %s %s -force-agent-upload -save",
+		host.Addr, installed, local, host.Name, host.Addr)
 }
 
 // upload streams data to a remote path via `dd`, which avoids scp/sftp

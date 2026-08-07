@@ -249,6 +249,48 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 
 `MinVersion` 只在真的放弃老格式支持时才抬——抬早了等于把还能用的 peer 挡在门外。
 
+### 10. 协议兼容解决不了**二进制**抖动
+
+上一节保证了「agent 比 host 新」时协议仍然可用，但没管**谁该覆盖谁**。`ensureAgent` 原先只比 hash 相不相等：
+
+```go
+if installedSHA != "" && installedSHA == want {
+    return nil // already current
+}
+// 否则无条件上传
+```
+
+hash 能回答「一样不一样」，回答不了「谁更新」。于是**最后连上的那个永远赢**：共享开发机上两个同事的 rdev 无限互相覆盖对方的 agent；同一个人开着新旧两个窗口也一样。我们真踩过一整轮 —— 15:39 启动的旧 MCP server 把 16:00 构建推上去的新 agent 反复顶回旧版，持续一下午。
+
+现在多一步**构建标识**比对，但只在 hash 已经不同时才做：
+
+| 情况 | 行为 | 代价 |
+|---|---|---|
+| hash 相同 | 直接返回 | **0 次 ssh**（installedSHA 来自 connect 探测） |
+| 首次安装 | 直接上传 | 没有已装 agent 可比 |
+| hash 不同 | 跑一次 `rdev-agent -version` 再决定 | 1 次 round trip，只在首连和 rebuild 后付 |
+| 已装的更新 | **拒绝并报错** | —— |
+
+比对为什么不能放在 `ping`：ping 需要 agent 已经跑起来，而那时候二进制**已经被覆盖了**，要问的那个身份没了。所以直接问磁盘上那个文件，在写任何东西之前。这次调用带 10s 超时 —— 它 exec 的可能是个半截上传、错架构、或者根本不是 agent 的文件，没有 deadline 的话一个启动就挂住的二进制会把整个 connect 拖死。
+
+**所有拿不准的情况都放行上传**：agent 太老没有 stamp、本地是裸 `go build` 没注入、任意一侧是脏树 —— 这些都不构成降级证据，而一个「拒绝修复损坏的远端 agent」的 bootstrap 比它要解决的问题更糟。
+
+拒绝时的措辞刻意**不**断言远端「比你新」是关于分支的事实。commit 时间能排序两个构建，但共享机器上两个人在不同分支上是**分叉**而非先后，日期比对照样会挑出一个赢家。所以消息只陈述比了什么，让读的人自己判断是哪种情况：
+
+```
+refusing to replace the agent on u@h: the installed one was built later than this rdev
+  installed: 0.1.0 bbbbbbb 2026-08-07T16:00:00Z
+  this rdev: 0.1.0 aaaaaaa 2026-08-07T15:39:00Z
+Overwriting it is what makes two rdev processes flip one agent back and forth.
+If this rdev is simply stale, rebuild it:  make all
+If the builds are from different branches, or you mean to roll back, force it:
+  rdev hosts add dev u@h -force-agent-upload -save
+```
+
+逃生口是 per-host 的（`force_agent_upload`，`rdev hosts list` 会显示），因为需要它的场景 —— 一台 agent 总被别的分支盖的共享机 —— 是那台机器的属性，不是某一条命令的属性。
+
+**默认不静默降级**：这个故障发生时是看不见的，事后又很难归因。
+
 ## 实测验证
 
 全部在真实远端（Linux x86_64，SSH 跳板 36000 端口）跑过。

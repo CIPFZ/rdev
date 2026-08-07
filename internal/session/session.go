@@ -73,6 +73,11 @@ type hostEntry struct {
 	Port      int    `json:"port,omitempty"`
 	RemoteDir string `json:"remote_dir,omitempty"`
 	Cwd       string `json:"cwd,omitempty"`
+	// ForceAgentUpload installs the local agent even when the installed one was
+	// built later. Persisted per host because the situation that calls for it --
+	// a shared box where agents are stamped from another branch -- is a property
+	// of that host, not of one command.
+	ForceAgentUpload bool `json:"force_agent_upload,omitempty"`
 	// Env is the host's sticky environment. Persisted so a caller that sets it
 	// once does not have to re-set it every session.
 	//
@@ -140,10 +145,11 @@ func (r *Registry) loadFile(path string, scope Scope) error {
 			continue
 		}
 		r.Add(transport.Host{
-			Name:      e.Name,
-			Addr:      e.Addr,
-			Port:      e.Port,
-			RemoteDir: e.RemoteDir,
+			Name:             e.Name,
+			Addr:             e.Addr,
+			Port:             e.Port,
+			RemoteDir:        e.RemoteDir,
+			ForceAgentUpload: e.ForceAgentUpload,
 		})
 		r.mu.Lock()
 		r.scopes[e.Name] = scope
@@ -196,7 +202,10 @@ func (r *Registry) Save(scope Scope) error {
 		if r.scopes[name] != scope {
 			continue
 		}
-		e := hostEntry{Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir}
+		e := hostEntry{
+			Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
+			ForceAgentUpload: h.ForceAgentUpload,
+		}
 		if st, ok := r.state[name]; ok {
 			e.Cwd = st.Cwd
 			if len(st.Env) > 0 {

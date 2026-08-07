@@ -154,7 +154,8 @@ USAGE
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]
   rdev hosts   [list|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
                                        [-env K=V]... [-secret NAME=PATH]...
-                                       [-no-login] [-global] [-save]]
+                                       [-no-login] [-force-agent-upload]
+                                       [-global] [-save]]
   rdev secrets set-from-file <name> <path> [-host H]
   rdev secrets check <host> <name> [-path P] -- <argv...>
   rdev version                            build id + every embedded agent's SHA-256
@@ -588,7 +589,10 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			Env        map[string]string `json:"env,omitempty"`
 			LoginShell bool              `json:"login_shell"`
 			Secrets    map[string]string `json:"secrets,omitempty"`
-			Scope      string            `json:"scope"`
+			// Surfaced because it suppresses the downgrade refusal: a host that
+			// keeps flipping its agent should show why without reading the file.
+			ForceAgentUpload bool   `json:"force_agent_upload,omitempty"`
+			Scope            string `json:"scope"`
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
@@ -599,20 +603,22 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			st := c.Hosts.State(n)
 			rows = append(rows, row{
 				h.Name, h.Addr, h.Port, h.RemoteDir,
-				st.Cwd, st.Env, st.LoginShell, st.Secrets, string(c.Hosts.ScopeOf(n)),
+				st.Cwd, st.Env, st.LoginShell, st.Secrets,
+				h.ForceAgentUpload, string(c.Hosts.ScopeOf(n)),
 			})
 		}
 		return printJSON(rows)
 	}
 
 	if args[0] == "add" {
-		fs, err := parseFlags(args[1:], map[string]bool{"save": true, "global": true, "no-login": true},
+		fs, err := parseFlags(args[1:],
+			map[string]bool{"save": true, "global": true, "no-login": true, "force-agent-upload": true},
 			map[string]bool{"env": true, "secret": true})
 		if err != nil {
 			return err
 		}
 		if len(fs.pos) < 2 {
-			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-global] [-save]")
+			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
 		}
 		// Project scope is the default: a host registered while working in a repo
 		// almost always belongs to that repo. -global opts into cross-project
@@ -624,7 +630,8 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 
 		c.Hosts.Add(transport.Host{
 			Name: fs.pos[0], Addr: fs.pos[1], Port: fs.num("port"),
-			RemoteDir: fs.str("remote-dir"),
+			RemoteDir:        fs.str("remote-dir"),
+			ForceAgentUpload: fs.bools["force-agent-upload"],
 		})
 		c.Hosts.SetScope(fs.pos[0], scope)
 
