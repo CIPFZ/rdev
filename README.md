@@ -265,6 +265,9 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 | **多 id `job_wait`** | ✅ `ids` 共享一个 deadline，逐 job 报结果；坏 id 只影响那一条 |
 | **`wait_any`** | ✅ 快的 job 一结束就返回，不等慢的 |
 | **握手接受更新的 agent** | ✅ host v2 连 `[1,3]` 的 agent 通过；agent 比 host 旧则报错并指明该重建哪边 |
+| **首次连接 host key 未信任** | ✅ 附带取 key / 核对指纹的下一步，并明确劝阻 `StrictHostKeyChecking=no` |
+| **自解释的 ssh 错误不加料** | ✅ 域名解析失败 / 连接被拒 / **host key 变更**原样返回 |
+| **secrets 跨断连存活** | ✅ store 是进程级的，重连后脱敏照旧；重载路径幂等（已注册的名字不重取） |
 
 **本轮新增能力（agent 直连管道实测 + 单测）：**
 
@@ -290,8 +293,8 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 
 **性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
 
-**单元测试：**`go test ./... -race` 全绿，163 项
-（agent 79、mcpsrv 23、session 13、secrets 14、transport 20、client 14）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
+**单元测试：**`go test ./... -race` 全绿，169 项
+（agent 79、transport 24、mcpsrv 23、client 16、secrets 14、session 13）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
 
 开发过程中测试抓到 7 个真 bug：
 1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
@@ -324,6 +327,11 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 第 13 个是我自己在做多路复用时引入的，只在「断连时恰好有长 `job_wait` 在途」才显现，例行测试跑不到。
 
 另外修了两处不算 bug 但很脆的地方：`readFull` 用 `err.Error() == "EOF"` 做字符串比较（改 `errors.Is(err, io.EOF)`），以及 README 工具数写的是 11。
+
+**本轮抓到 1 个假测试：**
+
+16. **`TestLoadHostSecretsKeepsExplicitValue` 是空的。** 起因是想确认「断连重连后声明式 secrets 还在不在」——如果丢了，脱敏会**静默失效**，输出照样返回，唯一的变化是 token 变成明文。结论是安全的（store 是进程级的、重载路径有 `Get` 幂等检查），但补测试时用变异测试验了一下：**把 `Get` 守卫整个删掉，测试照样通过**。原因是失败路径故意是静默的，于是「跳过了」和「重取失败但旧值还在」从外部完全无法区分。唯一的可观测差别是那条 stderr 警告 → 警告改走可注入的 hook，断言改成「不应该有警告」。删掉守卫时新测试会失败，旧的那个仍然不会（留着，但有牙的是新的那个）。
+    唯一的线索其实是运行时间：3.08s vs 0.45s——因为没有守卫它会真的去 dial。
 
 ## CLI
 
@@ -364,29 +372,68 @@ rdev secrets check dev apptoken -path ~/.config/myapp/token -- env    # → {"re
 | **macOS** amd64 / arm64 | ✅ | ✅ |
 | **Windows** | ❌ 未验证 | ❌ 不支持 |
 
-所以 macOS ↔ Linux 四种方向任意组合都可以（本地 mac 连 Linux 开发机是主用法，实测在 Linux x86_64 上跑过；mac 连 mac、Linux 连 Linux 也在支持范围内）。**Windows 两侧都不行**，原因不同：
+所以 macOS ↔ Linux 四种方向任意组合都可以（本地 mac 连 Linux 开发机是主用法，实测在 Linux x86_64 上跑过；mac 连 mac、Linux 连 Linux 也在支持范围内）。
 
-**远端不支持**，是硬性的。agent 的作业模型建立在 POSIX 进程语义上——`Setsid` 把 job detach 出去（决策 3），`syscall.Kill(-pgid)` 按进程组停子进程，`Kill(pid, 0)` 探活。这些在 `GOOS=windows` 下根本不编译，`mapPlatform` 也只认 `uname -s` 的 `linux` / `darwin`，其他值直接报 `unsupported remote OS`。另外 login shell trampoline（决策 5）也假定了 `bash -lc`。Windows 上要重做的不是几个 syscall，而是整套 job 生命周期（Job Objects 而不是进程组），属于另一个工程。
+### Windows 远端：三层障碍，不是一层
 
-**本地未验证**，是选择性的。`rdev` 自身能 `GOOS=windows` 编过，但它调用外部 `ssh` 并依赖 `ControlMaster` 做连接复用——OpenSSH for Windows 至今不支持连接复用，而复用正是热连接 0.55s 的来源。`rdev_sync` 还依赖 `rsync`，Windows 不随系统提供。没在 Windows 上跑过，所以不宣称支持；WSL2 里当 Linux 本地端用是可行的路。
+最初这里只写了「job 模型依赖 POSIX 进程组」。那个说法不完整——真正要动的是三层，而且难度递增：
 
-**要连 Windows 远端的话**，那台机器上的 WSL2 / Cygwin sshd 是可行的绕法（对 rdev 来说它就是个 Linux 远端），但没测过。
+**① bootstrap 用的全是 POSIX 工具。** 「零远端准备、首次连接自动上传 agent」这个卖点是这么实现的：
+
+| 步骤 | 实际命令 | Windows 上 |
+|---|---|---|
+| 探测 | `sh -c` 跑 `uname -s`、`uname -m`、`$HOME`、`sha256sum`\|`shasum` | 全都没有 |
+| 上传 | `ssh … dd of=<path> status=none` + stdin 灌 9MB | 没有 `dd` |
+| 安装 | `sh -c 'chmod 755 … && mv -f …'` | 没有 `chmod`/`mv` |
+
+Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**——连「这是台什么机器」都问不出来，而要先知道是 Windows 才能换命令，鸡生蛋。PowerShell 侧有对应物（`Get-FileHash`、`$env:USERPROFILE`），但 9MB 二进制经 stdin 灌进 PowerShell 是出名的难搞（编码改写）。
+
+**② job 模型建在 POSIX 进程语义上。** `Setsid` 把 job detach 出去（决策 3）、`syscall.Kill(-pgid)` 按进程组停子进程、`Kill(pid, 0)` 探活——`GOOS=windows` 下这些直接不编译（`-gcflags=-e` 数出 12 处，分布在 `jobs_run.go` / `jobs.go` / `main.go` / `supervise.go`；不加 `-e` 只会显示 10 条然后 `too many errors`）。都有对应物（Job Object、`OpenProcess`），是体力活。
+
+**③ 信号语义无法等价，这层是永久降级。** Windows 上唯一保证生效的是 `TerminateProcess`，即 SIGKILL 等价物，**没有优雅版本**。`CTRL_BREAK_EVENT` 只能送到同组的控制台进程，且**可以被忽略**。于是 `job_stop` 的 `-signal TERM -grace 5` 会静默退化成「尽力发个 break，然后硬杀」——同一个 API，更弱的保证，而且恰好落在这个项目最核心的卖点上。
+
+所以 `mapPlatform` 只认 `uname -s` 的 `linux` / `darwin`，其他值直接报 `unsupported remote OS`。**明确报错优于给一个看起来能用、实际保证更弱的实现。**
+
+**已知可行但未实现的路（Tier 1）**：放弃「零远端准备」，成本立刻掉一个数量级——用户手动装一次 `rdev-agent.exe`，配置里声明 `platform: windows`，rdev 跳过探测和上传直接启动它。`exec` / 文件操作 / `list` 基本原样可用，而 `job_*` 显式返回 `unsupported on windows hosts`。**降级是显式的**，不违反上面那条原则。估一两天，等第一个真实用户出现就做。
+
+（附带一个推测,没有 Windows 机器可验:login shell trampoline 大概可以直接跳过——Windows 的 PATH 来自注册表、由所有进程继承,决策 5 要解决的 `uv: command not found` 在那儿本来就不存在。真做的时候要先确认。）
+
+### 本地 Windows：未验证
+
+`rdev` 自身能 `GOOS=windows` 编过，但它调用外部 `ssh` 并依赖 `ControlMaster` 做连接复用——OpenSSH for Windows 至今不支持连接复用，而复用正是热连接 0.55s 的来源。`rdev_sync` 还依赖 `rsync`，Windows 不随系统提供。原生适配大概要引入 Go SSH 库自己管连接池，那是把「调用系统 ssh、复用它的 config 和 ProxyJump」这个简化假设整个推翻。没跑过，所以不宣称支持。
+
+`make` 的任何目标都不产出 Windows 二进制（`PLATFORMS` 只有四个 POSIX 组合），所以没人会**意外**拿到一个跑不起来的版本。
+
+> WSL2 里两侧都能当 Linux 用，零改动。但这**不是上面两个问题的答案**——想直接拿 Windows 当开发机的人，恰恰就是没装 WSL2 的那批人。列在这儿只是因为「如果你恰好有」。
+
+## 首次连接：host key 必须先信任
+
+`BatchMode=yes` 是必须的（交互式提示会挂死 MCP server），代价是**新主机的 host key 必须在首次连接前就被信任**，否则 ssh 直接失败。
+
+这曾经只抛出一句 `Host key verification failed`。现在会附带下一步——怎么取 key、去哪核对指纹、以及**为什么不要用 `StrictHostKeyChecking=no`**（它会永久关掉这个检查，而 rdev 所有凭据脱敏的前提是「你连的是你以为的那台机器」）。
+
+自解释的错误保持原样：域名解析失败、连接被拒，以及**host key 变更**——那条 OpenSSH 自己的警告比任何补充都更响亮、更具体，压在下面反而是帮倒忙。
 
 ## v1 明确不做
 
-- ❌ 交互式 PTY / TUI 转发 — 复杂度高，Claude 用不上，人肉需求直接用 `ssh`
-- ❌ 端口转发 — `ssh -L` 够用
-- ❌ 多机并行扇出 — 等真需求
-- ❌ 通用 shell 逃生口 — 见决策 1
+- ❌ **通用 shell 逃生口** — 见决策 1。这不是权衡，是整个项目的支点。
+- ❌ **交互式 PTY / TUI 转发** — Claude 用不上；人肉需求直接用 `ssh`。
+- ❌ **端口转发** — `ssh -L` 够用，而且它和 rdev 复用同一条 ControlMaster，用户已经有了。
 
-## 还没做的
+## 还没做的（按优先级）
 
-- **`exec` 没有真正的流式输出**。命令跑完(或超时)才返回,期间拿不到增量。
-  不过实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
-  且 kill 走进程组、能覆盖孙进程(测过 `sh -c 'sleep 45' &` 不留孤儿)。
-  所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够,不必为此起 job。
-  真正缺的是长任务的**持续**推送——那个场景本来就该用 job + `job_logs`,不打算在 exec 上再造一套。
-- **Windows 两侧都不支持**，见[平台支持](#平台支持)。远端是硬性的（job 模型依赖 POSIX 进程组），本地是没验证过（缺 ssh 连接复用和 rsync）。
+已完成的两项留在这里作为记录：**P0 首次连接的 host key 提示**（见上节）和 **P2 secrets 跨断连存活**（结论是本来就安全，但补了测试；那轮还抓到一个假测试，见 bug 台账 16）。
+
+**P1 — `exec` 的流式输出。** 命令跑完(或超时)才返回,期间拿不到增量。
+实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
+且 kill 走进程组、能覆盖孙进程(测过 `sh -c 'sleep 45' &` 不留孤儿)。所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够。
+真正的中间地带是**跑 30 秒的命令**:用 `exec` 得盲等,起 job 又要多两次往返——于是不确定要多久的命令倾向于起 job,简单任务也付了 job 的开销。
+是体验优化,不是缺口,而且要改协议,所以排在 P1 而非 P0。长任务的**持续**推送不算在内,那个场景本来就该用 job + `job_logs`。
+
+**P3 — Windows 远端 Tier 1。** 见上。等第一个真实用户。
+
+**P4 — 多机并行扇出。** 原先列在「明确不做 — 等真需求」，但需求形态变了：Claude Code 现在会并行发 tool call，而 `job_wait` 的 `ids`/`wait_any` 已经是「一次调用管多个 job」的单机雏形。缺的是跨主机版本。仍然没人要，所以还在队尾——但它不再是「不做」。
+
 
 ## 开发
 
