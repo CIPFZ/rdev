@@ -1,4 +1,4 @@
-module github.com/tonynyyan/rdev
+module github.com/CIPFZ/rdev
 
 go 1.25.0
 

@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 // Host describes how to reach a remote machine.

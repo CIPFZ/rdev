@@ -23,10 +23,10 @@ import (
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/tonynyyan/rdev/internal/client"
-	"github.com/tonynyyan/rdev/internal/mcpsrv"
-	"github.com/tonynyyan/rdev/internal/session"
-	"github.com/tonynyyan/rdev/internal/transport"
+	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/mcpsrv"
+	"github.com/CIPFZ/rdev/internal/session"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 // agents holds prebuilt rdev-agent binaries, one per remote platform.

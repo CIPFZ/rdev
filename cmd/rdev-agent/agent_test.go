@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 // TestMain lets the test binary act as its own job supervisor.

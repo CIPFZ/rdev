@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 func benchLog(b *testing.B, lines int) string {

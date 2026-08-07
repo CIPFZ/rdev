@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/tonynyyan/rdev/internal/client"
-	"github.com/tonynyyan/rdev/internal/proto"
-	"github.com/tonynyyan/rdev/internal/session"
-	"github.com/tonynyyan/rdev/internal/transport"
+	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/session"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 func newTestClient() *client.Client {

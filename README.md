@@ -13,7 +13,7 @@
 | 长任务 | 工具 120s 超时 → `nohup` + 轮询；中途 kill 丢了整个结果库 | 没有作业模型 |
 | 进程管理 | `pkill` 模式没匹配上主进程；`pgrep` 把自己也列出来 | 靠字符串匹配找进程 |
 | 传文件 | 反复 heredoc 写 `/tmp/q.sql`、`/tmp/chk.py` | 没有文件原语 |
-| 无状态 | 每次都要 `cd ~/nexus` | 连接不持久 |
+| 无状态 | 每次都要 `cd ~/myproject` | 连接不持久 |
 | 输出爆炸 | 每条命令手动接 `tail`/`grep` | 没有输出预算 |
 | 凭据泄露 | token 明文进了对话记录 | 无脱敏 |
 
@@ -54,9 +54,9 @@ MCP server 继承 Claude Code 启动时的项目目录作为 cwd，这就是 pro
 
 实测隔离效果：
 ```
-在 ~/works/nexus  → rdev exec dev -- pwd    ✅ /home/tonynyyan/nexus
-在 ~/works/rdev   → rdev exec dev -- pwd    ❌ unknown host "dev"
-在 ~              → rdev hosts list         ❌ null
+在 ~/works/myproject  → rdev exec dev -- pwd    ✅ /home/youruser/myproject
+在 ~/works/rdev       → rdev exec dev -- pwd    ❌ unknown host "dev"
+在 ~                  → rdev hosts list         ❌ null
 ```
 
 > `.rdev/` 建议加进你的**全局** gitignore（`git config --global core.excludesfile`），
@@ -81,10 +81,10 @@ MCP server 继承 Claude Code 启动时的项目目录作为 cwd，这就是 pro
 
 ```jsonc
 // ✅ 唯一的入口形态
-{"argv": ["sqlite3", "db", "SELECT json_extract(x,'$.score') FROM runs"], "cwd": "~/nexus"}
+{"argv": ["sqlite3", "db", "SELECT json_extract(x,'$.score') FROM runs"], "cwd": "~/myproject"}
 
 // ❌ 故意不提供
-{"command": "cd ~/nexus && sqlite3 db \"SELECT ...\""}
+{"command": "cd ~/myproject && sqlite3 db \"SELECT ...\""}
 ```
 
 参数是 JSON 数组，agent 直接 `exec`，**没有任何 shell 解析它**。引号、词分割、glob 展开在结构上不可能发生。
@@ -156,7 +156,7 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 
 **远端凭据直接注册**（推荐）：
 ```jsonc
-{"action":"set_from_file", "name":"gftoken", "host":"dev", "path":"~/.nexus/auth/gongfeng/key"}
+{"action":"set_from_file", "name":"apptoken", "host":"dev", "path":"~/.config/myapp/token"}
 ```
 值经 agent 连接读取，直接进 store —— 不落本地磁盘、不进对话记录。
 不带 `host` 则读本地文件；**注意两侧凭据可能不同**，注册错的值会导致远端明文不被脱敏（假通过）。
@@ -166,7 +166,7 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 所以 hosts.json 里可以只存**路径**：
 
 ```jsonc
-{"name":"dev", "addr":"user@h", "secrets":{"gftoken":"~/.nexus/auth/gongfeng/key"}}
+{"name":"dev", "addr":"user@h", "secrets":{"apptoken":"~/.config/myapp/token"}}
 ```
 
 首次连接该主机时经 agent 读取并注册,**在第一条命令执行之前**完成——延迟注册会留下一个明文可外泄的窗口。
@@ -232,19 +232,19 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 
 ## 实测验证
 
-全部在真实远端（TencentOS x86_64，SSH 跳板 36000 端口）跑过。
+全部在真实远端（Linux x86_64，SSH 跳板 36000 端口）跑过。
 
 **本轮实际失败过的命令，逐条回归：**
 
 | 验证项 | 之前 | 现在 |
 |---|---|---|
 | `sqlite3` + `$.score` JSON path | `no such column: $.score` | ✅ `exit=0` 零转义 |
-| `uv` 定位 | `command not found` | ✅ `/home/tonynyyan/.local/bin/uv` |
+| `uv` 定位 | `command not found` | ✅ `/home/youruser/.local/bin/uv` |
 | 中文 + 引号 + `$()` | `?????` / 被求值 | ✅ `中文 "quoted" $(not-run) 'sq'` 原样 |
-| `cwd` 继承 | 每次手写 `cd` | ✅ `/home/tonynyyan/nexus` |
+| `cwd` 继承 | 每次手写 `cd` | ✅ `/home/youruser/myproject` |
 | 非零退出码 | 混在文本里 | ✅ `exit=1` + stderr 分离 |
 | 写远端脚本 | heredoc 三层转义 | ✅ `rdev_write` 34 bytes |
-| token 出现在输出 | 明文进对话 | ✅ `<redacted:gongfeng>` |
+| token 出现在输出 | 明文进对话 | ✅ `<redacted:apptoken>` |
 | `secret:` 注入 | — | ✅ 远端拿到 `LEN=32`，本地看不到值 |
 
 **作业模型：**
@@ -258,7 +258,7 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 | stop by pgid | ✅ 连子进程 `sleep` 一起清掉 |
 | **supervisor 被 SIGKILL** | ✅ `state=running orphaned=true child_pid=N`，且 `job_stop` 能清掉 |
 | **UTF-8 边界截断** | ✅ `cap=10` 切在「文」中间 → 返回 `中文测`（valid UTF-8，非乱码） |
-| **远端凭据注册** | ✅ `source=dev:~/.nexus/...`，明文不落本地 |
+| **远端凭据注册** | ✅ `source=dev:~/.config/myapp/...`，明文不落本地 |
 | **job_wait 阻塞** | ✅ 5s 的 job 阻塞 6s 返回 `exited exit_code=3` |
 | **wait 不阻塞其他命令** | ✅ 同 MCP 进程内 wait 阻塞 12s 期间 `exec` 0.2s 返回 |
 | **wait 超时不影响 job** | ✅ `timed_out=true` + `state=running`，可再等 |
@@ -344,12 +344,12 @@ rdev hosts list                    # 含 scope / remote_dir / env
 rdev hosts add dev user@h -port 36000 -save          # project scope
 rdev hosts add prod user@h -global -save             # 全局可见
 rdev hosts add dev user@h -env PROXY=http://p:1 -remote-dir '~/.cache/myrdev' -no-login -save
-rdev hosts add dev user@h -secret gftoken='~/.nexus/auth/gongfeng/key' -save   # 只存路径,不存值
+rdev hosts add dev user@h -secret apptoken='~/.config/myapp/token' -save   # 只存路径,不存值
 
 # secrets 是 MCP 功能（store 在内存里，按进程隔离）。
 # CLI 这两条只用来验证凭据路径解析正确、且脱敏真的覆盖了远端的值：
-rdev secrets set-from-file gftoken ~/.nexus/auth/gongfeng/key -host dev   # 只打印长度，不打印值
-rdev secrets check dev gftoken -path ~/.nexus/auth/gongfeng/key -- env    # → {"redacted": true}
+rdev secrets set-from-file apptoken ~/.config/myapp/token -host dev   # 只打印长度，不打印值
+rdev secrets check dev apptoken -path ~/.config/myapp/token -- env    # → {"redacted": true}
 ```
 
 `--` 之后的一切都作为字面 argv 传递，本地 shell 也不会二次解析。
@@ -364,7 +364,7 @@ rdev secrets check dev gftoken -path ~/.nexus/auth/gongfeng/key -- env    # → 
 | **macOS** amd64 / arm64 | ✅ | ✅ |
 | **Windows** | ❌ 未验证 | ❌ 不支持 |
 
-所以 macOS ↔ Linux 四种方向任意组合都可以（本地 mac 连 Linux 开发机是主用法，实测在 TencentOS x86_64 上跑过；mac 连 mac、Linux 连 Linux 也在支持范围内）。**Windows 两侧都不行**，原因不同：
+所以 macOS ↔ Linux 四种方向任意组合都可以（本地 mac 连 Linux 开发机是主用法，实测在 Linux x86_64 上跑过；mac 连 mac、Linux 连 Linux 也在支持范围内）。**Windows 两侧都不行**，原因不同：
 
 **远端不支持**，是硬性的。agent 的作业模型建立在 POSIX 进程语义上——`Setsid` 把 job detach 出去（决策 3），`syscall.Kill(-pgid)` 按进程组停子进程，`Kill(pid, 0)` 探活。这些在 `GOOS=windows` 下根本不编译，`mapPlatform` 也只认 `uname -s` 的 `linux` / `darwin`，其他值直接报 `unsupported remote OS`。另外 login shell trampoline（决策 5）也假定了 `bash -lc`。Windows 上要重做的不是几个 syscall，而是整套 job 生命周期（Job Objects 而不是进程组），属于另一个工程。
 

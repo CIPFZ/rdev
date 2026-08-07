@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 // jobOps is the set of ops doJob handles. main's dispatcher consults this rather

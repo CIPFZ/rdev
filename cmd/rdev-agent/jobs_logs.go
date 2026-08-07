@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 const defaultLogTail = 200

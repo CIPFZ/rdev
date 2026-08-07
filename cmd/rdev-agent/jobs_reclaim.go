@@ -16,7 +16,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 // jobRm deletes job records, either one by ID or a filtered sweep.

@@ -34,7 +34,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 const (

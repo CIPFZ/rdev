@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tonynyyan/rdev/internal/session"
-	"github.com/tonynyyan/rdev/internal/transport"
+	"github.com/CIPFZ/rdev/internal/session"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 func newTestClient() *Client {

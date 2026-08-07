@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 // Wait polling bounds. The interval backs off so a job that runs for an hour

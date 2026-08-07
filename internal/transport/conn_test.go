@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tonynyyan/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 // newTestConn wires a Conn to in-memory pipes instead of an ssh process, so the

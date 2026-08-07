@@ -14,10 +14,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tonynyyan/rdev/internal/proto"
-	"github.com/tonynyyan/rdev/internal/secrets"
-	"github.com/tonynyyan/rdev/internal/session"
-	"github.com/tonynyyan/rdev/internal/transport"
+	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/secrets"
+	"github.com/CIPFZ/rdev/internal/session"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 // AgentLookup resolves an agent build for a remote platform.
