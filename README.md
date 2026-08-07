@@ -306,8 +306,8 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
 
 **性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
 
-**单元测试：**`go test ./... -race` 全绿，173 项
-（agent 79、mcpsrv 25、transport 24、client 18、secrets 14、session 13）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
+**单元测试：**`go test ./... -race` 全绿，175 项
+（agent 79、mcpsrv 25、transport 24、client 20、secrets 14、session 13）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
 
 开发过程中测试抓到 7 个真 bug：
 1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
@@ -347,7 +347,11 @@ it was installed by an older rdev -- run 'make agents && make build' and reconne
     唯一的线索其实是运行时间：3.08s vs 0.45s——因为没有守卫它会真的去 dial。
 
 17. **`SyncResult.Command` 回传未脱敏的 rsync argv。** 就在 `Stdout` / `Stderr` 两行**下面**——同一个结构体字面量，上面两个字段过了 `Redact`，它没过。而 argv 是调用方给的：`--exclude` 模式和路径都可能带凭据。实测确认同一个 secret 在 `Stdout` 里是 `<redacted:tok>`、在 `Command` 里是明文。`ExecResult.Cwd` 是同一类（从请求回显），也一起补了。
-    根因是**脱敏按字段做而不是在边界做**——所以除了修这两处，还加了 MCP 边界兜底（见决策 6）。加完之后又发现 `rdev_session` 的 `cwd` **本来也没脱敏**，也就是说同一个 bug 当时至少有两个实例，我只看到了一个。这正是「逐字段」这个写法的问题：修掉看得见的那个，剩下的仍然静默存在。
+    根因是**脱敏按字段做而不是在边界做**——所以除了修这两处，还加了 MCP 边界兜底（见决策 6）。
+    加完之后又在两个地方发现同一个 bug：`rdev_session` 的 `cwd` 没脱敏（做兜底时撞到的），
+    `JobInfo` 的 `Label` / `Cwd` 也没有（追 `redactJob` 的 0% 覆盖率时撞到的，`Argv` 脱了、这两个漏了）。
+    也就是说我报告「一个泄露」的时候，实际至少有**四个实例**，我只看到了自己碰巧看的那个。
+    这正是「逐字段」的问题：修掉看得见的那个，剩下的仍然静默存在——所以真正的修法是边界兜底 + 用反射遍历字段的测试。
 
 ## CLI
 
@@ -445,17 +449,28 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 且 kill 走进程组、能覆盖孙进程(测过 `sh -c 'sleep 45' &` 不留孤儿)。所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够。
 真正的中间地带是**跑 30 秒的命令**:用 `exec` 得盲等,起 job 又要多两次往返——于是不确定要多久的命令倾向于起 job,简单任务也付了 job 的开销。
 
-**排在 P1 而非 P0，是因为它卡在一个我无法从这里验证的前提上。** 查过之后有两处硬约束：
+**排在 P1 而非 P0，是因为它卡在一个前提上。这轮把前提查清了，结论是「按原方案做不通」。** 三处硬证据：
 
-1. **线协议是一请求一回复。** `readLoop` 收到回复就 `delete(c.pending, resp.ID)`（`internal/transport/conn.go:597`），所以增量推送要么改成多回复分帧，要么另开一路 notification——都是动 `proto` 的破坏性改动。
-2. **MCP 那头只有 `NotifyProgress`，而它的 `ProgressNotificationParams` 只带一个 `Message string`。** 关键问题是：Claude Code 会不会把这些 message 喂进模型的上下文？如果只是给人看的 UI 提示，那么整条链路做完，**模型依然拿不到增量输出**——收益是零。
+1. **线协议是一请求一回复。** `readLoop` 收到回复就 `delete(c.pending, resp.ID)`（`internal/transport/conn.go:597`），增量推送要么改成多回复分帧，要么另开一路 notification——都是动 `proto` 的破坏性改动。
+2. **MCP 的 `notifications/progress` 需要客户端先给 `progressToken`。** 服务端不能主动推：规范要求 token 来自请求方（SDK 里是 `CallToolParams.GetProgressToken`）。翻了本机 16 份 MCP 日志，**`progressToken` 出现 0 次**——Claude Code 调用工具时根本没带。没有 token，这条路在协议层就是关着的。
+3. **Claude Code 实际用的是另一套机制。** 日志里每次连接都留下一行：
+   ```
+   Channel notifications skipped: server did not declare claude/channel capability
+   ```
+   也就是说增量推送走的是 `claude/channel` 这个厂商扩展，而不是标准的 progress notification。MCP SDK v1.7.0 里没有它的任何实现（`grep claude/channel` 无命中），但 `ServerCapabilities` 有 `Extensions`（`{vendor}/{name}` 格式）和 `Experimental` 两个槽，所以**技术上可以自己声明**——前提是先搞清 `claude/channel` 的实际报文格式，而那是未公开的。
 
-第 2 点我在这台机器上验不了。**在验证之前不动手**：一个建立在「希望客户端这么做」上的协议破坏性改动，代价和收益完全不对称。
-真要做，正确顺序是先用一个最小的 MCP server 测出 Claude Code 对 progress notification 的实际处理，再决定值不值得改 `proto`。
+所以现在的状态不是「没排上」，而是**原方案（progress notification）已被证伪，可行方案（`claude/channel`）依赖未公开的协议细节**。
+在拿到格式之前不动手：一个建立在猜测报文上的破坏性改动，代价和收益完全不对称。
 
 长任务的**持续**推送不算在这条里,那个场景本来就该用 job + `job_logs`。
 
 **P3 — Windows 远端 Tier 1。** 见上。等第一个真实用户。
+
+**不做 — `internal/client` 的传输层接缝。** 该包覆盖率 20.6%，明显低于其他包（54%–89%）。原因是 16 个 0% 的函数几乎都是同一个形状：拼请求 → `do()` → 脱敏 → 返回。要覆盖它们得把 `transport.Conn` 抽成接口再注入假实现。
+
+**评估后认为不值得**：这些包装器里没有分支逻辑，测试会退化成「断言字段被复制进了结构体」——同义反复，改坏了照样通过。真正有内容的部分（`buildExecParams` 的分层、脱敏、参数校验）已经覆盖了，而这轮 `redactJob` 的漏洞是**直接测那个函数**抓到的，不需要接缝。
+
+覆盖率数字会一直难看。**接受这一点，而不是用没有牙的测试把它刷上去**——后者更糟，因为它让下一个人以为这些路径有保护。真要做接缝，触发条件应该是「出现了带分支的包装器」，而不是「覆盖率低」。
 
 **P4 — 多机并行扇出。** 原先列在「明确不做 — 等真需求」，但需求形态变了：Claude Code 现在会并行发 tool call，而 `job_wait` 的 `ids`/`wait_any` 已经是「一次调用管多个 job」的单机雏形。缺的是跨主机版本。仍然没人要，所以还在队尾——但它不再是「不做」。
 

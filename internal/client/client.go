@@ -312,8 +312,13 @@ func (c *Client) JobStart(ctx context.Context, opts JobStartOptions) (*proto.Job
 	return c.redactJob(resp.Job.Info), nil
 }
 
-// redactJob scrubs the recorded argv, which may contain a credential passed as
-// a command-line flag.
+// redactJob scrubs the recorded job fields that can carry a credential.
+//
+// Argv is the obvious one -- a token passed as a command-line flag. Label and Cwd
+// are caller-supplied too and were missed initially, which is the same omission as
+// SyncResult.Command: scrubbing chosen per field means the fields nobody thought
+// about stay in the clear. The MCP boundary now backstops this, but the CLI calls
+// straight into this package and never passes through that, so the fix belongs here.
 func (c *Client) redactJob(j *proto.JobInfo) *proto.JobInfo {
 	if j == nil {
 		return nil
@@ -321,6 +326,8 @@ func (c *Client) redactJob(j *proto.JobInfo) *proto.JobInfo {
 	for i, a := range j.Argv {
 		j.Argv[i] = c.Secrets.Redact(a)
 	}
+	j.Label = c.Secrets.Redact(j.Label)
+	j.Cwd = c.Secrets.Redact(j.Cwd)
 	return j
 }
 

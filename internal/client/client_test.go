@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
@@ -274,6 +275,57 @@ func TestExecResultRedactsCwd(t *testing.T) {
 	}
 	if got := c.Secrets.Redact("/home/u/" + tok + "/work"); strings.Contains(got, tok) {
 		t.Errorf("a cwd carrying a secret must be redacted, got %q", got)
+	}
+}
+
+// redactJob scrubbed only Argv, leaving Label and Cwd -- both caller-supplied -- in
+// the clear. Found by chasing this function's zero coverage, and it is the same
+// omission as SyncResult.Command: per-field scrubbing misses the fields nobody
+// thought about. The MCP boundary backstops it now, but the CLI calls this package
+// directly and never passes through that, so it has to be right here too.
+//
+// Walks every string field by reflection so a field added to JobInfo later is
+// covered without anyone remembering this test exists.
+func TestRedactJobScrubsEveryStringField(t *testing.T) {
+	c := newTestClient()
+	const tok = "job-field-credential-value-99"
+	if err := c.Secrets.Set("tok", tok); err != nil {
+		t.Fatal(err)
+	}
+
+	j := c.redactJob(&proto.JobInfo{
+		ID:        "j1",
+		Label:     "run-" + tok,
+		Argv:      []string{"./x", "--token", tok},
+		Cwd:       "/data/" + tok,
+		State:     "running",
+		StartedAt: "2026-01-01T00:00:00Z",
+	})
+
+	v := reflect.ValueOf(*j)
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Type().Field(i)
+		switch f.Type.Kind() {
+		case reflect.String:
+			if got := v.Field(i).String(); strings.Contains(got, tok) {
+				t.Errorf("JobInfo.%s carries the secret: %q", f.Name, got)
+			}
+		case reflect.Slice:
+			if f.Type.Elem().Kind() != reflect.String {
+				continue
+			}
+			for k := 0; k < v.Field(i).Len(); k++ {
+				if got := v.Field(i).Index(k).String(); strings.Contains(got, tok) {
+					t.Errorf("JobInfo.%s[%d] carries the secret: %q", f.Name, k, got)
+				}
+			}
+		}
+	}
+}
+
+func TestRedactJobNil(t *testing.T) {
+	if got := newTestClient().redactJob(nil); got != nil {
+		t.Errorf("redactJob(nil) = %v, want nil", got)
 	}
 }
 
