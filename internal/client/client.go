@@ -30,6 +30,11 @@ type Client struct {
 
 	lookup AgentLookup
 
+	// warn reports a non-fatal problem. It exists so the quiet paths -- notably a
+	// credential file that could not be read -- are observable in a test rather
+	// than only on a terminal. Nil means os.Stderr.
+	warn func(format string, args ...any)
+
 	mu    sync.Mutex
 	conns map[string]*transport.Conn
 	// dialing serializes connection setup per host. MCP dispatches tool calls
@@ -46,6 +51,18 @@ func New(lookup AgentLookup) *Client {
 		conns:   make(map[string]*transport.Conn),
 		dialing: make(map[string]*sync.Mutex),
 	}
+}
+
+// warnf reports a non-fatal problem, defaulting to stderr.
+//
+// Stderr rather than the response: an unreadable credential must not fail the
+// call, but it must not vanish either, and stdout carries the MCP stream.
+func (c *Client) warnf(format string, args ...any) {
+	if c.warn != nil {
+		c.warn(format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
 }
 
 // dialLock returns the per-host setup mutex, creating it on first use.
@@ -129,9 +146,9 @@ func (c *Client) loadHostSecrets(ctx context.Context, hostName string) {
 			continue
 		}
 		if err := c.SetSecretFromRemoteFile(ctx, hostName, name, path); err != nil {
-			// Surfaced on stderr rather than swallowed: an unredacted credential is
-			// worth a warning, and stderr does not corrupt the MCP stdout stream.
-			fmt.Fprintf(os.Stderr, "rdev: warning: secret %q from %s:%s not registered: %v\n",
+			// Surfaced rather than swallowed: an unredacted credential is worth a
+			// warning, and stderr does not corrupt the MCP stdout stream.
+			c.warnf("rdev: warning: secret %q from %s:%s not registered: %v\n",
 				name, hostName, path, err)
 		}
 	}

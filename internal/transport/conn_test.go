@@ -453,6 +453,117 @@ func TestControlDirPermissions(t *testing.T) {
 	}
 }
 
+// The two failures BatchMode=yes makes cryptic get a next step; everything else
+// is left alone. The negative cases carry the weight here -- appending advice to an
+// error that already says what is wrong makes it harder to read, not easier.
+func TestExplainSSHError(t *testing.T) {
+	host := Host{Addr: "user@dev.example.com", Port: 36000}
+
+	cases := []struct {
+		name        string
+		in          string
+		wantAdvice  bool
+		wantSnippet string
+	}{
+		{
+			name:        "host key not trusted",
+			in:          "Host key verification failed.",
+			wantAdvice:  true,
+			wantSnippet: "ssh-keyscan -p 36000 dev.example.com",
+		},
+		{
+			// OpenSSH prints this variant before the summary line, and it is what a
+			// caller sees when only one key type is missing.
+			name:        "no known host key of this type",
+			in:          "No ED25519 host key is known for dev.example.com and you have requested strict checking.",
+			wantAdvice:  true,
+			wantSnippet: "ssh-keyscan",
+		},
+		{
+			name:        "publickey auth rejected",
+			in:          "user@dev.example.com: Permission denied (publickey).",
+			wantAdvice:  true,
+			wantSnippet: "must succeed with no prompt",
+		},
+		{
+			name:       "unresolved hostname explains itself",
+			in:         "ssh: Could not resolve hostname bogus.invalid: nodename nor servname provided",
+			wantAdvice: false,
+		},
+		{
+			name:       "connection refused explains itself",
+			in:         "ssh: connect to host dev.example.com port 36000: Connection refused",
+			wantAdvice: false,
+		},
+		{
+			// A changed key is a possible interception, and the message OpenSSH prints
+			// for it is already loud and specific. Burying it under our advice would be
+			// the wrong call.
+			name:       "changed host key is left verbatim",
+			in:         "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!",
+			wantAdvice: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := explainSSHError(errors.New(tc.in), host)
+			if !strings.Contains(got.Error(), tc.in) {
+				t.Errorf("original ssh message lost:\n%s", got)
+			}
+			hasAdvice := strings.Contains(got.Error(), "BatchMode=yes")
+			if hasAdvice != tc.wantAdvice {
+				t.Errorf("advice present = %v, want %v:\n%s", hasAdvice, tc.wantAdvice, got)
+			}
+			if tc.wantSnippet != "" && !strings.Contains(got.Error(), tc.wantSnippet) {
+				t.Errorf("missing %q:\n%s", tc.wantSnippet, got)
+			}
+		})
+	}
+
+	if explainSSHError(nil, host) != nil {
+		t.Error("nil error should stay nil")
+	}
+}
+
+// The advice must never suggest disabling the check it is explaining. Someone stuck
+// on this error will find StrictHostKeyChecking=no on their own; having the tool
+// recommend it would trade away the assumption every redacted credential rests on.
+func TestExplainSSHErrorDoesNotSuggestDisablingVerification(t *testing.T) {
+	got := explainSSHError(errors.New("Host key verification failed."), Host{Addr: "u@h"}).Error()
+	if !strings.Contains(got, "Do not use StrictHostKeyChecking=no") {
+		t.Error("advice should warn against StrictHostKeyChecking=no")
+	}
+	// Present only inside that warning, so one occurrence and no "=no" recommendation.
+	if strings.Count(got, "StrictHostKeyChecking") != 1 {
+		t.Errorf("StrictHostKeyChecking mentioned more than once:\n%s", got)
+	}
+}
+
+// ssh-keyscan takes a hostname, not user@host: pasting the command with the user
+// prefix left in fails, which is the kind of detail that makes advice useless.
+func TestSSHHostnameStripsUser(t *testing.T) {
+	cases := map[string]string{
+		"user@dev.example.com": "dev.example.com",
+		"dev.example.com":      "dev.example.com",
+		"1.2.3.4":              "1.2.3.4",
+		"user@1.2.3.4":         "1.2.3.4",
+	}
+	for in, want := range cases {
+		if got := sshHostname(in); got != want {
+			t.Errorf("sshHostname(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A host with no explicit port must still produce a runnable command.
+func TestExplainSSHErrorDefaultsPort(t *testing.T) {
+	got := explainSSHError(errors.New("Host key verification failed."), Host{Addr: "u@h"}).Error()
+	if !strings.Contains(got, "ssh-keyscan -p 22 h") {
+		t.Errorf("want default port 22 in the command:\n%s", got)
+	}
+}
+
 // The connect probe replaces four sequential ssh round trips, so its output
 // parsing has to tolerate whatever the remote shell adds around it.
 func TestParseProbeOutput(t *testing.T) {

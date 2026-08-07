@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,5 +221,77 @@ func TestLoadHostSecretsNoopWithoutConfig(t *testing.T) {
 	c.loadHostSecrets(context.Background(), "dev")
 	if n := len(c.Secrets.Names()); n != 0 {
 		t.Errorf("registered %d secrets from an empty config", n)
+	}
+}
+
+// Redaction must survive a reconnect. `do` drops a dead connection and dials
+// again, and the store is per-process rather than per-connection, so a value
+// registered before the drop still redacts after it. This is the invariant that
+// matters most in the whole package: if it broke, output would keep flowing and
+// the only visible change would be a plaintext credential in the transcript.
+//
+// Asserted at the store level because reaching the reconnect branch needs a live
+// agent. What is checked is the property that makes the branch safe -- the store
+// is not attached to the connection -- so a refactor that moved it there fails here.
+func TestSecretsSurviveConnectionLoss(t *testing.T) {
+	c := newTestClient()
+	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	const token = "token-that-must-stay-hidden"
+	if err := c.Secrets.Set("tok", token); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for the pooled connection being discarded as dead: this is exactly
+	// what do() does before redialing.
+	c.mu.Lock()
+	delete(c.conns, "dev")
+	c.mu.Unlock()
+
+	if got := c.Secrets.Redact("leaked " + token); strings.Contains(got, token) {
+		t.Errorf("token survived into output after connection loss: %q", got)
+	}
+}
+
+// The reload path runs on every dial, including the one after a drop, so it must
+// skip names that are already registered rather than refetching them.
+//
+// Asserted through the warning rather than the stored value, which was the first
+// version of this test and was worthless: failures here are deliberately quiet, so
+// the value survives whether the guard skipped the fetch or attempted it and lost.
+// A mutation run confirmed the value-only assertion passed with the guard deleted.
+// The warning is the one externally visible difference.
+func TestLoadHostSecretsSkipsAlreadyRegistered(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	const token = "reconnect-safe-token-value"
+	if err := os.WriteFile(keyPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var warnings []string
+	c := newTestClient()
+	c.warn = func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}
+	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	c.Hosts.Update("dev", func(s *session.State) {
+		s.Secrets = map[string]string{"tok": keyPath}
+	})
+	if err := c.Secrets.SetFromFile("tok", keyPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second pass, as a reconnect would trigger. Reaching the fetch would need a
+	// live agent, so it would fail and warn -- silence is the proof it was skipped.
+	c.loadHostSecrets(context.Background(), "dev")
+
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none: an already-registered name must not be refetched", warnings)
+	}
+	if names := c.Secrets.Names(); len(names) != 1 {
+		t.Errorf("names = %v, want exactly one registration", names)
+	}
+	if v, _ := c.Secrets.Get("tok"); v != token {
+		t.Errorf("value = %q, want the original token preserved", v)
 	}
 }

@@ -245,10 +245,75 @@ fi`
 	out, err := c.runSSH(ctx, "sh", "-c", shellQuote(sh))
 	if err != nil {
 		// A failure here is a real connectivity or auth problem; surface ssh's own
-		// message, which explains it better than a wrapped error would.
-		return nil, fmt.Errorf("connect and probe %s: %w", c.host.Addr, err)
+		// message, which explains it better than a wrapped error would. Two shapes
+		// get an added next step, because ssh's text alone leaves the reader stuck.
+		return nil, fmt.Errorf("connect and probe %s: %w", c.host.Addr, explainSSHError(err, c.host))
 	}
 	return parseProbe(out)
+}
+
+// explainSSHError appends a next step to the ssh failures a first-time user hits.
+//
+// BatchMode=yes is required -- an interactive host key prompt would hang the MCP
+// server with no way to answer it -- but it converts the usual "type yes" moment
+// into a bare "Host key verification failed", which says nothing about what to do.
+// This is the first thing anyone connecting to a new machine encounters.
+//
+// The advice deliberately does not offer StrictHostKeyChecking=no. Someone stuck
+// on this error will find that flag on their own, and it disables exactly the check
+// that makes the rest of this tool's credential handling worth anything. Pointing
+// at ssh-keyscan plus verification keeps the check and gets them moving.
+//
+// Errors that already explain themselves (unresolved hostname, refused connection,
+// wrong key) are returned untouched: appending advice to a clear message makes it
+// worse, not better.
+func explainSSHError(err error, h Host) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	port := h.Port
+	if port == 0 {
+		port = 22
+	}
+	hostname := sshHostname(h.Addr)
+
+	switch {
+	case strings.Contains(msg, "Host key verification failed"),
+		strings.Contains(msg, "host key is known"):
+		return fmt.Errorf("%s\n\n"+
+			"rdev runs ssh with BatchMode=yes, so it cannot show the interactive "+
+			"\"continue connecting?\" prompt -- the host key has to be trusted before "+
+			"the first connection.\n"+
+			"To trust it, fetch the key and verify the fingerprint against a source "+
+			"you trust (for a cloud provider, its docs; for your own machine, run "+
+			"`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on it):\n"+
+			"    ssh-keyscan -p %d %s > /tmp/key.pub && ssh-keygen -lf /tmp/key.pub\n"+
+			"    # compare the fingerprint, then:\n"+
+			"    cat /tmp/key.pub >> ~/.ssh/known_hosts\n"+
+			"Do not use StrictHostKeyChecking=no: it silences this check permanently, "+
+			"and every credential rdev redacts assumes you are talking to the right machine.",
+			msg, port, hostname)
+
+	case strings.Contains(msg, "Permission denied"),
+		strings.Contains(msg, "No supported authentication"):
+		return fmt.Errorf("%s\n\n"+
+			"rdev runs ssh with BatchMode=yes, so it cannot prompt for a password or "+
+			"passphrase. Key-based auth has to work unattended:\n"+
+			"    ssh -p %d %s true    # must succeed with no prompt\n"+
+			"If that prompts, add the key to your agent (`ssh-add`) or configure this "+
+			"host in ~/.ssh/config.",
+			msg, port, h.Addr)
+	}
+	return err
+}
+
+// sshHostname strips any user@ prefix, which ssh-keyscan does not accept.
+func sshHostname(addr string) string {
+	if _, host, ok := strings.Cut(addr, "@"); ok {
+		return host
+	}
+	return addr
 }
 
 // parseProbe reads the probe script's output.
