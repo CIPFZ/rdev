@@ -83,10 +83,12 @@ check-agents:
 # check is what CI and a pre-push run should use: correctness plus build consistency.
 check: vet test check-agents
 
-vet:
+# vet and test depend on agents for the same reason check does: cmd/rdev cannot be
+# loaded at all until the binaries it embeds exist.
+vet: agents
 	$(GO) vet ./...
 
-test:
+test: agents
 	$(GO) test ./... -count=1
 
 fmt:
