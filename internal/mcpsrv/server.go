@@ -13,15 +13,18 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Version is reported to MCP clients.
-const Version = "0.1.0"
+// Version is reported to MCP clients. Sourced from buildinfo so the release
+// version is stamped in one place rather than declared twice; it is a var, not a
+// const, because -ldflags -X can only write to a variable.
+var Version = buildinfo.Version
 
 // New builds a server with all rdev tools registered.
 func New(c *client.Client) *mcp.Server {

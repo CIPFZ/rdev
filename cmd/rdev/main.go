@@ -22,11 +22,12 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/mcpsrv"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // agents holds prebuilt rdev-agent binaries, one per remote platform.
@@ -45,6 +46,37 @@ func lookupAgent(goos, goarch string) (*transport.AgentBinary, error) {
 	}
 	sum := sha256.Sum256(data)
 	return &transport.AgentBinary{Data: data, SHA256: hex.EncodeToString(sum[:])}, nil
+}
+
+// printVersion reports this binary's identity and that of every agent inside it.
+//
+// The agent checksums are the point. `rdev version` used to print a hardcoded
+// "rdev 0.1.0", which cannot answer the question that actually comes up when a
+// remote agent misbehaves: is the agent embedded in this rdev the one built from
+// this source? A build whose embedded agents are older than its own code is
+// possible -- `go build ./cmd/rdev` does not rebuild cmd/rdev/agents/ -- and
+// without these lines it is invisible from the outside.
+//
+// Twelve hex characters: enough to compare against `sha256sum` on a remote host or
+// against `make check-agents` output, short enough to read off a screen.
+func printVersion() {
+	fmt.Printf("rdev %s\n", buildinfo.Stamp())
+
+	names, err := agents.ReadDir("agents")
+	if err != nil {
+		fmt.Println("embedded agents: none (run 'make agents')")
+		return
+	}
+	fmt.Println("embedded agents:")
+	for _, e := range names {
+		data, err := agents.ReadFile("agents/" + e.Name())
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(data)
+		fmt.Printf("  %-28s %s  %d bytes\n",
+			e.Name(), hex.EncodeToString(sum[:])[:12], len(data))
+	}
 }
 
 func main() {
@@ -87,7 +119,7 @@ func main() {
 	case "ping":
 		err = cmdPing(ctx, c, os.Args[2:])
 	case "version", "-version", "--version":
-		fmt.Printf("rdev %s\n", mcpsrv.Version)
+		printVersion()
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -125,6 +157,7 @@ USAGE
                                        [-no-login] [-global] [-save]]
   rdev secrets set-from-file <name> <path> [-host H]
   rdev secrets check <host> <name> [-path P] -- <argv...>
+  rdev version                            build id + every embedded agent's SHA-256
 
 HOST
   A registered alias, or an ssh destination like user@1.2.3.4:2222.

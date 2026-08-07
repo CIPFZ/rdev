@@ -23,7 +23,7 @@
 ## 快速开始
 
 ```bash
-make build                                     # 需要 Go 1.25+
+make all                                       # 需要 Go 1.25+
 
 # 注册进 Claude Code（工具本身全局可用）
 claude mcp add rdev --scope user -- $PWD/bin/rdev serve
@@ -488,13 +488,42 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 ```bash
 GO=~/sdk/go1.25.0/bin/go     # 本机 Go 装在这里，未改全局 PATH
 
-make agents      # 交叉编译 4 个平台的 agent
-make build       # 编译 rdev（含 embed）
-make test        # 单元测试
+make all           # = agents + build，日常就用这个
+make agents        # 交叉编译 4 个平台的 agent
+make build         # 编译 rdev（含 embed）
+make check-agents  # 校验 embed 的 agent 确实由当前源码构出
+make check         # = vet + test + check-agents
+make test
 make vet
 ```
 
 改了 `cmd/rdev-agent/` 之后必须 `make agents`，否则 `bin/rdev` 里 embed 的还是旧 agent —— 远端跑的是那个副本，改动不会生效。
+
+**用 `make all`，不要用 `go build ./cmd/rdev`。** 后者不重建 `cmd/rdev/agents/`，于是可以构出一个「内嵌 agent 比自身源码还旧」的 `bin/rdev`，而且从外面完全看不出来。我们真踩过：08-06 20:01 构建的 `bin/rdev` 里装着 20:18 的 agent。
+
+两个工具让这件事可查、可拦:
+
+```
+$ rdev version
+rdev 0.1.0 60503d1 2026-08-07T10:22:31Z
+embedded agents:
+  rdev-agent-darwin-amd64      3ef3e8588d1a  2548080 bytes
+  rdev-agent-darwin-arm64      20407da522ed  2448658 bytes
+  rdev-agent-linux-amd64       4e97ea14dabd  2580664 bytes
+  rdev-agent-linux-arm64       9e55d8c503e9  2556088 bytes
+
+$ make check-agents
+STALE    rdev-agent-linux-amd64 embedded=66e69a9ea17b current=1b597da9bd83
+...
+The embedded agents were not built from this source tree.
+Run `make all` (not `go build`) so bin/rdev and its agents agree.
+```
+
+版本标识由 `-ldflags -X` 注入 `internal/buildinfo`（git describe + **commit 时间**），`rdev-agent -version` 也会打印同一个 stamp,`ping` 结果里带 `build` 字段。
+
+注意时间戳取的是 **commit 时间而非构建时间**：构建时间会让每次重编都改变 agent 的字节，那就废掉了「按 content hash 判断远端 agent 要不要换」这个快路径 —— 每次重连都要重传 9MB。commit 时间对排序这个用途一样够用，而且保持了构建可复现（实测两次 `-trimpath` 构建 SHA-256 完全一致，`check-agents` 正是靠这个性质才能用内容比对而不是比 mtime —— git 不保留 mtime，比时间戳会在新克隆和 CI 缓存上频繁误报）。
+
+工作区脏时 `Commit` 带 `-dirty` 后缀，`buildinfo` 把它当作**不可排序**而不是「相等」：脏树继承父 commit 的时间，那个时间说明不了它的内容。
 
 ## 布局
 

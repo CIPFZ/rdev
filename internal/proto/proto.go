@@ -187,6 +187,12 @@ type PingResult struct {
 	OS         string `json:"os"`
 	Arch       string `json:"arch"`
 	PID        int    `json:"pid"`
+	// Build is the agent's build stamp (see internal/buildinfo). Empty from a
+	// build that predates it, which callers must read as "unknown" rather than
+	// as a mismatch. Protocol version answers "can we talk"; this answers "which
+	// binary am I actually talking to", which is what a bootstrap that keeps
+	// flipping between two builds needs.
+	Build string `json:"build,omitempty"`
 }
 
 // Compatible reports whether an agent advertising this ping can serve a host

@@ -34,6 +34,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -45,8 +46,13 @@ const (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
+		// The build stamp goes on its own prefixed line, and the host parses it to
+		// decide whether replacing this binary would be a downgrade. Prefixed
+		// rather than positional for the same reason the connect probe is: a
+		// chatty profile can write to stdout first.
 		fmt.Printf("rdev-agent proto=%d-%d %s/%s\n",
 			proto.MinVersion, proto.Version, runtime.GOOS, runtime.GOARCH)
+		fmt.Println(buildinfo.StampLine())
 		return
 	}
 
@@ -290,6 +296,7 @@ func doPing() *proto.PingResult {
 		OS:         runtime.GOOS,
 		Arch:       runtime.GOARCH,
 		PID:        os.Getpid(),
+		Build:      buildinfo.Stamp(),
 	}
 }
 
