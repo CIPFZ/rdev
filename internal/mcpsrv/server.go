@@ -29,6 +29,10 @@ var Version = buildinfo.Version
 
 // New builds a server with all rdev tools registered.
 func New(c *client.Client) *mcp.Server {
+	return newServer(c, c.Hosts.ApproveProject)
+}
+
+func newServer(c *client.Client, approveProject func(string) (session.ProjectTrust, error)) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "rdev",
 		Title:   "Remote dev environment proxy",
@@ -51,7 +55,7 @@ func New(c *client.Client) *mcp.Server {
 	registerJobs(s, c)
 	registerFiles(s, c)
 	registerSync(s, c)
-	registerSession(s, c)
+	registerSession(s, c, approveProject)
 	registerSecrets(s, c)
 	return s
 }
@@ -627,9 +631,10 @@ type SessionOut struct {
 	Saved        bool                 `json:"saved,omitempty"`
 	SavedTo      string               `json:"saved_to,omitempty"`
 	SavedNote    string               `json:"saved_note,omitempty"`
+	Warning      string               `json:"warning,omitempty"`
 }
 
-func registerSession(s *mcp.Server, c *client.Client) {
+func registerSession(s *mcp.Server, c *client.Client, approveProject func(string) (session.ProjectTrust, error)) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "rdev_session",
 		Description: "Inspect or update per-host state. Setting cwd once removes the need to repeat it. " +
@@ -639,9 +644,14 @@ func registerSession(s *mcp.Server, c *client.Client) {
 			"Use 'secrets' to declare credential files that should be registered for redaction automatically on " +
 			"every connect, so a token is masked without having to remember rdev_secrets each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionIn) (*mcp.CallToolResult, SessionOut, error) {
+		approvalWarning := ""
 		if in.ApproveProjectDigest != "" {
-			if _, err := c.Hosts.ApproveProject(in.ApproveProjectDigest); err != nil {
-				return nil, SessionOut{}, err
+			if _, err := approveProject(in.ApproveProjectDigest); err != nil {
+				warning, committed := session.ConfigWriteCommittedWarning(err)
+				if !committed {
+					return nil, SessionOut{}, err
+				}
+				approvalWarning = warning
 			}
 		}
 		isNew := false
@@ -720,6 +730,7 @@ func registerSession(s *mcp.Server, c *client.Client) {
 		out := SessionOut{
 			ProjectTrust: c.Hosts.ProjectTrustStatus(),
 			Security:     c.Hosts.SecuritySnapshot(),
+			Warning:      approvalWarning,
 		}
 		if in.Persist {
 			if err := c.Hosts.Save(scope); err != nil {

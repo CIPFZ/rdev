@@ -617,25 +617,15 @@ target=$2
 want=$3
 file=$stage/agent
 ready=$stage/ready
+proof=$stage/published
 old=$stage/old
+failed=$stage/failed
 owned=0
-installing=0
-installed=0
+state=STAGED
 had_target=0
-cleanup() {
-  if [ "$installing" = 1 ] && [ "$installed" = 0 ]; then
-    if [ "$had_target" = 1 ] && [ -f "$old" ] && [ ! -L "$old" ]; then
-      mv -f -- "$old" "$target" 2>/dev/null || true
-    else
-      rm -f -- "$target" 2>/dev/null || true
-    fi
-  fi
-  if [ "$owned" = 1 ]; then
-    rm -f -- "$file" "$ready" "$old"
-    rmdir -- "$stage" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT HUP INT TERM
+published_ident=
+old_ident=
+old_digest=
 umask 077
 mkdir -- "$stage"
 owned=1
@@ -650,6 +640,7 @@ if stat -c '%u:%h' -- "$file" >/dev/null 2>&1; then
   ident() { stat -Lc '%d:%i' -- "$1"; }
   fd=/proc/$$/fd/8
   readfd=/proc/$$/fd/9
+  verifyfd=/proc/$$/fd/7
   digest() { sha256sum -- "$1" | awk '{print $1}'; }
 else
   meta() { stat -f '%u:%l' -- "$1"; }
@@ -658,8 +649,150 @@ else
   ident() { stat -f '%i' -- "$1"; }
   fd=/dev/fd/8
   readfd=/dev/fd/9
+  verifyfd=/dev/fd/7
   digest() { shasum -a 256 -- "$1" | awk '{print $1}'; }
 fi
+
+emit_ambiguous() {
+  printf 'RDEV_AGENT_INSTALL_AMBIGUOUS:%s\n' "$1" >&2
+  exit 74
+}
+
+emit_committed() {
+  printf 'RDEV_AGENT_INSTALL_COMMITTED:%s\n' "$1" >&2
+  exit 75
+}
+
+verify_target() {
+  expected_ident=$1
+  expected_digest=$2
+  [ -f "$target" ] || return 1
+  [ ! -L "$target" ] || return 1
+  exec 7< "$target" || return 1
+  actual_ident=$(ident "$verifyfd") || { exec 7<&-; return 1; }
+  actual_owner=$(owner "$verifyfd") || { exec 7<&-; return 1; }
+  actual_digest=$(digest "$verifyfd") || { exec 7<&-; return 1; }
+  path_ident=$(ident "$target") || { exec 7<&-; return 1; }
+  exec 7<&-
+  [ "$actual_owner" = "$uid" ] || return 1
+  [ "$actual_ident" = "$expected_ident" ] || return 1
+  [ "$path_ident" = "$expected_ident" ] || return 1
+  [ "$actual_digest" = "$expected_digest" ]
+}
+
+cleanup_staged() {
+  cleanup_ok=1
+  if ! rm -f -- "$file" "$ready" "$proof" "$old" "$failed"; then
+    printf 'rdev agent staging cleanup failed\n' >&2
+    cleanup_ok=0
+  fi
+  if ! rmdir -- "$stage"; then
+    printf 'rdev agent staging directory cleanup failed\n' >&2
+    cleanup_ok=0
+  fi
+  [ "$cleanup_ok" = 1 ]
+}
+
+restore_moved_object() {
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    if ! ln -- "$failed" "$target"; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+rollback_install() {
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    if [ "$had_target" = 1 ]; then
+      return 2
+    fi
+    cleanup_staged || return 2
+    return 0
+  fi
+  current_ident=$(ident "$target") || return 2
+  if [ "$current_ident" != "$published_ident" ]; then
+    if [ "$had_target" = 1 ] && [ "$current_ident" = "$old_ident" ] && verify_target "$old_ident" "$old_digest"; then
+      cleanup_staged || return 2
+      return 0
+    fi
+    return 2
+  fi
+
+  # Quarantine the current pathname before restoring anything. If a concurrent
+  # writer won the race after the identity check, verification below detects it
+  # and restores that object without ever unlinking it.
+  if ! mv -- "$target" "$failed"; then
+    return 2
+  fi
+  moved_ident=$(ident "$failed") || return 2
+  if [ "$moved_ident" != "$published_ident" ]; then
+    restore_moved_object || return 2
+    return 2
+  fi
+
+  if [ "$had_target" = 1 ]; then
+    if ! ln -- "$old" "$target"; then
+      return 2
+    fi
+    verify_target "$old_ident" "$old_digest" || return 2
+  fi
+
+  if ! rm -f -- "$failed"; then
+    return 2
+  fi
+  if ! rm -f -- "$proof"; then
+    return 2
+  fi
+  if [ "$had_target" = 1 ]; then
+    if ! rm -f -- "$old"; then
+      return 2
+    fi
+    verify_target "$old_ident" "$old_digest" || return 2
+  fi
+  if ! rm -f -- "$file" "$ready"; then
+    return 2
+  fi
+  if ! rmdir -- "$stage"; then
+    return 1
+  fi
+  return 0
+}
+
+on_exit() {
+  status=$1
+  trap - EXIT HUP INT TERM
+  [ "$status" -ne 0 ] || exit 0
+  case "$state" in
+    STAGED)
+      cleanup_staged
+      exit "$status"
+      ;;
+    VERIFIED)
+      if [ "$had_target" = 1 ] && ! verify_target "$old_ident" "$old_digest"; then
+        emit_ambiguous "pre-publication target changed after preserving old inode"
+      fi
+      cleanup_staged
+      exit "$status"
+      ;;
+    INSTALLING)
+      rollback_status=0
+      rollback_install || rollback_status=$?
+      if [ "$rollback_status" -eq 2 ]; then
+        emit_ambiguous "rollback could not be verified"
+      fi
+      exit "$status"
+      ;;
+    COMMITTED)
+      emit_committed "agent installed; staging cleanup incomplete"
+      ;;
+    *)
+      emit_ambiguous "unknown install state"
+      ;;
+  esac
+}
+trap 'on_exit $?' EXIT HUP INT TERM
+
 [ -f "$fd" ]
 [ ! -L "$file" ]
 [ "$(meta "$fd")" = "$uid:1" ]
@@ -687,6 +820,11 @@ exec 9< "$ready"
 [ "$(digest "$readfd")" = "$want" ]
 exec 9<&-
 [ "$(ident "$ready")" = "$(ident "$fd")" ]
+state=VERIFIED
+
+ln -- "$ready" "$proof"
+published_ident=$(ident "$fd")
+[ "$(ident "$proof")" = "$published_ident" ]
 preserve_target() {
   [ -f "$target" ]
   [ ! -L "$target" ]
@@ -698,38 +836,87 @@ preserve_target() {
   [ "$(owner "$old")" = "$uid" ]
   [ "$(links "$old")" -ge 2 ]
   [ "$(ident "$target")" = "$(ident "$old")" ]
+  old_ident=$(ident "$old")
+  old_digest=$(digest "$old")
   had_target=1
+  verify_target "$old_ident" "$old_digest"
 }
 if [ -e "$target" ] || [ -L "$target" ]; then
   preserve_target
   [ "$(ident "$target")" = "$(ident "$old")" ]
-  installing=1
+  state=INSTALLING
   mv -f -- "$ready" "$target"
 else
   # link(2) provides no-replace publication for the first install. A racing
   # bootstrap that wins this name makes this command fail without removing it.
   if ln -- "$ready" "$target"; then
-    installing=1
+    state=INSTALLING
     rm -f -- "$ready"
   else
-    # Another valid bootstrap may have won the absent-target race. Re-enter
-    # the verified replacement path; links and non-regular objects still fail.
-    preserve_target
-    [ "$(ident "$target")" = "$(ident "$old")" ]
-    installing=1
-    mv -f -- "$ready" "$target"
+    # A concurrent publisher owns target. Stay VERIFIED so cleanup is confined
+    # to this unpredictable staging directory and never removes the winner.
+    state=VERIFIED
+    false
   fi
 fi
-[ -f "$target" ]
-[ ! -L "$target" ]
-[ "$(owner "$fd")" = "$uid" ]
-[ "$(links "$fd")" -ge 1 ]
-[ "$(ident "$target")" = "$(ident "$fd")" ]
-installed=1
-rm -f -- "$old"
+verify_target "$published_ident" "$want"
+state=COMMITTED
 exec 8>&-
+
+if [ "$had_target" = 1 ]; then
+  rm -f -- "$old"
+fi
+rm -f -- "$proof" "$file" "$ready" "$failed"
 rmdir -- "$stage"
 trap - EXIT HUP INT TERM`
+
+const (
+	agentInstallAmbiguousMarker = "RDEV_AGENT_INSTALL_AMBIGUOUS:"
+	agentInstallCommittedMarker = "RDEV_AGENT_INSTALL_COMMITTED:"
+)
+
+// AgentInstallAmbiguousError means publication started but neither the new
+// agent nor a verified rollback can be asserted. Staging evidence is retained.
+type AgentInstallAmbiguousError struct {
+	Detail string
+	Cause  error
+}
+
+func (e *AgentInstallAmbiguousError) Error() string {
+	return fmt.Sprintf("agent install outcome is ambiguous: %s: %v", e.Detail, e.Cause)
+}
+
+func (e *AgentInstallAmbiguousError) Unwrap() error { return e.Cause }
+
+// AgentInstallCommittedError is a post-commit cleanup warning. The target is
+// the verified uploaded inode, but staging backup removal was incomplete.
+type AgentInstallCommittedError struct {
+	Detail string
+	Cause  error
+}
+
+func (e *AgentInstallCommittedError) Error() string {
+	return fmt.Sprintf("agent install committed with warning: %s: %v", e.Detail, e.Cause)
+}
+
+func (e *AgentInstallCommittedError) Unwrap() error { return e.Cause }
+
+func agentInstallError(runErr error, stderr string) error {
+	message := strings.TrimSpace(stderr)
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimSpace(line)
+		if detail, ok := strings.CutPrefix(line, agentInstallAmbiguousMarker); ok {
+			return &AgentInstallAmbiguousError{Detail: detail, Cause: runErr}
+		}
+		if detail, ok := strings.CutPrefix(line, agentInstallCommittedMarker); ok {
+			return &AgentInstallCommittedError{Detail: detail, Cause: runErr}
+		}
+	}
+	if message == "" {
+		message = runErr.Error()
+	}
+	return fmt.Errorf("secure agent install: %s", message)
+}
 
 // installAgent binds the upload to a cryptographically unpredictable,
 // exclusively-created staging object and atomically replaces the installed
@@ -755,11 +942,7 @@ func (c *Conn) installAgent(ctx context.Context, data []byte, want string) error
 	var errBuf strings.Builder
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(errBuf.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return fmt.Errorf("secure agent install: %s", msg)
+		return agentInstallError(err, errBuf.String())
 	}
 	return nil
 }

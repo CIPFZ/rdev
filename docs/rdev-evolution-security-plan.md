@@ -1,6 +1,6 @@
 # rdev 架构演进、安全加固与分阶段任务计划
 
-> 状态：实施中；Batch A（Phase 0–1）第二轮审查修复已实现，等待独立复验，不标记批次完成
+> 状态：实施中；Batch A（Phase 0–1）最终针对性修复已实现，等待独立复验，不标记批次完成
 >
 > 建档日期：2026-08-27
 >
@@ -869,7 +869,7 @@ Gate：在 SEC-001、SEC-002 修复前，不开始把项目配置传播给共享
 
 #### Batch A 实施记录（2026-08-27）
 
-Phase 1 已完成：
+Phase 1 实现清单（等待最终独立复验）：
 
 - [x] P1-01：项目配置以绝对路径和精确 SHA-256 绑定批准；未批准或内容变化时只保留 global host，不能触发连接。
 - [x] P1-02：`ValidateDestination` 在所有 SSH 进程创建的共享边界执行，并覆盖配置加载、运行时注册和一次性 destination。
@@ -879,7 +879,7 @@ Phase 1 已完成：
 - [x] P1-06：rsync 在 operand 前加入 `--`；本地路径拒绝控制字符，远端路径限制为无需 remote-shell 转义的安全字符集。
 - [x] P1-07：连接池以 canonical fingerprint 和单调 generation 复用；Registry 发布主动淘汰旧连接，拨号发布前后重验代际。
 - [x] P1-08：批准在 durable trust commit 后从当前 live state 构造 immutable staged snapshot，再一次发布 host/scope/state/approval/connection generation；commit 前 read/marshal/write/fsync/rename/首次 dir-fsync 故障保持旧快照，rollback 任一步不可验证则进入 fatal ambiguous 状态，commit 后 backup 清理故障以 committed warning 返回并同步发布内存状态。
-- [x] P1-09：bootstrap 使用密码学随机 staging 目录、排他创建与写前后 owner/type/link/inode/digest 校验，失败只清理自身对象。
+- [x] P1-09：bootstrap 使用密码学随机 staging 目录、排他创建与写前后 owner/type/link/inode/digest 校验；显式执行 `STAGED → VERIFIED → INSTALLING → COMMITTED`，仅对仍匹配本次 publication inode 的 target 回滚并复核旧 inode/digest，ambiguous 保留证据，commit 后清理故障返回 typed warning，首次发布不删除并发 target。
 
 Phase 0 本批必要基线：
 
@@ -890,7 +890,7 @@ Phase 0 本批必要基线：
 - [x] P0-08：README 与 `rdev support` 的 schema-versioned snapshot 区分 Tier 1、build-only、依赖能力和 non-goals；OpenSSH 最低版本在真实 harness 认证前不作虚假承诺。
 - [ ] P0-02、P0-06、P0-07、P0-09、P0-10：连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd/ProxyJump harness 和通用 fuzz/fake-clock 基础设施明确留到后续批次，未提交空壳。
 
-Batch A 新增的负向与竞态覆盖包括：项目配置未批准/摘要变化/错误摘要、恶意 destination、`RemoteDir` shell 元字符与 traversal、项目配置和目录 symlink、owner/mode/fd-native ACL 策略、0600/0700 修复、并发原子 writer、批准 commit/rollback/cleanup 全阶段故障、alias generation 并发切换、per-alias exec/read/write/sync lease、安全 bootstrap staging/inode 绑定，以及 rsync 前导 `-`/remote-shell 字符。第二轮额外断言 host A 长操作不阻塞 host B 更新、同 alias 发布等待旧 sink、Darwin ACL 查询绑定已打开 fd、Linux/macOS 普通文件检查不依赖本地化或空文件类型字符串。
+Batch A 新增的负向与竞态覆盖包括：项目配置未批准/摘要变化/错误摘要、恶意 destination、`RemoteDir` shell 元字符与 traversal、项目配置和目录 symlink、owner/mode/fd-native ACL 策略、0600/0700 修复、并发原子 writer、批准 commit/rollback/cleanup 全阶段故障、alias generation 并发切换、per-alias exec/read/write/sync lease、安全 bootstrap staging/inode 绑定，以及 rsync 前导 `-`/remote-shell 字符。后续复验修复额外断言 host A 长操作不阻塞 host B 更新、同 alias 发布等待旧 sink、Darwin ACL 查询绑定已打开 fd、Linux/macOS 普通文件检查不依赖本地化或空文件类型字符串，以及 bootstrap 发布后校验失败、rollback mv/rm/inode 故障、首次安装并发 target、commit 后 backup/rmdir 清理故障；CLI/MCP 对 committed approval 均投影为 `Approved=true` 的成功结果并附 warning。
 
 第一轮独立验证已在隔离的 Ubuntu amd64 目录中通过真实 SSH bootstrap、exec、read/write 与 rsync，并由本地 Claude Code 通过 rdev MCP 完成一次只读远端调用；精确测试目录已清理且二次确认无目录、symlink 或进程残留。第二轮发现 GNU `stat` 空文件类型文本回归后已改为 numeric metadata + `test -f` + fd/inode 绑定；修复后的全新 Ubuntu 目录首次 bootstrap 已由本次实现任务重新实机通过，远端 agent 为单链接可执行普通文件，目录及进程随后均清理并复核无残留，仍等待独立复验。rdev 当前没有原生 `IdentityFile`/`IdentitiesOnly` 字段，测试使用隔离 SSH wrapper 注入认证参数，此能力纳入 P4-01/P6 支持验收。
 

@@ -37,6 +37,17 @@ func configWriteAmbiguous(err error) bool {
 }
 
 func configWriteCommitted(err error) bool {
+	_, ok := ConfigWriteCommittedWarning(err)
+	return ok
+}
+
+// ConfigWriteCommittedWarning projects a committed cleanup outcome for CLI and
+// MCP callers. They must report success plus this warning, not retry approval as
+// though the durable commit had failed.
+func ConfigWriteCommittedWarning(err error) (string, bool) {
 	var target *ConfigWriteCommittedError
-	return errors.As(err, &target)
+	if !errors.As(err, &target) {
+		return "", false
+	}
+	return target.Error(), true
 }

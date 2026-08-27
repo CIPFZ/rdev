@@ -596,10 +596,11 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			return errors.New("usage: rdev hosts approve-project <sha256>")
 		}
 		trust, err := c.Hosts.ApproveProject(args[1])
+		out, err := projectApprovalOutput(trust, err)
 		if err != nil {
 			return err
 		}
-		return printJSON(trust)
+		return printJSON(out)
 	}
 	if len(args) == 0 || args[0] == "list" {
 		type row struct {
@@ -719,6 +720,23 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		return cmdHosts(ctx, c, []string{"list"})
 	}
 	return fmt.Errorf("unknown hosts subcommand %q", args[0])
+}
+
+type approvalOutput struct {
+	session.ProjectTrust
+	Warning string `json:"warning,omitempty"`
+}
+
+func projectApprovalOutput(trust session.ProjectTrust, err error) (approvalOutput, error) {
+	out := approvalOutput{ProjectTrust: trust}
+	if err == nil {
+		return out, nil
+	}
+	if warning, committed := session.ConfigWriteCommittedWarning(err); committed {
+		out.Warning = warning
+		return out, nil
+	}
+	return approvalOutput{}, err
 }
 
 func cmdPing(ctx context.Context, c *client.Client, args []string) error {

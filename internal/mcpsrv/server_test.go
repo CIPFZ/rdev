@@ -33,9 +33,13 @@ func newTestClient() *client.Client {
 // Claude Code.
 func connect(t *testing.T, c *client.Client) *mcp.ClientSession {
 	t.Helper()
+	return connectServer(t, New(c))
+}
+
+func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 
 	serverT, clientT := mcp.NewInMemoryTransports()
-	srv := New(c)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -287,6 +291,46 @@ func TestSessionProjectApprovalIsDigestBound(t *testing.T) {
 	}
 	if !approved.ProjectTrust.Approved || len(approved.Hosts) != 1 || approved.Hosts[0].Addr != "u@project" {
 		t.Fatalf("approved output = %+v", approved)
+	}
+}
+
+func TestSessionCommittedApprovalWarningIsSuccessful(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	if err := os.MkdirAll(filepath.Join(home, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte(`{"hosts":[{"name":"dev","addr":"u@project"}]}`)
+	if err := os.WriteFile(filepath.Join(project, ".rdev", "hosts.json"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestClient()
+	var untrusted *session.UntrustedProjectError
+	if err := c.Hosts.Load(); !errors.As(err, &untrusted) {
+		t.Fatalf("Load error = %v, want untrusted project", err)
+	}
+	approve := func(digest string) (session.ProjectTrust, error) {
+		trust, err := c.Hosts.ApproveProject(digest)
+		if err != nil {
+			return trust, err
+		}
+		return trust, &session.ConfigWriteCommittedError{Cause: errors.New("injected backup cleanup failure")}
+	}
+	cs := connectServer(t, newServer(c, approve))
+	var out SessionOut
+	if isErr, msg := callTool(t, cs, "rdev_session", SessionIn{ApproveProjectDigest: untrusted.Trust.Digest}, &out); isErr {
+		t.Fatalf("committed approval projected as MCP failure: %s", msg)
+	}
+	if !out.ProjectTrust.Approved || out.Warning == "" {
+		t.Fatalf("committed approval output=%+v", out)
+	}
+	if h, err := c.Hosts.Host("dev"); err != nil || h.Addr != "u@project" {
+		t.Fatalf("committed live host=%+v err=%v", h, err)
 	}
 }
 

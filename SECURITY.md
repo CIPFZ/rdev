@@ -65,9 +65,12 @@ host's SSH account; rdev does not sandbox commands within that account.
 - Agent bootstrap writes only through an exclusively-created unpredictable
   staging object. Regular-file type is checked without localized `stat` text;
   owner, link count, inode, and digest stay bound to open descriptors and a
-  verified hard-link snapshot through installation. First publication is
-  no-replace, replacement keeps a rollback link, and failed verification does
-  not leave a replaced installed agent.
+  verified hard-link snapshot through installation. Its explicit `STAGED →
+  VERIFIED → INSTALLING → COMMITTED` state machine only rolls back a target
+  still bound to this publication inode, verifies the restored inode and digest,
+  preserves evidence on ambiguous rollback, and reports post-commit cleanup as
+  a committed warning. First publication is no-replace and never deletes a
+  concurrently occupied target.
 - Project config remains data after approval. Invalid destinations, paths, ports,
   and unsupported schema fail before any entry is merged into live state.
 - Registered secret values do not persist to config, cross host/principal scope,

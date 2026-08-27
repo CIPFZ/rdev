@@ -104,3 +104,25 @@ connection initialization remain a Phase 2 item; the Phase 1 lease claim covers
 the public exec/read/write/sync sinks only. The patch has implementation-task
 tests and a fresh Ubuntu first-bootstrap run, but remains pending independent
 review and is not recorded here as a completed batch.
+
+## Final targeted-remediation addendum
+
+Final verify-fix found that the bootstrap cleanup trap still treated every
+post-publication failure alike: it could overwrite or remove a concurrently
+replaced target, ignored rollback/cleanup failures, and had no typed distinction
+between an uncertain rollback and a committed install with residue. Bootstrap
+now uses an explicit `STAGED → VERIFIED → INSTALLING → COMMITTED` machine. It
+retains publication and prior-inode hard links, quarantines only a target that
+still matches the publication inode, restores the prior inode with no-replace
+linking, verifies its inode and digest, and preserves evidence when any rollback
+step is uncertain. Post-commit backup or directory cleanup produces a typed
+committed warning. Fault tests cover validation failure, rollback move/remove
+failure, restored-inode mismatch, concurrent first-install target replacement,
+and post-commit backup/rmdir failure.
+
+The same verification also found that CLI and MCP callers treated
+`ConfigWriteCommittedError` as approval failure even though Registry and disk
+already contained `Approved=true`. Both frontends now return success with the
+approved state and an observable warning; ambiguous and pre-commit errors remain
+failures. These changes remain pending final independent targeted verification,
+so this archive does not mark Batch A complete.
