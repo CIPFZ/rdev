@@ -50,21 +50,56 @@ const (
 
 // Registry tracks known hosts and their state. Safe for concurrent use.
 type Registry struct {
+	tx           sync.Mutex
 	mu           sync.RWMutex
 	hosts        map[string]transport.Host
 	state        map[string]*State
 	scopes       map[string]Scope
+	generations  map[string]uint64
+	nextGen      uint64
 	projectTrust ProjectTrust
 	observe      *observe.Registry
+	onHostChange func(string, uint64)
+	io           registryIO
+}
+
+type registryIO struct {
+	read    func(string) ([]byte, error)
+	marshal func(any, string, string) ([]byte, error)
+	write   func(string, []byte) error
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		hosts:   make(map[string]transport.Host),
-		state:   make(map[string]*State),
-		scopes:  make(map[string]Scope),
-		observe: observe.New(nil),
+		hosts:       make(map[string]transport.Host),
+		state:       make(map[string]*State),
+		scopes:      make(map[string]Scope),
+		generations: make(map[string]uint64),
+		observe:     observe.New(nil),
+		io:          registryIO{read: readConfigFile, marshal: json.MarshalIndent, write: atomicWriteConfigFile},
 	}
+}
+
+// ResolvedHost is an immutable connection identity. Generation prevents an old
+// connection from becoming valid again if an alias is changed and later reverted.
+type ResolvedHost struct {
+	Host        transport.Host
+	Fingerprint string
+	Generation  uint64
+}
+
+func hostFingerprint(h transport.Host) string {
+	remoteDir, _ := transport.ValidateRemoteDir(h.RemoteDir)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%t", h.Addr, h.Port, remoteDir, h.ForceAgentUpload)))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+// SetHostChangeHook installs the connection-pool invalidation hook. Registry
+// publication is already complete when the hook runs.
+func (r *Registry) SetHostChangeHook(hook func(string, uint64)) {
+	r.mu.Lock()
+	r.onHostChange = hook
+	r.mu.Unlock()
 }
 
 // SetObserver installs the process-local security metrics and structured event
@@ -171,6 +206,122 @@ type hostEntry struct {
 	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
+type hostCandidate struct {
+	host  transport.Host
+	entry hostEntry
+}
+
+type registrySnapshot struct {
+	hosts       map[string]transport.Host
+	state       map[string]*State
+	scopes      map[string]Scope
+	generations map[string]uint64
+	nextGen     uint64
+	trust       ProjectTrust
+}
+
+func cloneState(st *State) *State {
+	if st == nil {
+		return &State{LoginShell: true}
+	}
+	return &State{
+		Cwd: st.Cwd, LoginShell: st.LoginShell,
+		Env: MergeEnv(nil, st.Env), Secrets: MergeEnv(nil, st.Secrets),
+	}
+}
+
+func (r *Registry) snapshotLocked() registrySnapshot {
+	s := registrySnapshot{
+		hosts:       make(map[string]transport.Host, len(r.hosts)),
+		state:       make(map[string]*State, len(r.state)),
+		scopes:      make(map[string]Scope, len(r.scopes)),
+		generations: make(map[string]uint64, len(r.generations)),
+		nextGen:     r.nextGen, trust: r.projectTrust,
+	}
+	for k, v := range r.hosts {
+		s.hosts[k] = v
+	}
+	for k, v := range r.state {
+		s.state[k] = cloneState(v)
+	}
+	for k, v := range r.scopes {
+		s.scopes[k] = v
+	}
+	for k, v := range r.generations {
+		s.generations[k] = v
+	}
+	return s
+}
+
+func applyCandidates(s *registrySnapshot, candidates []hostCandidate, scope Scope) []string {
+	changed := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		h, e := c.host, c.entry
+		old, exists := s.hosts[h.Name]
+		if !exists || hostFingerprint(old) != hostFingerprint(h) {
+			s.nextGen++
+			s.generations[h.Name] = s.nextGen
+			changed = append(changed, h.Name)
+		}
+		s.hosts[h.Name] = h
+		s.scopes[h.Name] = scope
+		st, ok := s.state[h.Name]
+		if !ok {
+			st = &State{LoginShell: true}
+			s.state[h.Name] = st
+		}
+		if e.Cwd != "" {
+			st.Cwd = e.Cwd
+		}
+		if len(e.Env) > 0 {
+			st.Env = MergeEnv(st.Env, e.Env)
+		}
+		if e.LoginShell != nil {
+			st.LoginShell = *e.LoginShell
+		}
+		if len(e.Secrets) > 0 {
+			st.Secrets = MergeEnv(st.Secrets, e.Secrets)
+		}
+	}
+	return changed
+}
+
+func (r *Registry) publishLocked(s registrySnapshot) (func(string, uint64), map[string]uint64) {
+	r.hosts, r.state, r.scopes = s.hosts, s.state, s.scopes
+	r.generations, r.nextGen, r.projectTrust = s.generations, s.nextGen, s.trust
+	gens := make(map[string]uint64, len(s.generations))
+	for k, v := range s.generations {
+		gens[k] = v
+	}
+	return r.onHostChange, gens
+}
+
+func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, error) {
+	var hf hostFile
+	if err := json.Unmarshal(b, &hf); err != nil {
+		r.reject(observe.ReasonConfigInvalid, path)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	candidates := make([]hostCandidate, 0, len(hf.Hosts))
+	for _, e := range hf.Hosts {
+		if e.Name == "" || e.Addr == "" {
+			r.reject(observe.ReasonConfigInvalid, path)
+			return nil, fmt.Errorf("parse %s: every host requires non-empty name and addr", path)
+		}
+		h := transport.Host{Name: e.Name, Addr: e.Addr, Port: e.Port, RemoteDir: e.RemoteDir, ForceAgentUpload: e.ForceAgentUpload}
+		if err := transport.ValidateHost(h); err != nil {
+			reason := observe.ReasonRemoteDir
+			if transport.ValidateDestination(h.Addr, h.Port) != nil {
+				reason = observe.ReasonDestination
+			}
+			r.reject(reason, e.Name)
+			return nil, fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
+		}
+		candidates = append(candidates, hostCandidate{host: h, entry: e})
+	}
+	return candidates, nil
+}
+
 // Load reads the global registry and then the project one, so a project can
 // define hosts that exist only while you work in that directory.
 //
@@ -191,7 +342,7 @@ func (r *Registry) Load() error {
 	// The MCP server inherits the project directory as its cwd, which is what
 	// makes a project-scoped host file work without extra configuration.
 	if project, err := ProjectConfigPath(); err == nil {
-		b, err := readConfigFile(project)
+		b, err := r.io.read(project)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -200,7 +351,7 @@ func (r *Registry) Load() error {
 			return err
 		}
 		trust := ProjectTrust{Path: filepath.Clean(project), Digest: digestBytes(b)}
-		approved, err := projectDigestApproved(trust.Path, trust.Digest)
+		approved, err := r.projectDigestApproved(trust.Path, trust.Digest)
 		if err != nil {
 			return fmt.Errorf("read project trust store: %w", err)
 		}
@@ -221,7 +372,7 @@ func (r *Registry) Load() error {
 
 // loadFile merges one host file into the registry, tagging each entry's scope.
 func (r *Registry) loadFile(path string, scope Scope) error {
-	b, err := readConfigFile(path)
+	b, err := r.io.read(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -234,63 +385,20 @@ func (r *Registry) loadFile(path string, scope Scope) error {
 }
 
 func (r *Registry) loadBytes(path string, b []byte, scope Scope) error {
-	var hf hostFile
-	if err := json.Unmarshal(b, &hf); err != nil {
-		r.reject(observe.ReasonConfigInvalid, path)
-		return fmt.Errorf("parse %s: %w", path, err)
+	candidates, err := r.parseCandidates(path, b)
+	if err != nil {
+		return err
 	}
-	type candidate struct {
-		host  transport.Host
-		entry hostEntry
-	}
-	candidates := make([]candidate, 0, len(hf.Hosts))
-	for _, e := range hf.Hosts {
-		if e.Name == "" || e.Addr == "" {
-			r.reject(observe.ReasonConfigInvalid, path)
-			return fmt.Errorf("parse %s: every host requires non-empty name and addr", path)
-		}
-		h := transport.Host{
-			Name:             e.Name,
-			Addr:             e.Addr,
-			Port:             e.Port,
-			RemoteDir:        e.RemoteDir,
-			ForceAgentUpload: e.ForceAgentUpload,
-		}
-		if err := transport.ValidateHost(h); err != nil {
-			reason := observe.ReasonRemoteDir
-			if destErr := transport.ValidateDestination(h.Addr, h.Port); destErr != nil {
-				reason = observe.ReasonDestination
-			}
-			r.reject(reason, e.Name)
-			return fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
-		}
-		candidates = append(candidates, candidate{host: h, entry: e})
-	}
-	for _, c := range candidates {
-		e, h := c.entry, c.host
-		if err := r.Add(h); err != nil {
-			return fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
-		}
-		r.mu.Lock()
-		r.scopes[e.Name] = scope
-		r.mu.Unlock()
-		// Apply persisted state in one update so a host loaded from disk starts
-		// with exactly the context it was saved with.
-		if e.Cwd != "" || len(e.Env) > 0 || e.LoginShell != nil || len(e.Secrets) > 0 {
-			r.Update(e.Name, func(s *State) {
-				if e.Cwd != "" {
-					s.Cwd = e.Cwd
-				}
-				if len(e.Env) > 0 {
-					s.Env = MergeEnv(s.Env, e.Env)
-				}
-				if e.LoginShell != nil {
-					s.LoginShell = *e.LoginShell
-				}
-				if len(e.Secrets) > 0 {
-					s.Secrets = MergeEnv(s.Secrets, e.Secrets)
-				}
-			})
+	r.tx.Lock()
+	r.mu.Lock()
+	s := r.snapshotLocked()
+	changed := applyCandidates(&s, candidates, scope)
+	hook, generations := r.publishLocked(s)
+	r.mu.Unlock()
+	r.tx.Unlock()
+	if hook != nil {
+		for _, name := range changed {
+			hook(name, generations[name])
 		}
 	}
 	return nil
@@ -301,6 +409,8 @@ func (r *Registry) loadBytes(path string, b []byte, scope Scope) error {
 // Only hosts belonging to that scope are written, so saving the global file does
 // not silently absorb a project's private hosts (and vice versa).
 func (r *Registry) Save(scope Scope) error {
+	r.tx.Lock()
+	defer r.tx.Unlock()
 	var path string
 	var err error
 	switch scope {
@@ -348,13 +458,13 @@ func (r *Registry) Save(scope Scope) error {
 	r.mu.RUnlock()
 
 	sort.Slice(hf.Hosts, func(i, j int) bool { return hf.Hosts[i].Name < hf.Hosts[j].Name })
-	b, err := json.MarshalIndent(hf, "", "  ")
+	b, err := r.io.marshal(hf, "", "  ")
 	if err != nil {
 		return err
 	}
 	// Written 0600: it records hostnames and usernames, not secrets, but there
 	// is no reason to make it world-readable.
-	return atomicWriteConfigFile(path, append(b, '\n'))
+	return r.io.write(path, append(b, '\n'))
 }
 
 func digestBytes(b []byte) string {
@@ -369,12 +479,12 @@ func trustPath() (string, error) {
 	return filepath.Join(home, ".rdev", "trusted-projects.json"), nil
 }
 
-func loadTrustFile() (trustFile, error) {
+func (r *Registry) loadTrustFile() (trustFile, error) {
 	p, err := trustPath()
 	if err != nil {
 		return trustFile{}, err
 	}
-	b, err := readConfigFile(p)
+	b, err := r.io.read(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return trustFile{Version: trustFileVersion}, nil
@@ -391,8 +501,8 @@ func loadTrustFile() (trustFile, error) {
 	return tf, nil
 }
 
-func projectDigestApproved(projectPath, digest string) (bool, error) {
-	tf, err := loadTrustFile()
+func (r *Registry) projectDigestApproved(projectPath, digest string) (bool, error) {
+	tf, err := r.loadTrustFile()
 	if err != nil {
 		return false, err
 	}
@@ -414,11 +524,14 @@ func (r *Registry) ProjectTrustStatus() ProjectTrust {
 // ApproveProject loads the current project config only after the caller repeats
 // its exact digest. The approval is persisted outside the repository.
 func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
+	r.tx.Lock()
+	defer r.tx.Unlock()
+
 	projectPath, err := ProjectConfigPath()
 	if err != nil {
 		return ProjectTrust{}, err
 	}
-	b, err := readConfigFile(projectPath)
+	b, err := r.io.read(projectPath)
 	if err != nil {
 		return ProjectTrust{}, err
 	}
@@ -426,10 +539,20 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	if digest == "" || !strings.EqualFold(digest, trust.Digest) {
 		return trust, fmt.Errorf("project config digest mismatch: got %q, current sha256 is %s", digest, trust.Digest)
 	}
-	if err := r.loadBytes(projectPath, b, ScopeProject); err != nil {
+	candidates, err := r.parseCandidates(projectPath, b)
+	if err != nil {
 		return trust, err
 	}
-	tf, err := loadTrustFile()
+
+	// Build the complete replacement off to the side. Live readers continue to
+	// see the old generation until trust persistence has fully succeeded.
+	r.mu.RLock()
+	staged := r.snapshotLocked()
+	r.mu.RUnlock()
+	changed := applyCandidates(&staged, candidates, ScopeProject)
+	staged.trust = trust
+
+	tf, err := r.loadTrustFile()
 	if err != nil {
 		return trust, err
 	}
@@ -443,7 +566,7 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	sort.Slice(projects, func(i, j int) bool { return projects[i].Path < projects[j].Path })
 	tf.Version = trustFileVersion
 	tf.Projects = projects
-	out, err := json.MarshalIndent(tf, "", "  ")
+	out, err := r.io.marshal(tf, "", "  ")
 	if err != nil {
 		return trust, err
 	}
@@ -451,20 +574,28 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	if err != nil {
 		return trust, err
 	}
-	if err := atomicWriteConfigFile(p, append(out, '\n')); err != nil {
+	if err := r.io.write(p, append(out, '\n')); err != nil {
 		return trust, err
 	}
 	trust.Approved = true
+	staged.trust = trust
 	r.mu.Lock()
-	r.projectTrust = trust
+	hook, generations := r.publishLocked(staged)
 	registry := r.observe
 	r.mu.Unlock()
+	if hook != nil {
+		for _, name := range changed {
+			hook(name, generations[name])
+		}
+	}
 	registry.ProjectApproved(trust.Path)
 	return trust, nil
 }
 
 // SetScope records which config file a host belongs to.
 func (r *Registry) SetScope(name string, scope Scope) {
+	r.tx.Lock()
+	defer r.tx.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.scopes[name] = scope
@@ -492,14 +623,28 @@ func (r *Registry) Add(h transport.Host) error {
 		r.reject(reason, h.Name)
 		return err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if h.Name == "" {
 		h.Name = h.Addr
 	}
+	r.tx.Lock()
+	r.mu.Lock()
+	old, exists := r.hosts[h.Name]
 	r.hosts[h.Name] = h
 	if _, ok := r.state[h.Name]; !ok {
 		r.state[h.Name] = &State{LoginShell: true}
+	}
+	var generation uint64
+	changed := !exists || hostFingerprint(old) != hostFingerprint(h)
+	if changed {
+		r.nextGen++
+		generation = r.nextGen
+		r.generations[h.Name] = generation
+	}
+	hook := r.onHostChange
+	r.mu.Unlock()
+	r.tx.Unlock()
+	if changed && hook != nil {
+		hook(h.Name, generation)
 	}
 	return nil
 }
@@ -510,20 +655,43 @@ func (r *Registry) Add(h transport.Host) error {
 // "host:port") is accepted and auto-registered, so a one-off machine works
 // without editing a config file first.
 func (r *Registry) Host(name string) (transport.Host, error) {
+	resolved, err := r.Resolve(name)
+	return resolved.Host, err
+}
+
+// Resolve returns a host together with the immutable identity used by the
+// connection pool.
+func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 	r.mu.RLock()
 	h, ok := r.hosts[name]
+	generation := r.generations[name]
 	r.mu.RUnlock()
 	if ok {
-		return h, nil
+		return ResolvedHost{Host: h, Fingerprint: hostFingerprint(h), Generation: generation}, nil
 	}
 
 	if parsed, err := parseDestination(name); err == nil {
 		if err := r.Add(parsed); err != nil {
-			return transport.Host{}, err
+			return ResolvedHost{}, err
 		}
-		return parsed, nil
+		r.mu.RLock()
+		h, generation = r.hosts[parsed.Name], r.generations[parsed.Name]
+		r.mu.RUnlock()
+		return ResolvedHost{Host: h, Fingerprint: hostFingerprint(h), Generation: generation}, nil
 	}
-	return transport.Host{}, fmt.Errorf("unknown host %q (known: %s)", name, strings.Join(r.Names(), ", "))
+	return ResolvedHost{}, fmt.Errorf("unknown host %q (known: %s)", name, strings.Join(r.Names(), ", "))
+}
+
+// AcquireIdentity pins one resolved identity until release. A Registry update
+// cannot publish while a sink using the old identity is in progress.
+func (r *Registry) AcquireIdentity(name string, generation uint64, fingerprint string) (func(), bool) {
+	r.mu.RLock()
+	h, ok := r.hosts[name]
+	if !ok || r.generations[name] != generation || hostFingerprint(h) != fingerprint {
+		r.mu.RUnlock()
+		return nil, false
+	}
+	return r.mu.RUnlock, true
 }
 
 // parseDestination interprets "user@host", "user@host:port", or "host:port".
@@ -589,6 +757,8 @@ func (r *Registry) State(name string) State {
 
 // Update mutates a host's state under lock.
 func (r *Registry) Update(name string, fn func(*State)) {
+	r.tx.Lock()
+	defer r.tx.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	st, ok := r.state[name]

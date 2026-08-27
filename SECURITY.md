@@ -47,8 +47,16 @@ host's SSH account; rdev does not sandbox commands within that account.
 - rsync terminates option parsing before operands. Local and remote operands are
   validated for the representation used by local rsync and the remote shell.
 - Config and trust files are regular files beneath non-symlink config
-  directories. Writes use a same-directory 0600 temporary file, file fsync,
-  atomic rename, and directory fsync; final directories are 0700.
+  directories. POSIX reads require effective-user ownership, no group/other
+  write authority, and no recognized extended ACL. Writes use a same-directory
+  0600 temporary file, file fsync, atomic rename, and directory fsync; final
+  directories are 0700 and a post-rename durability failure restores old state.
+- A pooled connection is valid only for the current immutable canonical host
+  fingerprint and Registry generation. Alias replacement atomically publishes
+  approval/config state and invalidates every old connection consumer.
+- Agent bootstrap writes only through an exclusively-created unpredictable
+  staging object whose type, owner, link count, inode, and digest are checked
+  before atomic installation. Failure never replaces the installed agent.
 - Project config remains data after approval. Invalid destinations, paths, ports,
   and unsupported schema fail before any entry is merged into live state.
 - Registered secret values do not persist to config, cross host/principal scope,

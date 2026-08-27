@@ -167,7 +167,7 @@ func TestEnsureAgentRefusesDowngradeBeforeUploading(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureAgent should refuse to overwrite a newer installed agent")
 	}
-	if calls := sshCalls(t, log); strings.Contains(calls, "exec dd") {
+	if calls := sshCalls(t, log); strings.Contains(calls, "dd bs=65536") {
 		t.Errorf("refusal happened after an upload was attempted; ssh calls were:\n%s", calls)
 	}
 }
@@ -199,7 +199,7 @@ func TestForceAgentUploadSkipsTheCheck(t *testing.T) {
 	if strings.Contains(calls, "-version") {
 		t.Errorf("forced upload should not bother probing the version; ssh calls were:\n%s", calls)
 	}
-	if !strings.Contains(calls, "exec dd") {
+	if !strings.Contains(calls, "dd bs=65536") {
 		t.Errorf("forced upload never uploaded; ssh calls were:\n%s", calls)
 	}
 }
@@ -248,7 +248,7 @@ func TestFirstInstallSkipsTheCheck(t *testing.T) {
 	if strings.Contains(calls, "-version") {
 		t.Errorf("nothing is installed, so there is no version to probe; calls were:\n%s", calls)
 	}
-	if !strings.Contains(calls, "exec dd") {
+	if !strings.Contains(calls, "dd bs=65536") {
 		t.Errorf("first install never uploaded; calls were:\n%s", calls)
 	}
 }
@@ -275,7 +275,7 @@ func TestUnrunnableInstalledAgentIsReplaced(t *testing.T) {
 	if err := c.ensureAgent(context.Background(), bin, "remotesha"); err != nil {
 		t.Fatalf("a broken installed agent must be replaceable: %v", err)
 	}
-	if calls := sshCalls(t, log); !strings.Contains(calls, "exec dd") {
+	if calls := sshCalls(t, log); !strings.Contains(calls, "dd bs=65536") {
 		t.Errorf("broken agent was not replaced; calls were:\n%s", calls)
 	}
 }

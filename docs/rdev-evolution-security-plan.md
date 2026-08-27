@@ -1,6 +1,6 @@
 # rdev 架构演进、安全加固与分阶段任务计划
 
-> 状态：实施中；Batch A（Phase 0–1）已完成代码与回归测试，等待独立 review/test 会话
+> 状态：实施中；Batch A（Phase 0–1）代码、审查修复、独立 Ubuntu 与 Claude Code MCP 验证已完成
 >
 > 建档日期：2026-08-27
 >
@@ -846,7 +846,7 @@ effective profile 由 global/host/project/request 合并，并生成 profile dig
 - [ ] 日志、metrics 和 doctor 快照通过 secret/cmd/path 泄露测试。
 - [ ] 指标 label cardinality 在百机和高请求量下保持有界。
 - [ ] storage simulator 可验证 quota、high/low watermark、retention 和磁盘不足降级。
-- [ ] Tier 1 支持矩阵和 non-goals 已进入 README/测试标签。
+- [x] Tier 1 支持矩阵和 non-goals 已进入 README/机器可读 snapshot，并完成 Ubuntu amd64 手工真实 SSH 基线。
 - [ ] 真 SSH 集成测试与 fuzz smoke 可在 CI 重复执行。
 
 ### Phase 1：封住项目配置和 SSH bootstrap 边界
@@ -861,6 +861,9 @@ effective profile 由 global/host/project/request 合并，并生成 profile dig
 | P1-04 | bootstrap 固定脚本化，动态值只通过参数/标准输入传递 | P1-03 | 不再把配置值插入 shell 源码 |
 | P1-05 | 配置保存改为 no-follow 原子写 | P0-04 | 拒绝目录/文件 symlink；临时文件、fsync、rename；最终模式 0600 |
 | P1-06 | `rsync` operand 增加 `--` 并验证 local/remote path | P1-02 | 前导 `-` 路径按文件处理或明确拒绝 |
+| P1-07 | connection pool 绑定 canonical fingerprint 与 Registry generation | P1-01 | alias 更新/批准后全部 sink 不复用旧 destination、port 或 `RemoteDir` |
+| P1-08 | project approval 使用 staged snapshot 和 durable transaction | P1-01、P1-05 | 任意持久化失败不改变 host、scope、state、approval 或连接代际 |
+| P1-09 | bootstrap staging 排他创建并验证对象身份 | P1-04 | link/既有对象/并发/失败不能重定向写或破坏已安装 agent |
 
 Gate：在 SEC-001、SEC-002 修复前，不开始把项目配置传播给共享 `rdevd`。
 
@@ -874,6 +877,9 @@ Phase 1 已完成：
 - [x] P1-04：probe、目录创建、版本检查、上传、安装和 agent 启动均使用固定 shell 程序，动态值只走位置参数或 stdin。
 - [x] P1-05：配置与 trust store 使用 no-follow 打开、同目录 0600 临时文件、file fsync、原子 rename 和 directory fsync；配置目录收紧为 0700。
 - [x] P1-06：rsync 在 operand 前加入 `--`；本地路径拒绝控制字符，远端路径限制为无需 remote-shell 转义的安全字符集。
+- [x] P1-07：连接池以 canonical fingerprint 和单调 generation 复用；Registry 发布主动淘汰旧连接，拨号发布前后重验代际。
+- [x] P1-08：批准先构造 immutable staged snapshot 并 durable 写 trust，再一次发布 host/scope/state/approval/connection generation；read/marshal/write/fsync/rename/dir-fsync 故障均保持旧快照。
+- [x] P1-09：bootstrap 使用密码学随机 staging 目录、排他创建与写前后 owner/type/link/inode/digest 校验，失败只清理自身对象。
 
 Phase 0 本批必要基线：
 
@@ -884,9 +890,13 @@ Phase 0 本批必要基线：
 - [x] P0-08：README 与 `rdev support` 的 schema-versioned snapshot 区分 Tier 1、build-only、依赖能力和 non-goals；OpenSSH 最低版本在真实 harness 认证前不作虚假承诺。
 - [ ] P0-02、P0-06、P0-07、P0-09、P0-10：连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd/ProxyJump harness 和通用 fuzz/fake-clock 基础设施明确留到后续批次，未提交空壳。
 
-Batch A 新增的负向与竞态覆盖包括：项目配置未批准/摘要变化/错误摘要、恶意 destination、`RemoteDir` shell 元字符与 traversal、项目配置和目录 symlink、0600/0700 修复、并发原子 writer、所有 SSH sink、动态值不进入 shell program，以及 rsync 前导 `-`/remote-shell 字符。
+Batch A 新增的负向与竞态覆盖包括：项目配置未批准/摘要变化/错误摘要、恶意 destination、`RemoteDir` shell 元字符与 traversal、项目配置和目录 symlink、owner/mode/ACL 策略、0600/0700 修复、并发原子 writer、批准持久化全阶段故障、alias generation 并发切换、全部 exec/read/write/sync sink、安全 bootstrap staging，以及 rsync 前导 `-`/remote-shell 字符。
 
-Batch A 最终本地验证：`gofmt`、`go test ./...`、`go test -race ./...`、`go vet ./...` 和 `make check-agents` 全部通过；未连接生产远端，也未把缺少的 P0-02/P0-06/P0-07/P0-09/P0-10 伪装成已完成。
+独立验证已在隔离的 Ubuntu amd64 目录中通过真实 SSH bootstrap、exec、read/write 与 rsync，并由本地 Claude Code 通过 rdev MCP 完成一次只读远端调用；精确测试目录已清理且二次确认无目录、symlink 或进程残留。rdev 当前没有原生 `IdentityFile`/`IdentitiesOnly` 字段，测试使用隔离 SSH wrapper 注入认证参数，此能力纳入 P4-01/P6 支持验收。
+
+独立验证同时确认：底层/MCP 可安全同步裸 `-leading-local`，但 CLI parser 不能直接表达该 operand（`./-leading-local` 可用）；输出被截断时协议有状态而 CLI 不展示；本地 context cancel 不传播到远端进程。这三项分别进入 P6-09、P3-12 和既有 P3-04，不在本批提前实现 Phase 3。
+
+Batch A 最终本地验证：`gofmt`、`make clean && make all`、`go test ./...`、`go test -race ./...`、`go vet ./...` 和 `make check-agents` 全部通过；没有把缺少的 P0-02/P0-06/P0-07/P0-09/P0-10 伪装成已完成。维护者审查归档见 [`docs/security/phase0-1-codex-security-review.md`](security/phase0-1-codex-security-review.md)。
 
 ### Phase 2：密钥作用域与输出边界
 
@@ -920,6 +930,7 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 | P3-09 | 建立共享 error code registry 和 envelope | P3-01 | CLI/MCP/broker/agent 对 retry 和 execution_state 使用同一语义 |
 | P3-10 | 定义 accepted/data/progress/final 流状态机和 feature negotiation | P3-05、P3-09 | 单 stream 只有一个 terminal event，N/N-1 能协商是否支持 streaming |
 | P3-11 | 实现 frame budget、stream window/credit 和慢 client 策略 | P3-10 | 慢 stream 不造成其他 stream 饥饿或无界缓冲 |
+| P3-12 | CLI/MCP 明确投影输出截断状态与原始字节计数 | P3-07 | 发生截断时人和 Agent 都不会误判为完整输出 |
 | P3-12 | 将 cancel、final、disconnect 和 detach 竞态纳入协议测试 | P3-04、P3-10 | 每种竞态得到确定且可恢复的 terminal state |
 
 ### Phase 4：单进程百机 Connection Manager 与 job 耐久性
@@ -1027,6 +1038,7 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 | P6-06 | 在线依赖审计和发布检查 | 全部 | `govulncheck`/依赖审计、SBOM、构建 provenance 纳入 release gate |
 | P6-07 | 把支持矩阵与 runtime capability 投影到 CLI/MCP | P0-08、P4-17 | unsupported/experimental 能力在调用前可发现，不靠运行失败猜测 |
 | P6-08 | 为错误 code、config、state 和 protocol 发布兼容文档 | P3-09、P4-14 | N/N-1 行为、迁移和 breaking change 有机器可读版本说明 |
+| P6-09 | CLI parser 支持 `--` 后的裸 leading-dash operand | P6-01 | `sync ... -- -leading-local remote` 与 MCP/底层行为一致 |
 
 ### Phase 7：Fleet inventory 与安全批量编排
 

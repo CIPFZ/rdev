@@ -49,6 +49,10 @@ func readConfigFile(path string) ([]byte, error) {
 }
 
 func atomicWriteConfigFile(path string, data []byte) error {
+	return atomicWriteConfigFileWithHook(path, data, nil)
+}
+
+func atomicWriteConfigFileWithHook(path string, data []byte, hook func(string) error) error {
 	if len(data) > maxConfigBytes {
 		return fmt.Errorf("config file %s exceeds %d bytes", path, maxConfigBytes)
 	}
@@ -71,9 +75,21 @@ func atomicWriteConfigFile(path string, data []byte) error {
 		f.Close()
 		return err
 	}
+	if hook != nil {
+		if err := hook("write"); err != nil {
+			f.Close()
+			return err
+		}
+	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		return err
+	}
+	if hook != nil {
+		if err := hook("file-fsync"); err != nil {
+			f.Close()
+			return err
+		}
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
@@ -82,5 +98,16 @@ func atomicWriteConfigFile(path string, data []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if hook != nil {
+		if err := hook("rename"); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if hook != nil {
+		return hook("dir-fsync")
+	}
+	return nil
 }

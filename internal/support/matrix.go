@@ -31,7 +31,7 @@ func Snapshot() Matrix {
 			{OS: "linux", Arch: "arm64", Tier: "build", Status: "cross-build only"},
 		},
 		Remote: []Platform{
-			{OS: "linux", Arch: "amd64", Tier: "tier1", Status: "manual real-SSH baseline"},
+			{OS: "linux", Arch: "amd64", Tier: "tier1", Status: "Ubuntu real-SSH bootstrap, exec, file, and rsync baseline"},
 			{OS: "linux", Arch: "arm64", Tier: "build", Status: "agent cross-build only"},
 			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "agent cross-build only"},
 			{OS: "darwin", Arch: "arm64", Tier: "build", Status: "agent cross-build only"},
@@ -40,6 +40,7 @@ func Snapshot() Matrix {
 		RequiredLocalTools:  []string{"ssh", "rsync for sync operations"},
 		NonGoals: []string{
 			"native Windows runtime", "interactive PTY or TUI forwarding", "port forwarding",
+			"native Windows config owner, mode, ACL, or POSIX no-follow guarantees",
 			"full ACL, xattr, owner, or sparse-file fidelity", "multi-tenant remote sandboxing",
 		},
 	}

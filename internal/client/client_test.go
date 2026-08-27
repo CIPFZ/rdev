@@ -2,17 +2,55 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
+
+type fakeRemoteConn struct {
+	host    transport.Host
+	mu      sync.Mutex
+	ops     []string
+	closed  bool
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *fakeRemoteConn) Host() transport.Host { return f.host }
+func (f *fakeRemoteConn) SSHArgs() []string    { return []string{"-p", fmt.Sprint(f.host.Port)} }
+func (f *fakeRemoteConn) Close() error         { f.mu.Lock(); f.closed = true; f.mu.Unlock(); return nil }
+func (f *fakeRemoteConn) Do(_ context.Context, req *proto.Request) (*proto.Response, error) {
+	if f.entered != nil {
+		f.once.Do(func() { close(f.entered) })
+		<-f.release
+	}
+	f.mu.Lock()
+	f.ops = append(f.ops, req.Op)
+	f.mu.Unlock()
+	r := &proto.Response{OK: true}
+	switch req.Op {
+	case proto.OpExec:
+		r.Exec = &proto.ExecResult{}
+	case proto.OpReadFile:
+		r.Read = &proto.ReadResult{}
+	case proto.OpWriteFile:
+		r.Cat = &proto.WriteResult{}
+	case proto.OpPing:
+		r.Ping = &proto.PingResult{}
+	}
+	return r, nil
+}
 
 func newTestClient() *Client {
 	return New(func(goos, goarch string) (*transport.AgentBinary, error) {
@@ -248,7 +286,7 @@ func TestLoadHostSecretsKeepsExplicitValue(t *testing.T) {
 	}
 
 	// Would try to read the bogus path if it did not skip already-registered names.
-	c.loadHostSecrets(context.Background(), "dev")
+	c.loadHostSecrets(context.Background(), "dev", nil)
 
 	if v, _ := c.Secrets.Get("tok"); v != "explicitly-set-value" {
 		t.Errorf("value = %q, want the explicit registration preserved", v)
@@ -363,7 +401,7 @@ func TestRedactJobNil(t *testing.T) {
 func TestLoadHostSecretsNoopWithoutConfig(t *testing.T) {
 	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
-	c.loadHostSecrets(context.Background(), "dev")
+	c.loadHostSecrets(context.Background(), "dev", nil)
 	if n := len(c.Secrets.Names()); n != 0 {
 		t.Errorf("registered %d secrets from an empty config", n)
 	}
@@ -428,7 +466,7 @@ func TestLoadHostSecretsSkipsAlreadyRegistered(t *testing.T) {
 
 	// Second pass, as a reconnect would trigger. Reaching the fetch would need a
 	// live agent, so it would fail and warn -- silence is the proof it was skipped.
-	c.loadHostSecrets(context.Background(), "dev")
+	c.loadHostSecrets(context.Background(), "dev", nil)
 
 	if len(warnings) != 0 {
 		t.Errorf("warnings = %v, want none: an already-registered name must not be refetched", warnings)
@@ -438,5 +476,235 @@ func TestLoadHostSecretsSkipsAlreadyRegistered(t *testing.T) {
 	}
 	if v, _ := c.Secrets.Get("tok"); v != token {
 		t.Errorf("value = %q, want the original token preserved", v)
+	}
+}
+
+func TestAliasIdentityUpdateEvictsEverySink(t *testing.T) {
+	c := newTestClient()
+	var mu sync.Mutex
+	var dialed []*fakeRemoteConn
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		f := &fakeRemoteConn{host: h}
+		mu.Lock()
+		dialed = append(dialed, f)
+		mu.Unlock()
+		return f, nil
+	}
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@one", Port: 22, RemoteDir: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []struct {
+		host transport.Host
+		call func() error
+	}{
+		{transport.Host{Name: "dev", Addr: "u@two", Port: 22, RemoteDir: "one"}, func() error {
+			_, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+			return err
+		}},
+		{transport.Host{Name: "dev", Addr: "u@two", Port: 2200, RemoteDir: "one"}, func() error { _, err := c.ReadFile(t.Context(), "dev", "x", 0, 1); return err }},
+		{transport.Host{Name: "dev", Addr: "u@two", Port: 2200, RemoteDir: "two"}, func() error {
+			_, err := c.WriteFile(t.Context(), WriteFileOptions{Host: "dev", Path: "x", Content: "x"})
+			return err
+		}},
+	}
+	for _, check := range checks {
+		if err := c.Hosts.Add(check.host); err != nil {
+			t.Fatal(err)
+		}
+		if err := check.call(); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		got := dialed[len(dialed)-1].host
+		mu.Unlock()
+		if got.Addr != check.host.Addr || got.Port != check.host.Port || got.RemoteDir != check.host.RemoteDir {
+			t.Fatalf("dialed stale identity %+v, want %+v", got, check.host)
+		}
+	}
+
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	syncHost := transport.Host{Name: "dev", Addr: "u@sync", Port: 2299, RemoteDir: "sync"}
+	if err := c.Hosts.Add(syncHost); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Sync(t.Context(), SyncOptions{Host: "dev", Local: "local", Remote: "remote"}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got := dialed[len(dialed)-1].host
+	all := append([]*fakeRemoteConn(nil), dialed...)
+	mu.Unlock()
+	if got != syncHost {
+		t.Fatalf("sync used stale identity %+v, want %+v", got, syncHost)
+	}
+	for i, old := range all[:len(all)-1] {
+		old.mu.Lock()
+		closed := old.closed
+		old.mu.Unlock()
+		if !closed {
+			t.Errorf("old connection %d was not evicted", i)
+		}
+	}
+}
+
+func TestConcurrentLookupCannotPublishSupersededDial(t *testing.T) {
+	c := newTestClient()
+	started, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	var dialed []*fakeRemoteConn
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		f := &fakeRemoteConn{host: h}
+		mu.Lock()
+		dialed = append(dialed, f)
+		n := len(dialed)
+		mu.Unlock()
+		if n == 1 {
+			close(started)
+			<-release
+		}
+		return f, nil
+	}
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@old"})
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		done <- err
+	}()
+	<-started
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) != 2 || dialed[1].host.Addr != "u@new" {
+		t.Fatalf("dial sequence=%+v", dialed)
+	}
+	dialed[0].mu.Lock()
+	closed := dialed[0].closed
+	dialed[0].mu.Unlock()
+	if !closed {
+		t.Fatal("superseded in-flight connection was published")
+	}
+}
+
+func TestProjectApprovalEvictsWarmAlias(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	if err := os.MkdirAll(filepath.Join(home, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".rdev", "hosts.json"), []byte(`{"hosts":[{"name":"dev","addr":"u@old"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".rdev", "hosts.json"), []byte(`{"hosts":[{"name":"dev","addr":"u@approved","port":2200,"remote_dir":"approved"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestClient()
+	var pending *session.UntrustedProjectError
+	if err := c.Hosts.Load(); !errors.As(err, &pending) {
+		t.Fatalf("Load=%v", err)
+	}
+	var mu sync.Mutex
+	var dialed []*fakeRemoteConn
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		f := &fakeRemoteConn{host: h}
+		mu.Lock()
+		dialed = append(dialed, f)
+		mu.Unlock()
+		return f, nil
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Hosts.ApproveProject(pending.Trust.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) != 2 || dialed[1].host.Addr != "u@approved" || dialed[1].host.Port != 2200 || dialed[1].host.RemoteDir != "approved" {
+		t.Fatalf("approval dial sequence=%+v", dialed)
+	}
+	dialed[0].mu.Lock()
+	closed := dialed[0].closed
+	dialed[0].mu.Unlock()
+	if !closed {
+		t.Fatal("approval left old connection open")
+	}
+}
+
+func TestIdentityLeaseCoversExecReadWriteAndSync(t *testing.T) {
+	for _, op := range []string{"exec", "read", "write", "sync"} {
+		t.Run(op, func(t *testing.T) {
+			c := newTestClient()
+			entered, release := make(chan struct{}), make(chan struct{})
+			f := &fakeRemoteConn{host: transport.Host{Name: "dev", Addr: "u@old"}}
+			if op != "sync" {
+				f.entered, f.release = entered, release
+			}
+			c.dial = func(_ context.Context, _ transport.Host, _ AgentLookup) (remoteConnection, error) { return f, nil }
+			if err := c.Hosts.Add(f.host); err != nil {
+				t.Fatal(err)
+			}
+			if op == "sync" {
+				bin := t.TempDir()
+				if err := os.WriteFile(filepath.Join(bin, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				c.rsync = func(context.Context, []string) (string, string, error) { close(entered); <-release; return "", "", nil }
+			}
+			opDone := make(chan error, 1)
+			go func() {
+				var err error
+				switch op {
+				case "exec":
+					_, err = c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+				case "read":
+					_, err = c.ReadFile(context.Background(), "dev", "x", 0, 1)
+				case "write":
+					_, err = c.WriteFile(context.Background(), WriteFileOptions{Host: "dev", Path: "x", Content: "x"})
+				case "sync":
+					_, err = c.Sync(context.Background(), SyncOptions{Host: "dev", Local: "x", Remote: "x"})
+				}
+				opDone <- err
+			}()
+			<-entered
+			updateDone := make(chan error, 1)
+			go func() { updateDone <- c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}) }()
+			select {
+			case err := <-updateDone:
+				t.Fatalf("identity update completed during active %s sink: %v", op, err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			close(release)
+			if err := <-opDone; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-updateDone; err != nil {
+				t.Fatal(err)
+			}
+			if h, _ := c.Hosts.Host("dev"); h.Addr != "u@new" {
+				t.Fatalf("published host=%+v", h)
+			}
+		})
 	}
 }

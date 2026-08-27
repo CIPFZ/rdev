@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -116,7 +117,8 @@ func ValidateHost(h Host) error {
 // genuinely concurrent: requests carry an ID and are matched to replies by it, so
 // a slow command does not delay unrelated ones on the same host.
 type Conn struct {
-	host Host
+	host        Host
+	stageSuffix func() (string, error)
 
 	// mu guards the fields below plus in-flight bookkeeping. It is never held
 	// across a write or a round trip -- only long enough to register a pending
@@ -530,21 +532,10 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 		}
 	}
 
-	// Upload to a unique temp name, then chmod and rename in one round trip. The
-	// rename is atomic within a directory, so a racing bootstrap (possibly from
-	// another rdev process) sees either the old binary or the new one, never a
-	// partial file, and never a file that is complete but not yet executable.
-	tmp := fmt.Sprintf("%s.tmp.%d", c.agentPath, os.Getpid())
 	if _, err := c.runShell(ctx, `mkdir -p -- "$1/jobs"`, c.stateDir); err != nil {
 		return fmt.Errorf("create remote dir: %w", err)
 	}
-	if err := c.upload(ctx, bin.Data, tmp); err != nil {
-		return err
-	}
-	if _, err := c.runShell(ctx, `chmod 755 -- "$1" && mv -f -- "$1" "$2"`, tmp, c.agentPath); err != nil {
-		return fmt.Errorf("install agent: %w", err)
-	}
-	return nil
+	return c.installAgent(ctx, bin.Data, want)
 }
 
 // agentVersionTimeout bounds the installed agent's -version call.
@@ -612,10 +603,69 @@ func downgradeError(installed, local buildinfo.Build, host Host) error {
 		host.Addr, installed, local, host.Name, host.Addr)
 }
 
-// upload streams data to a remote path via `dd`, which avoids scp/sftp
-// availability differences and reuses the ControlMaster connection.
-func (c *Conn) upload(ctx context.Context, data []byte, remotePath string) error {
-	args, err := c.sshArgs(shellCommand(`exec dd "of=$1" status=none`, remotePath)...)
+func randomStageSuffix() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+const installAgentScript = `set -eu
+stage=$1
+target=$2
+want=$3
+file=$stage/agent
+owned=0
+cleanup() { if [ "$owned" = 1 ]; then rm -f -- "$file"; rmdir -- "$stage" 2>/dev/null || true; fi; }
+trap cleanup EXIT HUP INT TERM
+umask 077
+mkdir -- "$stage"
+owned=1
+chmod 700 "$stage"
+set -C
+exec 3> "$file"
+uid=$(id -u)
+if stat -c '%u:%h:%F' -- "$file" >/dev/null 2>&1; then
+  meta() { stat -c '%u:%h:%F' -- "$1"; }
+  ident() { stat -Lc '%d:%i' -- "$1"; }
+  fd=/proc/$$/fd/3
+  regular="$uid:1:regular file"
+  digest() { sha256sum -- "$1" | awk '{print $1}'; }
+else
+  meta() { stat -f '%u:%l:%HT' -- "$1"; }
+  ident() { stat -f '%i' -- "$1"; }
+  fd=/dev/fd/3
+  regular="$uid:1:Regular File"
+  digest() { shasum -a 256 -- "$1" | awk '{print $1}'; }
+fi
+[ "$(meta "$file")" = "$regular" ]
+[ "$(ident "$file")" = "$(ident "$fd")" ]
+dd bs=65536 >&3 2>/dev/null
+[ "$(meta "$file")" = "$regular" ]
+[ "$(ident "$file")" = "$(ident "$fd")" ]
+exec 3>&-
+[ "$(digest "$file")" = "$want" ]
+chmod 755 "$file"
+[ "$(meta "$file")" = "$uid:1:regular file" ] 2>/dev/null || [ "$(meta "$file")" = "$uid:1:Regular File" ]
+mv -f -- "$file" "$target"
+rmdir -- "$stage"
+trap - EXIT HUP INT TERM`
+
+// installAgent binds the upload to a cryptographically unpredictable,
+// exclusively-created staging object and atomically replaces the installed
+// agent only after identity and digest checks succeed.
+func (c *Conn) installAgent(ctx context.Context, data []byte, want string) error {
+	suffixFn := c.stageSuffix
+	if suffixFn == nil {
+		suffixFn = randomStageSuffix
+	}
+	suffix, err := suffixFn()
+	if err != nil {
+		return fmt.Errorf("name agent staging object: %w", err)
+	}
+	stage := c.stateDir + "/.rdev-agent.stage-" + suffix
+	args, err := c.sshArgs(shellCommand(installAgentScript, stage, c.agentPath, want)...)
 	if err != nil {
 		return err
 	}
@@ -630,7 +680,7 @@ func (c *Conn) upload(ctx context.Context, data []byte, remotePath string) error
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("upload to %s: %s", remotePath, msg)
+		return fmt.Errorf("secure agent install: %s", msg)
 	}
 	return nil
 }

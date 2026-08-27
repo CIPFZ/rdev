@@ -599,3 +599,147 @@ func TestAtomicConfigWriteConcurrentWriters(t *testing.T) {
 		t.Fatalf("temporary files leaked after writes: %v", entries)
 	}
 }
+
+func setupApprovalTransaction(t *testing.T) (*Registry, ProjectTrust) {
+	t.Helper()
+	home, project := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	if err := os.MkdirAll(filepath.Join(home, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".rdev", "hosts.json"), []byte(`{"hosts":[{"name":"dev","addr":"u@old","cwd":"old"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".rdev", "hosts.json"), []byte(`{"hosts":[{"name":"dev","addr":"u@new","port":2200,"remote_dir":"state/new","cwd":"new"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	var untrusted *UntrustedProjectError
+	if err := r.Load(); !errors.As(err, &untrusted) {
+		t.Fatalf("Load = %v", err)
+	}
+	return r, untrusted.Trust
+}
+
+func TestApproveProjectFailurePreservesCompleteLiveSnapshot(t *testing.T) {
+	stages := []string{"read", "marshal", "write", "file-fsync", "rename", "dir-fsync"}
+	for _, stage := range stages {
+		t.Run(stage, func(t *testing.T) {
+			r, pending := setupApprovalTransaction(t)
+			changes := 0
+			r.SetHostChangeHook(func(string, uint64) { changes++ })
+			switch stage {
+			case "read":
+				original := r.io.read
+				r.io.read = func(path string) ([]byte, error) {
+					if filepath.Base(path) == "trusted-projects.json" {
+						return nil, errors.New("injected read failure")
+					}
+					return original(path)
+				}
+			case "marshal":
+				r.io.marshal = func(any, string, string) ([]byte, error) { return nil, errors.New("injected marshal failure") }
+			default:
+				r.io.write = func(path string, data []byte) error {
+					return atomicWriteConfigFileWithHook(path, data, func(current string) error {
+						if current == stage {
+							return errors.New("injected " + stage + " failure")
+						}
+						return nil
+					})
+				}
+			}
+			if _, err := r.ApproveProject(pending.Digest); err == nil {
+				t.Fatal("injected failure was ignored")
+			}
+			h, err := r.Host("dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if h.Addr != "u@old" || r.ScopeOf("dev") != ScopeGlobal || r.State("dev").Cwd != "old" {
+				t.Fatalf("partial live publication: host=%+v scope=%s state=%+v", h, r.ScopeOf("dev"), r.State("dev"))
+			}
+			if got := r.ProjectTrustStatus(); got != pending || got.Approved {
+				t.Fatalf("trust changed: %+v", got)
+			}
+			if changes != 0 {
+				t.Fatalf("connection invalidations=%d, want 0", changes)
+			}
+			p, _ := trustPath()
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Fatalf("failed approval persisted trust state: %v", err)
+			}
+		})
+	}
+}
+
+func TestApproveProjectPublishesOnlyAfterDurableWrite(t *testing.T) {
+	r, pending := setupApprovalTransaction(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	original := r.io.write
+	r.io.write = func(path string, data []byte) error {
+		close(entered)
+		<-release
+		return original(path, data)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := r.ApproveProject(pending.Digest); done <- err }()
+	<-entered
+	if h, _ := r.Host("dev"); h.Addr != "u@old" {
+		t.Fatalf("staged host visible before commit: %+v", h)
+	}
+	if r.ProjectTrustStatus().Approved {
+		t.Fatal("approval visible before commit")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := r.Host("dev"); h.Addr != "u@new" {
+		t.Fatalf("committed host=%+v", h)
+	}
+	if !r.ProjectTrustStatus().Approved {
+		t.Fatal("approval not published with hosts")
+	}
+}
+
+func TestHostIdentityGenerationChangesAndNeverReuses(t *testing.T) {
+	r := NewRegistry()
+	for i, h := range []transport.Host{
+		{Name: "dev", Addr: "u@one", Port: 22, RemoteDir: "a"},
+		{Name: "dev", Addr: "u@two", Port: 22, RemoteDir: "a"},
+		{Name: "dev", Addr: "u@two", Port: 2200, RemoteDir: "a"},
+		{Name: "dev", Addr: "u@two", Port: 2200, RemoteDir: "b"},
+		{Name: "dev", Addr: "u@one", Port: 22, RemoteDir: "a"},
+	} {
+		if err := r.Add(h); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := r.Resolve("dev")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved.Generation != uint64(i+1) {
+			t.Fatalf("step %d generation=%d", i, resolved.Generation)
+		}
+	}
+}
+
+func TestHostFingerprintCanonicalizesRemoteDirCompatibilitySpelling(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@one", RemoteDir: ".cache/rdev"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := r.Resolve("dev")
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@one", RemoteDir: "~/.cache/rdev"}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := r.Resolve("dev")
+	if before.Generation != after.Generation || before.Fingerprint != after.Fingerprint {
+		t.Fatalf("equivalent RemoteDir changed identity: before=%+v after=%+v", before, after)
+	}
+}

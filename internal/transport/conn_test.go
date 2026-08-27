@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -438,8 +440,8 @@ func TestEverySSHSinkUsesDestinationValidation(t *testing.T) {
 	if _, err := c.runSSH(t.Context(), "true"); err == nil {
 		t.Error("runSSH accepted an option-shaped destination")
 	}
-	if err := c.upload(t.Context(), []byte("x"), "/tmp/x"); err == nil {
-		t.Error("upload accepted an option-shaped destination")
+	if err := c.installAgent(t.Context(), []byte("x"), fmt.Sprintf("%x", sha256.Sum256([]byte("x")))); err == nil {
+		t.Error("agent install accepted an option-shaped destination")
 	}
 	if err := c.startAgent(t.Context()); err == nil {
 		t.Error("startAgent accepted an option-shaped destination")
@@ -470,6 +472,128 @@ func TestShellCommandKeepsDynamicValuesOutOfProgram(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("dynamic value executed instead of remaining data: %v", err)
+	}
+}
+
+func runLocalInstallScript(stage, target string, data []byte, want string) error {
+	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, want)
+	cmd.Stdin = bytes.NewReader(data)
+	return cmd.Run()
+}
+
+func TestSecureAgentStagingRejectsExistingObjects(t *testing.T) {
+	data := []byte("new-agent")
+	want := fmt.Sprintf("%x", sha256.Sum256(data))
+	for _, kind := range []string{"symlink", "regular", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			stage, target := filepath.Join(root, "stage"), filepath.Join(root, "installed")
+			if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var victim string
+			switch kind {
+			case "symlink":
+				victim = filepath.Join(root, "victim")
+				if err := os.Mkdir(victim, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(victim, "agent"), []byte("sentinel"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(victim, stage); err != nil {
+					t.Fatal(err)
+				}
+			case "regular":
+				if err := os.WriteFile(stage, []byte("sentinel"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(stage, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runLocalInstallScript(stage, target, data, want); err == nil {
+				t.Fatal("existing staging object was accepted")
+			}
+			if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+				t.Fatalf("installed agent changed to %q", got)
+			}
+			if victim != "" {
+				if got, _ := os.ReadFile(filepath.Join(victim, "agent")); string(got) != "sentinel" {
+					t.Fatalf("link target changed to %q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestSecureAgentStagingFailureCleansOnlyOwnedObject(t *testing.T) {
+	root := t.TempDir()
+	stage, target := filepath.Join(root, "stage"), filepath.Join(root, "installed")
+	if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runLocalInstallScript(stage, target, []byte("partial"), strings.Repeat("0", 64)); err == nil {
+		t.Fatal("digest mismatch succeeded")
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("staging residue: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+		t.Fatalf("installed agent changed to %q", got)
+	}
+}
+
+func TestSecureAgentStagingConcurrentInstallsAreComplete(t *testing.T) {
+	root, target := t.TempDir(), ""
+	target = filepath.Join(root, "installed")
+	payloads := [][]byte{[]byte(strings.Repeat("a", 128<<10)), []byte(strings.Repeat("b", 128<<10))}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(payloads))
+	for i, payload := range payloads {
+		wg.Add(1)
+		go func(i int, payload []byte) {
+			defer wg.Done()
+			err := runLocalInstallScript(filepath.Join(root, fmt.Sprintf("stage-%d", i)), target, payload, fmt.Sprintf("%x", sha256.Sum256(payload)))
+			errs <- err
+		}(i, payload)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payloads[0]) && !bytes.Equal(got, payloads[1]) {
+		t.Fatalf("installed partial payload: %d bytes", len(got))
+	}
+	for i := range payloads {
+		if _, err := os.Lstat(filepath.Join(root, fmt.Sprintf("stage-%d", i))); !os.IsNotExist(err) {
+			t.Fatalf("stage %d residue: %v", i, err)
+		}
+	}
+}
+
+func TestAgentStageSuffixIsCryptographicAndUnique(t *testing.T) {
+	seen := make(map[string]struct{}, 256)
+	for i := 0; i < 256; i++ {
+		suffix, err := randomStageSuffix()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(suffix) != 32 {
+			t.Fatalf("suffix length=%d", len(suffix))
+		}
+		if _, exists := seen[suffix]; exists {
+			t.Fatalf("duplicate suffix %q", suffix)
+		}
+		seen[suffix] = struct{}{}
 	}
 }
 
