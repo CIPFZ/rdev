@@ -3,6 +3,7 @@
 ## Review identity
 
 - Reviewed commit: `c396e9932a2757ea7331363dac3888c98bb82405`
+- Accepted remediation commit: `c9a796cc8ea57aee2afbca13671d27b360baaee5`
 - Parent: `11e9c588c857277b768799fbf5d62c223697ff6e`
 - Scan ID: `1e735fd4-53ed-455a-816b-89a6b4bdbd7f`
 - Snapshot: `codex-security-snapshot/v1:sha256:557594e4102e1d0925d1f3f598e93b16b7a04b25c19458ceb060a17044f642fb`
@@ -102,8 +103,9 @@ directory-fsync commit point with typed committed/ambiguous outcomes, and
 `acl_get_fd_np` inspection (fail-closed without cgo). Host-secret reads during
 connection initialization remain a Phase 2 item; the Phase 1 lease claim covers
 the public exec/read/write/sync sinks only. The patch has implementation-task
-tests and a fresh Ubuntu first-bootstrap run, but remains pending independent
-review and is not recorded here as a completed batch.
+tests and a fresh Ubuntu first-bootstrap run. Its remaining bootstrap ordering
+issues were fixed in the accepted remediation commit recorded above and
+subsequently passed independent review and testing.
 
 ## Final targeted-remediation addendum
 
@@ -124,8 +126,8 @@ The same verification also found that CLI and MCP callers treated
 `ConfigWriteCommittedError` as approval failure even though Registry and disk
 already contained `Approved=true`. Both frontends now return success with the
 approved state and an observable warning; ambiguous and pre-commit errors remain
-failures. These changes remain pending final independent targeted verification,
-so this archive does not mark Batch A complete.
+failures. The later publication-window remediation completed these controls and
+the combined result has passed final independent targeted verification.
 
 ## Final publication-window addendum
 
@@ -145,6 +147,21 @@ inode instead of relying on state alone; an interruption anywhere in that
 boundary preserves both the visible target and staging proof and reports a typed
 ambiguous outcome. HUP, INT, and TERM also carry explicit nonzero statuses into
 the trap. Deterministic tests stop the publication link at that boundary and
-replace the pathname during the final rollback check. This patch remains pending
-the requested final independent targeted verification; Batch A is still not
-marked complete.
+replace the pathname during the final rollback check.
+
+## Acceptance conclusion
+
+Independent review of final code
+`c9a796cc8ea57aee2afbca13671d27b360baaee5` classified both remaining bootstrap
+ordering windows as fixed. Independent testing passed the complete repository
+gate, 100 iterations of each boundary regression, and a real Ubuntu first
+bootstrap followed by a minimal exec and double-cleanup verification. Batch A,
+covering the Phase 0–1 work implemented in this batch, is therefore accepted.
+
+This acceptance does not close the unimplemented Phase 0 simulator, complete
+doctor/trace, storage fixture, isolated sshd/ProxyJump harness, or general
+fuzz/fake-clock infrastructure. Native `IdentityFile`/`IdentitiesOnly`, the
+connection-initialization lease for host-scoped secret reads, a bare
+leading-dash local operand in the CLI, CLI truncation visibility, and protocol
+cancel propagation remain later Phase 2/3 or support/CLI acceptance work. No
+private-key path is recorded in this archive.

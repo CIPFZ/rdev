@@ -1,6 +1,6 @@
 # rdev 架构演进、安全加固与分阶段任务计划
 
-> 状态：实施中；Batch A（Phase 0–1）最终针对性修复已实现，等待独立复验，不标记批次完成
+> 状态：实施中；Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收
 >
 > 建档日期：2026-08-27
 >
@@ -869,7 +869,7 @@ Gate：在 SEC-001、SEC-002 修复前，不开始把项目配置传播给共享
 
 #### Batch A 实施记录（2026-08-27）
 
-Phase 1 实现清单（等待最终独立复验）：
+Phase 1 实现清单（已独立验收）：
 
 - [x] P1-01：项目配置以绝对路径和精确 SHA-256 绑定批准；未批准或内容变化时只保留 global host，不能触发连接。
 - [x] P1-02：`ValidateDestination` 在所有 SSH 进程创建的共享边界执行，并覆盖配置加载、运行时注册和一次性 destination。
@@ -892,11 +892,11 @@ Phase 0 本批必要基线：
 
 Batch A 新增的负向与竞态覆盖包括：项目配置未批准/摘要变化/错误摘要、恶意 destination、`RemoteDir` shell 元字符与 traversal、项目配置和目录 symlink、owner/mode/fd-native ACL 策略、0600/0700 修复、并发原子 writer、批准 commit/rollback/cleanup 全阶段故障、alias generation 并发切换、per-alias exec/read/write/sync lease、安全 bootstrap staging/inode 绑定，以及 rsync 前导 `-`/remote-shell 字符。后续复验修复额外断言 host A 长操作不阻塞 host B 更新、同 alias 发布等待旧 sink、Darwin ACL 查询绑定已打开 fd、Linux/macOS 普通文件检查不依赖本地化或空文件类型字符串，以及 bootstrap 发布后校验失败、rollback mv/rm/inode 故障、首次安装并发 target、commit 后 backup/rmdir 清理故障；CLI/MCP 对 committed approval 均投影为 `Approved=true` 的成功结果并附 warning。
 
-第一轮独立验证已在隔离的 Ubuntu amd64 目录中通过真实 SSH bootstrap、exec、read/write 与 rsync，并由本地 Claude Code 通过 rdev MCP 完成一次只读远端调用；精确测试目录已清理且二次确认无目录、symlink 或进程残留。第二轮发现 GNU `stat` 空文件类型文本回归后已改为 numeric metadata + `test -f` + fd/inode 绑定；修复后的全新 Ubuntu 目录首次 bootstrap 已由本次实现任务重新实机通过，远端 agent 为单链接可执行普通文件，目录及进程随后均清理并复核无残留，仍等待独立复验。rdev 当前没有原生 `IdentityFile`/`IdentitiesOnly` 字段，测试使用隔离 SSH wrapper 注入认证参数，此能力纳入 P4-01/P6 支持验收。
+第一轮独立验证已在隔离的 Ubuntu amd64 目录中通过真实 SSH bootstrap、exec、read/write 与 rsync，并由本地 Claude Code 通过 rdev MCP 完成一次只读远端调用；精确测试目录已清理且二次确认无目录、symlink 或进程残留。第二轮发现 GNU `stat` 空文件类型文本回归后已改为 numeric metadata + `test -f` + fd/inode 绑定。最终代码 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 已由独立 review 将两个 bootstrap 顺序窗口均判定为 fixed；独立测试通过全量门禁、两个边界测试各 100 轮，以及 Ubuntu 首次 bootstrap、最小 exec 和双重清理验证。rdev 当前没有原生 `IdentityFile`/`IdentitiesOnly` 字段，测试使用隔离 SSH wrapper 注入认证参数，此能力纳入 P4-01/P6 支持验收。
 
 独立验证同时确认：底层/MCP 可安全同步裸 `-leading-local`，但 CLI parser 不能直接表达该 operand（`./-leading-local` 可用）；输出被截断时协议有状态而 CLI 不展示；本地 context cancel 不传播到远端进程。这三项分别进入 P6-09、P3-12 和既有 P3-04，不在本批提前实现 Phase 3。
 
-Batch A 最终本地验证：`gofmt`、`make clean && make all`、`go test ./...`、`go test -race ./...`、`go vet ./...` 和 `make check-agents` 全部通过；没有把缺少的 P0-02/P0-06/P0-07/P0-09/P0-10 伪装成已完成。维护者审查归档见 [`docs/security/phase0-1-codex-security-review.md`](security/phase0-1-codex-security-review.md)。
+Batch A 已验收：最终代码 SHA 为 `c9a796cc8ea57aee2afbca13671d27b360baaee5`；本地与独立验证的 `gofmt`、`make clean && make all`、`go test ./...`、`go test -race ./...`、`go vet ./...` 和 `make check-agents` 全部通过，独立针对性复验也通过两个 bootstrap 边界测试各 100 轮及 Ubuntu 实机链路。此结论只验收 Phase 0–1 当前批次，不把尚缺的 P0-02/P0-06/P0-07/P0-09/P0-10 伪装成已完成。维护者审查归档见 [`docs/security/phase0-1-codex-security-review.md`](security/phase0-1-codex-security-review.md)。
 
 ### Phase 2：密钥作用域与输出边界
 
