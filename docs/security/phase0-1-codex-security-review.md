@@ -126,3 +126,25 @@ already contained `Approved=true`. Both frontends now return success with the
 approved state and an observable warning; ambiguous and pre-commit errors remain
 failures. These changes remain pending final independent targeted verification,
 so this archive does not mark Batch A complete.
+
+## Final publication-window addendum
+
+The last targeted verification identified two ordering intervals in the remote
+bootstrap transaction. Recovery links (`failed`, `published`, and `old`) were
+removed before the restored target's final fd/inode/digest check, and a signal
+could arrive after first-install no-replace publication but before the shell
+recorded `INSTALLING`. Recovery now reaches its verified rollback commit point
+before removing any evidence. A pathname replacement during the final check
+therefore returns a typed ambiguous outcome with the old, failed-publication,
+and publication-proof inodes retained.
+
+First publication now sets a pending-publication flag before `link(2)`, records
+`published_by_us` before changing state, and clears the pending flag only after
+`INSTALLING` is recorded. The signal trap reconciles the flag with the published
+inode instead of relying on state alone; an interruption anywhere in that
+boundary preserves both the visible target and staging proof and reports a typed
+ambiguous outcome. HUP, INT, and TERM also carry explicit nonzero statuses into
+the trap. Deterministic tests stop the publication link at that boundary and
+replace the pathname during the final rollback check. This patch remains pending
+the requested final independent targeted verification; Batch A is still not
+marked complete.

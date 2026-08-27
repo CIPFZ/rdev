@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -499,6 +500,8 @@ func TestInstallScriptUsesPortableFDBoundRegularFileChecks(t *testing.T) {
 		`state=VERIFIED`,
 		`state=INSTALLING`,
 		`state=COMMITTED`,
+		`publication_pending=1`,
+		`published_by_us=1`,
 		agentInstallAmbiguousMarker,
 		agentInstallCommittedMarker,
 		`[ -f "$fd" ]`,
@@ -654,12 +657,13 @@ func writeInstallFaultWrapper(t *testing.T, bin, name, real string) {
 	switch name {
 	case "shasum", "sha256sum":
 		behavior = `fail_at=${RDEV_FAIL_DIGEST_AT:-0}
+replace_at=${RDEV_REPLACE_TARGET_AT:-$fail_at}
+if [ "$count" = "$replace_at" ] && [ -n "${RDEV_REPLACE_TARGET_ON_DIGEST:-}" ]; then
+  /bin/rm -f -- "$RDEV_REPLACE_TARGET_ON_DIGEST"
+  printf 'concurrent-target' > "$RDEV_REPLACE_TARGET_ON_DIGEST"
+  chmod 755 "$RDEV_REPLACE_TARGET_ON_DIGEST"
+fi
 if [ "$count" = "$fail_at" ]; then
-  if [ -n "${RDEV_REPLACE_TARGET_ON_DIGEST:-}" ]; then
-    /bin/rm -f -- "$RDEV_REPLACE_TARGET_ON_DIGEST"
-    printf 'concurrent-target' > "$RDEV_REPLACE_TARGET_ON_DIGEST"
-    chmod 755 "$RDEV_REPLACE_TARGET_ON_DIGEST"
-  fi
   printf '%064d\n' 0
   exit 0
 fi`
@@ -683,6 +687,10 @@ if [ "$count" = "${RDEV_CORRUPT_LN_AT:-0}" ]; then
   /bin/rm -f -- "$dest"
   printf 'replacement-after-restore' > "$dest"
   chmod 755 "$dest"
+fi
+if [ "$count" = "${RDEV_BARRIER_LN_AT:-0}" ]; then
+  : > "$RDEV_BARRIER_ENTERED"
+  while [ ! -e "$RDEV_BARRIER_RELEASE" ]; do sleep 0.01; done
 fi
 exit 0`
 	case "rm":
@@ -850,6 +858,25 @@ func TestSecureAgentInstallFaultOutcomes(t *testing.T) {
 		}
 	})
 
+	t.Run("final rollback recheck retains all evidence", func(t *testing.T) {
+		_, stage, target, _, err := installFaultCase(t, true,
+			"RDEV_FAIL_DIGEST_AT=4", "RDEV_REPLACE_TARGET_AT=6",
+			"RDEV_REPLACE_TARGET_ON_DIGEST={target}")
+		requireInstallOutcome[*AgentInstallAmbiguousError](t, err)
+		if got, _ := os.ReadFile(target); string(got) != "concurrent-target" {
+			t.Fatalf("final recheck overwrote concurrent target: %q", got)
+		}
+		for name, want := range map[string]string{
+			"old":       "old-agent",
+			"failed":    strings.Repeat("new-verified-agent", 1024),
+			"published": strings.Repeat("new-verified-agent", 1024),
+		} {
+			if got, readErr := os.ReadFile(filepath.Join(stage, name)); readErr != nil || string(got) != want {
+				t.Fatalf("retained %s=%q err=%v", name, got, readErr)
+			}
+		}
+	})
+
 	t.Run("first install never deletes concurrent target", func(t *testing.T) {
 		_, stage, target, _, err := installFaultCase(t, false,
 			"RDEV_FAIL_DIGEST_AT=2", "RDEV_REPLACE_TARGET_ON_DIGEST={target}")
@@ -887,6 +914,74 @@ func TestSecureAgentInstallFaultOutcomes(t *testing.T) {
 			t.Fatalf("committed rmdir residue entries=%v err=%v", entries, readErr)
 		}
 	})
+}
+
+func TestFirstInstallSignalAtPublicationBoundaryPreservesTargetAndEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		concurrent bool
+		wantTarget string
+	}{
+		{name: "published target", wantTarget: strings.Repeat("signal-safe-agent", 1024)},
+		{name: "concurrent replacement", concurrent: true, wantTarget: "concurrent-target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			stage := filepath.Join(root, "stage")
+			target := filepath.Join(root, "installed")
+			entered := filepath.Join(root, "publication-entered")
+			release := filepath.Join(root, "publication-release")
+			data := []byte(strings.Repeat("signal-safe-agent", 1024))
+			cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, fmt.Sprintf("%x", sha256.Sum256(data)))
+			cmd.Stdin = bytes.NewReader(data)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			cmd.Env = append(installFaultEnvironment(t),
+				"RDEV_BARRIER_LN_AT=3",
+				"RDEV_BARRIER_ENTERED="+entered,
+				"RDEV_BARRIER_RELEASE="+release,
+			)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(entered); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					_ = cmd.Process.Kill()
+					t.Fatal("install did not reach first-publication barrier")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if tc.concurrent {
+				if err := os.Remove(target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, []byte(tc.wantTarget), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(release, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			waitErr := cmd.Wait()
+			if waitErr == nil {
+				t.Fatal("publication-boundary interrupt unexpectedly succeeded")
+			}
+			requireInstallOutcome[*AgentInstallAmbiguousError](t, agentInstallError(waitErr, stderr.String()))
+			if got, readErr := os.ReadFile(target); readErr != nil || string(got) != tc.wantTarget {
+				t.Fatalf("target=%q err=%v, want preserved %q", got, readErr, tc.wantTarget)
+			}
+			if got, readErr := os.ReadFile(filepath.Join(stage, "published")); readErr != nil || !bytes.Equal(got, data) {
+				t.Fatalf("publication proof=%q err=%v", got, readErr)
+			}
+		})
+	}
 }
 
 func TestSecureAgentStagingRejectsExistingObjects(t *testing.T) {

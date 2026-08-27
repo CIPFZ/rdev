@@ -624,6 +624,8 @@ owned=0
 state=STAGED
 had_target=0
 published_ident=
+publication_pending=0
+published_by_us=0
 old_ident=
 old_digest=
 umask 077
@@ -678,6 +680,12 @@ verify_target() {
   [ "$actual_ident" = "$expected_ident" ] || return 1
   [ "$path_ident" = "$expected_ident" ] || return 1
   [ "$actual_digest" = "$expected_digest" ]
+}
+
+publication_visible() {
+  [ -f "$target" ] || return 1
+  [ ! -L "$target" ] || return 1
+  [ "$(ident "$target")" = "$published_ident" ]
 }
 
 cleanup_staged() {
@@ -738,6 +746,16 @@ rollback_install() {
     verify_target "$old_ident" "$old_digest" || return 2
   fi
 
+  # Keep every recovery hard link until the restored pathname has passed its
+  # final fd/inode/digest check. If a same-UID writer replaces target during
+  # that check, the old and failed inodes remain available for diagnosis or a
+  # subsequent verified recovery.
+  if [ "$had_target" = 1 ]; then
+    verify_target "$old_ident" "$old_digest" || return 2
+  elif [ -e "$target" ] || [ -L "$target" ]; then
+    return 2
+  fi
+
   if ! rm -f -- "$failed"; then
     return 2
   fi
@@ -748,7 +766,6 @@ rollback_install() {
     if ! rm -f -- "$old"; then
       return 2
     fi
-    verify_target "$old_ident" "$old_digest" || return 2
   fi
   if ! rm -f -- "$file" "$ready"; then
     return 2
@@ -763,6 +780,18 @@ on_exit() {
   status=$1
   trap - EXIT HUP INT TERM
   [ "$status" -ne 0 ] || exit 0
+  if [ "$publication_pending" = 1 ]; then
+    # The publication command may already have made target visible even though
+    # the shell has not executed the next assignment. Preserve both target and
+    # staging evidence; inode reconciliation makes this independent of state.
+    if publication_visible; then
+      published_by_us=1
+    fi
+    emit_ambiguous "interrupted at first-publication boundary"
+  fi
+  if [ "$published_by_us" = 1 ] && [ "$state" = VERIFIED ]; then
+    state=INSTALLING
+  fi
   case "$state" in
     STAGED)
       cleanup_staged
@@ -791,7 +820,10 @@ on_exit() {
       ;;
   esac
 }
-trap 'on_exit $?' EXIT HUP INT TERM
+trap 'on_exit $?' EXIT
+trap 'on_exit 129' HUP
+trap 'on_exit 130' INT
+trap 'on_exit 143' TERM
 
 [ -f "$fd" ]
 [ ! -L "$file" ]
@@ -849,12 +881,19 @@ if [ -e "$target" ] || [ -L "$target" ]; then
 else
   # link(2) provides no-replace publication for the first install. A racing
   # bootstrap that wins this name makes this command fail without removing it.
+  # Set the pending flag before the observable publication action. Until the
+  # published flag and INSTALLING state are both recorded, the trap preserves
+  # target and proof and reports an explicit ambiguous outcome.
+  publication_pending=1
   if ln -- "$ready" "$target"; then
+    published_by_us=1
     state=INSTALLING
+    publication_pending=0
     rm -f -- "$ready"
   else
     # A concurrent publisher owns target. Stay VERIFIED so cleanup is confined
     # to this unpredictable staging directory and never removes the winner.
+    publication_pending=0
     state=VERIFIED
     false
   fi
