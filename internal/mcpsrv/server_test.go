@@ -3,6 +3,9 @@ package mcpsrv
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,9 +33,13 @@ func newTestClient() *client.Client {
 // Claude Code.
 func connect(t *testing.T, c *client.Client) *mcp.ClientSession {
 	t.Helper()
+	return connectServer(t, New(c))
+}
+
+func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 
 	serverT, clientT := mcp.NewInMemoryTransports()
-	srv := New(c)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -226,6 +233,104 @@ func TestSessionRejectsUnknownScope(t *testing.T) {
 	isErr, _ := callTool(t, cs, "rdev_session", SessionIn{Host: "dev", Addr: "u@h", Scope: "bogus"}, nil)
 	if !isErr {
 		t.Error("an unknown scope should be rejected rather than silently defaulted")
+	}
+}
+
+func TestSessionRejectsUnsafeSSHAndRemoteDirInputs(t *testing.T) {
+	cs := connect(t, newTestClient())
+	for _, in := range []SessionIn{
+		{Host: "dev", Addr: "-oProxyCommand=touch-pwned"},
+		{Host: "dev", Addr: "u@h other"},
+		{Host: "dev", Addr: "u@h", Port: 65536},
+		{Host: "dev", Addr: "u@h", RemoteDir: "~/.cache/$(touch-pwned)"},
+		{Host: "dev", Addr: "u@h", RemoteDir: "../outside"},
+	} {
+		if isErr, _ := callTool(t, cs, "rdev_session", in, nil); !isErr {
+			t.Errorf("unsafe session input was accepted: %+v", in)
+		}
+	}
+}
+
+func TestSessionProjectApprovalIsDigestBound(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	if err := os.MkdirAll(filepath.Join(home, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte(`{"hosts":[{"name":"dev","addr":"u@project"}]}`)
+	if err := os.WriteFile(filepath.Join(project, ".rdev", "hosts.json"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestClient()
+	var untrusted *session.UntrustedProjectError
+	if err := c.Hosts.Load(); !errors.As(err, &untrusted) {
+		t.Fatalf("Load error = %v, want untrusted project", err)
+	}
+	cs := connect(t, c)
+	var pending SessionOut
+	if isErr, msg := callTool(t, cs, "rdev_session", SessionIn{}, &pending); isErr {
+		t.Fatal(msg)
+	}
+	if pending.ProjectTrust.Approved || pending.ProjectTrust.Digest == "" {
+		t.Fatalf("project trust = %+v", pending.ProjectTrust)
+	}
+	if pending.Security.SchemaVersion != 1 || pending.Security.SecurityRejects["project_untrusted"] != 1 {
+		t.Fatalf("security snapshot = %+v", pending.Security)
+	}
+	if isErr, _ := callTool(t, cs, "rdev_session", SessionIn{ApproveProjectDigest: strings.Repeat("0", 64)}, nil); !isErr {
+		t.Fatal("wrong project digest was accepted")
+	}
+	var approved SessionOut
+	if isErr, msg := callTool(t, cs, "rdev_session", SessionIn{ApproveProjectDigest: pending.ProjectTrust.Digest}, &approved); isErr {
+		t.Fatal(msg)
+	}
+	if !approved.ProjectTrust.Approved || len(approved.Hosts) != 1 || approved.Hosts[0].Addr != "u@project" {
+		t.Fatalf("approved output = %+v", approved)
+	}
+}
+
+func TestSessionCommittedApprovalWarningIsSuccessful(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	if err := os.MkdirAll(filepath.Join(home, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte(`{"hosts":[{"name":"dev","addr":"u@project"}]}`)
+	if err := os.WriteFile(filepath.Join(project, ".rdev", "hosts.json"), config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestClient()
+	var untrusted *session.UntrustedProjectError
+	if err := c.Hosts.Load(); !errors.As(err, &untrusted) {
+		t.Fatalf("Load error = %v, want untrusted project", err)
+	}
+	approve := func(digest string) (session.ProjectTrust, error) {
+		trust, err := c.Hosts.ApproveProject(digest)
+		if err != nil {
+			return trust, err
+		}
+		return trust, &session.ConfigWriteCommittedError{Cause: errors.New("injected backup cleanup failure")}
+	}
+	cs := connectServer(t, newServer(c, approve))
+	var out SessionOut
+	if isErr, msg := callTool(t, cs, "rdev_session", SessionIn{ApproveProjectDigest: untrusted.Trust.Digest}, &out); isErr {
+		t.Fatalf("committed approval projected as MCP failure: %s", msg)
+	}
+	if !out.ProjectTrust.Approved || out.Warning == "" {
+		t.Fatalf("committed approval output=%+v", out)
+	}
+	if h, err := c.Hosts.Host("dev"); err != nil || h.Addr != "u@project" {
+		t.Fatalf("committed live host=%+v err=%v", h, err)
 	}
 }
 

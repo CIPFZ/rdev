@@ -26,6 +26,7 @@ import (
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/mcpsrv"
 	"github.com/CIPFZ/rdev/internal/session"
+	"github.com/CIPFZ/rdev/internal/support"
 	"github.com/CIPFZ/rdev/internal/transport"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -120,6 +121,8 @@ func main() {
 		err = cmdPing(ctx, c, os.Args[2:])
 	case "version", "-version", "--version":
 		printVersion()
+	case "support":
+		err = printJSON(support.Snapshot())
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -152,7 +155,7 @@ USAGE
   rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]
-  rdev hosts   [list|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
+  rdev hosts   [list|trust|approve-project <sha256>|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
                                        [-env K=V]... [-secret NAME=PATH]...
                                        [-no-login] [-force-agent-upload]
                                        [-global] [-save]]
@@ -160,6 +163,7 @@ USAGE
   rdev secrets check <host> <name> [-path P] -- <argv...>
   rdev secrets list
   rdev version                            build id + every embedded agent's SHA-256
+  rdev support                            machine-readable support tiers and non-goals
 
 HOST
   A registered alias, or an ssh destination like user@1.2.3.4:2222.
@@ -584,6 +588,20 @@ func cmdSync(ctx context.Context, c *client.Client, args []string) error {
 // ---------- hosts ----------
 
 func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) > 0 && args[0] == "trust" {
+		return printJSON(c.Hosts.ProjectTrustStatus())
+	}
+	if len(args) > 0 && args[0] == "approve-project" {
+		if len(args) != 2 {
+			return errors.New("usage: rdev hosts approve-project <sha256>")
+		}
+		trust, err := c.Hosts.ApproveProject(args[1])
+		out, err := projectApprovalOutput(trust, err)
+		if err != nil {
+			return err
+		}
+		return printJSON(out)
+	}
 	if len(args) == 0 || args[0] == "list" {
 		type row struct {
 			Name       string            `json:"name"`
@@ -632,12 +650,22 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		if fs.bools["global"] {
 			scope = session.ScopeGlobal
 		}
+		port := 0
+		if rawPort := fs.str("port"); rawPort != "" {
+			parsed, err := strconv.Atoi(rawPort)
+			if err != nil {
+				return fmt.Errorf("invalid port %q", rawPort)
+			}
+			port = parsed
+		}
 
-		c.Hosts.Add(transport.Host{
-			Name: fs.pos[0], Addr: fs.pos[1], Port: fs.num("port"),
+		if err := c.Hosts.Add(transport.Host{
+			Name: fs.pos[0], Addr: fs.pos[1], Port: port,
 			RemoteDir:        fs.str("remote-dir"),
 			ForceAgentUpload: fs.bools["force-agent-upload"],
-		})
+		}); err != nil {
+			return fmt.Errorf("invalid host: %w", err)
+		}
 		c.Hosts.SetScope(fs.pos[0], scope)
 
 		env := map[string]string{}
@@ -692,6 +720,23 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		return cmdHosts(ctx, c, []string{"list"})
 	}
 	return fmt.Errorf("unknown hosts subcommand %q", args[0])
+}
+
+type approvalOutput struct {
+	session.ProjectTrust
+	Warning string `json:"warning,omitempty"`
+}
+
+func projectApprovalOutput(trust session.ProjectTrust, err error) (approvalOutput, error) {
+	out := approvalOutput{ProjectTrust: trust}
+	if err == nil {
+		return out, nil
+	}
+	if warning, committed := session.ConfigWriteCommittedWarning(err); committed {
+		out.Warning = warning
+		return out, nil
+	}
+	return approvalOutput{}, err
 }
 
 func cmdPing(ctx context.Context, c *client.Client, args []string) error {

@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -378,19 +381,732 @@ func TestControlPathIsShortAndStable(t *testing.T) {
 }
 
 func TestRemoteDirNormalization(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"", ".cache/rdev"},
-		{"~/.cache/rdev", ".cache/rdev"},
-		{"/opt/rdev", "opt/rdev"},
-		{"custom/dir", "custom/dir"},
+	valid := map[string]string{
+		"":                  ".cache/rdev",
+		"~/.cache/custom":   ".cache/custom",
+		".cache/custom":     ".cache/custom",
+		"state-1/jobs_data": "state-1/jobs_data",
 	}
-	for _, c := range cases {
-		h := Host{RemoteDir: c.in}
-		if got := h.remoteDir(); got != c.want {
-			t.Errorf("remoteDir(%q) = %q, want %q", c.in, got, c.want)
+	for in, want := range valid {
+		got, err := ValidateRemoteDir(in)
+		if err != nil || got != want {
+			t.Errorf("ValidateRemoteDir(%q) = %q, %v; want %q", in, got, err, want)
 		}
+	}
+
+	invalid := []string{
+		"/.cache/custom", "../state", ".cache/../state", ".cache//state",
+		".cache/state/", ".cache/'quoted'", ".cache/$(touch-pwned)",
+		".cache/`id`", ".cache/with space", ".cache/with\nnewline", "~root/state",
+	}
+	for _, in := range invalid {
+		if _, err := ValidateRemoteDir(in); err == nil {
+			t.Errorf("ValidateRemoteDir(%q) should fail", in)
+		}
+	}
+}
+
+func TestValidateDestinationRejectsOptionAndWhitespaceInjection(t *testing.T) {
+	valid := []Host{
+		{Addr: "u@host"}, {Addr: "ssh-alias", Port: 22},
+		{Addr: "u@[2001:db8::1]", Port: 65535},
+	}
+	for _, host := range valid {
+		if err := ValidateHost(host); err != nil {
+			t.Errorf("ValidateHost(%+v): %v", host, err)
+		}
+	}
+
+	invalid := []Host{
+		{Addr: ""},
+		{Addr: "-oProxyCommand=sh"},
+		{Addr: "u@host -oProxyCommand=sh"},
+		{Addr: "u@host\n-oProxyCommand=sh"},
+		{Addr: "u@host", Port: -1},
+		{Addr: "u@host", Port: 65536},
+	}
+	for _, host := range invalid {
+		if err := ValidateHost(host); err == nil {
+			t.Errorf("ValidateHost(%+v) should fail", host)
+		}
+	}
+}
+
+func TestEverySSHSinkUsesDestinationValidation(t *testing.T) {
+	log := fakeSSH(t, "", 0)
+	c := &Conn{
+		host:   Host{Addr: "-oProxyCommand=touch-pwned"},
+		stderr: &lockedBuilder{},
+	}
+	if _, err := c.runSSH(t.Context(), "true"); err == nil {
+		t.Error("runSSH accepted an option-shaped destination")
+	}
+	if err := c.installAgent(t.Context(), []byte("x"), fmt.Sprintf("%x", sha256.Sum256([]byte("x")))); err == nil {
+		t.Error("agent install accepted an option-shaped destination")
+	}
+	if err := c.startAgent(t.Context()); err == nil {
+		t.Error("startAgent accepted an option-shaped destination")
+	}
+	if calls := sshCalls(t, log); calls != "" {
+		t.Fatalf("an invalid destination reached ssh:\n%s", calls)
+	}
+}
+
+func TestShellCommandKeepsDynamicValuesOutOfProgram(t *testing.T) {
+	const program = `printf '%s' "$1"`
+	marker := filepath.Join(t.TempDir(), "pwned")
+	value := "$(touch " + marker + "); ' quoted\nnext"
+	argv := shellCommand(program, value)
+	if len(argv) != 5 {
+		t.Fatalf("shellCommand argv = %v", argv)
+	}
+	if strings.Contains(argv[2], value) {
+		t.Fatalf("dynamic value entered shell source: %q", argv[2])
+	}
+	commandLine := strings.Join(argv, " ")
+	out, err := exec.Command("sh", "-c", commandLine).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != value {
+		t.Errorf("positional value round-tripped as %q, want %q", out, value)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("dynamic value executed instead of remaining data: %v", err)
+	}
+}
+
+func runLocalInstallScript(stage, target string, data []byte, want string) error {
+	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, want)
+	cmd.Stdin = bytes.NewReader(data)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return agentInstallError(err, string(out))
+	}
+	return nil
+}
+
+func TestInstallScriptUsesPortableFDBoundRegularFileChecks(t *testing.T) {
+	for _, localizedTypeProbe := range []string{"%F", "%HT", "regular file", "Regular File"} {
+		if strings.Contains(installAgentScript, localizedTypeProbe) {
+			t.Fatalf("install script still depends on stat type text %q", localizedTypeProbe)
+		}
+	}
+	if strings.Contains(installAgentScript, "|| true") {
+		t.Fatal("install script still swallows rollback or cleanup failures")
+	}
+	for _, invariant := range []string{
+		`state=STAGED`,
+		`state=VERIFIED`,
+		`state=INSTALLING`,
+		`state=COMMITTED`,
+		`publication_pending=1`,
+		`published_by_us=1`,
+		agentInstallAmbiguousMarker,
+		agentInstallCommittedMarker,
+		`[ -f "$fd" ]`,
+		`[ "$(ident "$ready")" = "$(ident "$fd")" ]`,
+		`[ "$(ident "$readfd")" = "$(ident "$fd")" ]`,
+		`verify_target "$published_ident" "$want"`,
+	} {
+		if !strings.Contains(installAgentScript, invariant) {
+			t.Fatalf("install script missing fd/inode invariant %q", invariant)
+		}
+	}
+	data := []byte("first-install-on-an-empty-staging-file")
+	root := t.TempDir()
+	target := filepath.Join(root, "installed")
+	if err := runLocalInstallScript(filepath.Join(root, "stage"), target, data, fmt.Sprintf("%x", sha256.Sum256(data))); err != nil {
+		t.Fatalf("first install failed: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("installed bytes=%q err=%v", got, err)
+	}
+}
+
+func TestSecureAgentStagingRejectsPathReplacementWhileFDIsOpen(t *testing.T) {
+	root := t.TempDir()
+	stage := filepath.Join(root, "stage")
+	target := filepath.Join(root, "installed")
+	victim := filepath.Join(root, "victim")
+	if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(victim, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(strings.Repeat("new-agent", 1024))
+	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, fmt.Sprintf("%x", sha256.Sum256(data)))
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(stage, "agent")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if info, statErr := os.Lstat(file); statErr == nil && info.Mode().IsRegular() {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatal("staging file was not created")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, file); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = stdin.Write(data)
+	_ = stdin.Close()
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("path replacement was accepted despite the open staging fd")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+		t.Fatalf("installed agent changed to %q", got)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "sentinel" {
+		t.Fatalf("replacement link target changed to %q", got)
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("staging residue: %v", err)
+	}
+}
+
+func TestSecureAgentInstallRollsBackReadyReplacementAfterDigest(t *testing.T) {
+	root := t.TempDir()
+	stage := filepath.Join(root, "stage")
+	target := filepath.Join(root, "installed")
+	if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entered := filepath.Join(root, "mv-entered")
+	release := filepath.Join(root, "mv-release")
+	once := filepath.Join(root, "mv-once")
+	wrapper := `#!/bin/sh
+set -eu
+if mkdir "$RDEV_MV_ONCE" 2>/dev/null; then
+  : > "$RDEV_MV_ENTERED"
+  while [ ! -e "$RDEV_MV_RELEASE" ]; do sleep 0.01; done
+fi
+exec /bin/mv "$@"
+`
+	if err := os.WriteFile(filepath.Join(bin, "mv"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(strings.Repeat("verified-agent", 1024))
+	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, fmt.Sprintf("%x", sha256.Sum256(data)))
+	cmd.Stdin = bytes.NewReader(data)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RDEV_MV_ENTERED="+entered,
+		"RDEV_MV_RELEASE="+release,
+		"RDEV_MV_ONCE="+once,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatal("install did not reach the post-digest rename")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ready := filepath.Join(stage, "ready")
+	if err := os.Remove(ready); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ready, []byte("replacement"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitErr := cmd.Wait()
+	var ambiguous *AgentInstallAmbiguousError
+	if waitErr == nil || !errors.As(agentInstallError(waitErr, stderr.String()), &ambiguous) {
+		t.Fatalf("post-digest path replacement outcome=%v stderr=%q", waitErr, stderr.String())
+	}
+	if got, _ := os.ReadFile(target); string(got) != "replacement" {
+		t.Fatalf("rollback overwrote the replacement target: %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(stage, "old")); string(got) != "old-agent" {
+		t.Fatalf("ambiguous install did not preserve old inode backup: %q", got)
+	}
+}
+
+func writeInstallFaultWrapper(t *testing.T, bin, name, real string) {
+	t.Helper()
+	var behavior string
+	switch name {
+	case "shasum", "sha256sum":
+		behavior = `fail_at=${RDEV_FAIL_DIGEST_AT:-0}
+replace_at=${RDEV_REPLACE_TARGET_AT:-$fail_at}
+if [ "$count" = "$replace_at" ] && [ -n "${RDEV_REPLACE_TARGET_ON_DIGEST:-}" ]; then
+  /bin/rm -f -- "$RDEV_REPLACE_TARGET_ON_DIGEST"
+  printf 'concurrent-target' > "$RDEV_REPLACE_TARGET_ON_DIGEST"
+  chmod 755 "$RDEV_REPLACE_TARGET_ON_DIGEST"
+fi
+if [ "$count" = "$fail_at" ]; then
+  printf '%064d\n' 0
+  exit 0
+fi`
+	case "mv":
+		behavior = `if [ "$count" = "${RDEV_FAIL_MV_AT:-0}" ]; then exit 42; fi
+"$real" "$@"
+if [ "$count" = "${RDEV_CORRUPT_MV_AT:-0}" ]; then
+  dest=
+  for arg in "$@"; do dest=$arg; done
+  /bin/rm -f -- "$dest"
+  printf 'replacement-after-mv' > "$dest"
+  chmod 755 "$dest"
+fi
+exit 0`
+	case "ln":
+		behavior = `if [ "$count" = "${RDEV_FAIL_LN_AT:-0}" ]; then exit 42; fi
+"$real" "$@"
+if [ "$count" = "${RDEV_CORRUPT_LN_AT:-0}" ]; then
+  dest=
+  for arg in "$@"; do dest=$arg; done
+  /bin/rm -f -- "$dest"
+  printf 'replacement-after-restore' > "$dest"
+  chmod 755 "$dest"
+fi
+if [ "$count" = "${RDEV_BARRIER_LN_AT:-0}" ]; then
+  : > "$RDEV_BARRIER_ENTERED"
+  while [ ! -e "$RDEV_BARRIER_RELEASE" ]; do sleep 0.01; done
+fi
+exit 0`
+	case "rm":
+		behavior = `if [ "$count" = "${RDEV_FAIL_RM_AT:-0}" ]; then exit 42; fi
+exec "$real" "$@"`
+	case "rmdir":
+		behavior = `if [ "$count" = "${RDEV_FAIL_RMDIR_AT:-0}" ]; then exit 42; fi
+exec "$real" "$@"`
+	default:
+		t.Fatalf("unknown wrapper %q", name)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+real=%q
+counter=$RDEV_FAULT_DIR/%s.count
+count=0
+if [ -f "$counter" ]; then IFS= read -r count < "$counter"; fi
+count=$((count + 1))
+printf '%%s\n' "$count" > "$counter"
+%s
+exec "$real" "$@"
+`, real, name, behavior)
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installFaultEnvironment(t *testing.T) []string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mv", "ln", "rm", "rmdir", "shasum", "sha256sum"} {
+		real, err := exec.LookPath(name)
+		if err != nil {
+			if name == "shasum" || name == "sha256sum" {
+				continue
+			}
+			t.Fatal(err)
+		}
+		writeInstallFaultWrapper(t, bin, name, real)
+	}
+	faultDir := filepath.Join(t.TempDir(), "counts")
+	if err := os.Mkdir(faultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "RDEV_FAULT_DIR="+faultDir)
+}
+
+func runLocalInstallScriptEnv(stage, target string, data []byte, env []string) error {
+	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, fmt.Sprintf("%x", sha256.Sum256(data)))
+	cmd.Stdin = bytes.NewReader(data)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return agentInstallError(err, string(out))
+	}
+	return nil
+}
+
+func installFaultCase(t *testing.T, withOld bool, extra ...string) (root, stage, target string, data []byte, err error) {
+	t.Helper()
+	root = t.TempDir()
+	stage = filepath.Join(root, "stage")
+	target = filepath.Join(root, "installed")
+	if withOld {
+		if writeErr := os.WriteFile(target, []byte("old-agent"), 0o755); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if linkErr := os.Link(target, filepath.Join(root, "old-control")); linkErr != nil {
+			t.Fatal(linkErr)
+		}
+	}
+	data = []byte(strings.Repeat("new-verified-agent", 1024))
+	for i := range extra {
+		extra[i] = strings.ReplaceAll(extra[i], "{target}", target)
+	}
+	env := append(installFaultEnvironment(t), extra...)
+	err = runLocalInstallScriptEnv(stage, target, data, env)
+	return
+}
+
+func requireInstallOutcome[T error](t *testing.T, err error) T {
+	t.Helper()
+	var target T
+	if !errors.As(err, &target) {
+		t.Fatalf("install error=%v, want %T", err, target)
+	}
+	return target
+}
+
+func TestSecureAgentInstallFaultOutcomes(t *testing.T) {
+	t.Run("pre-publication target change preserves old inode", func(t *testing.T) {
+		_, stage, target, _, err := installFaultCase(t, true,
+			"RDEV_FAIL_DIGEST_AT=3", "RDEV_REPLACE_TARGET_ON_DIGEST={target}")
+		requireInstallOutcome[*AgentInstallAmbiguousError](t, err)
+		if got, _ := os.ReadFile(target); string(got) != "concurrent-target" {
+			t.Fatalf("pre-publication cleanup overwrote concurrent target: %q", got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(stage, "old")); string(got) != "old-agent" {
+			t.Fatalf("pre-publication ambiguity lost old inode: %q", got)
+		}
+	})
+
+	t.Run("post-publish validation failure rolls back", func(t *testing.T) {
+		root, stage, target, _, err := installFaultCase(t, true, "RDEV_FAIL_DIGEST_AT=4")
+		if err == nil {
+			t.Fatal("injected validation failure succeeded")
+		}
+		var ambiguous *AgentInstallAmbiguousError
+		var committed *AgentInstallCommittedError
+		if errors.As(err, &ambiguous) || errors.As(err, &committed) {
+			t.Fatalf("verified rollback returned uncertain outcome: %v", err)
+		}
+		if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+			t.Fatalf("rollback target=%q", got)
+		}
+		restoredInfo, statErr := os.Stat(target)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		controlInfo, statErr := os.Stat(filepath.Join(root, "old-control"))
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if !os.SameFile(restoredInfo, controlInfo) {
+			t.Fatal("rollback content matched but inode did not match the preserved old inode")
+		}
+		if _, statErr := os.Lstat(stage); !os.IsNotExist(statErr) {
+			t.Fatalf("verified rollback residue: %v", statErr)
+		}
+	})
+
+	t.Run("rollback mv failure is ambiguous", func(t *testing.T) {
+		_, stage, target, data, err := installFaultCase(t, true, "RDEV_FAIL_DIGEST_AT=4", "RDEV_FAIL_MV_AT=2")
+		requireInstallOutcome[*AgentInstallAmbiguousError](t, err)
+		if got, _ := os.ReadFile(target); !bytes.Equal(got, data) {
+			t.Fatalf("failed rollback changed published target: %q", got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(stage, "old")); string(got) != "old-agent" {
+			t.Fatalf("old backup=%q", got)
+		}
+	})
+
+	t.Run("rollback rm failure is ambiguous", func(t *testing.T) {
+		_, stage, target, _, err := installFaultCase(t, true, "RDEV_FAIL_DIGEST_AT=4", "RDEV_FAIL_RM_AT=2")
+		requireInstallOutcome[*AgentInstallAmbiguousError](t, err)
+		if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+			t.Fatalf("restored target=%q", got)
+		}
+		if _, statErr := os.Stat(filepath.Join(stage, "failed")); statErr != nil {
+			t.Fatalf("failed published inode not retained: %v", statErr)
+		}
+	})
+
+	t.Run("rollback restored inode mismatch is ambiguous", func(t *testing.T) {
+		_, stage, target, _, err := installFaultCase(t, true, "RDEV_FAIL_DIGEST_AT=4", "RDEV_CORRUPT_LN_AT=4")
+		requireInstallOutcome[*AgentInstallAmbiguousError](t, err)
+		if got, _ := os.ReadFile(target); string(got) != "replacement-after-restore" {
+			t.Fatalf("mismatched rollback target=%q", got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(stage, "old")); string(got) != "old-agent" {
+			t.Fatalf("old backup not retained: %q", got)
+		}
+	})
+
+	t.Run("final rollback recheck retains all evidence", func(t *testing.T) {
+		_, stage, target, _, err := installFaultCase(t, true,
+			"RDEV_FAIL_DIGEST_AT=4", "RDEV_REPLACE_TARGET_AT=6",
+			"RDEV_REPLACE_TARGET_ON_DIGEST={target}")
+		requireInstallOutcome[*AgentInstallAmbiguousError](t, err)
+		if got, _ := os.ReadFile(target); string(got) != "concurrent-target" {
+			t.Fatalf("final recheck overwrote concurrent target: %q", got)
+		}
+		for name, want := range map[string]string{
+			"old":       "old-agent",
+			"failed":    strings.Repeat("new-verified-agent", 1024),
+			"published": strings.Repeat("new-verified-agent", 1024),
+		} {
+			if got, readErr := os.ReadFile(filepath.Join(stage, name)); readErr != nil || string(got) != want {
+				t.Fatalf("retained %s=%q err=%v", name, got, readErr)
+			}
+		}
+	})
+
+	t.Run("first install never deletes concurrent target", func(t *testing.T) {
+		_, stage, target, _, err := installFaultCase(t, false,
+			"RDEV_FAIL_DIGEST_AT=2", "RDEV_REPLACE_TARGET_ON_DIGEST={target}")
+		requireInstallOutcome[*AgentInstallAmbiguousError](t, err)
+		if got, _ := os.ReadFile(target); string(got) != "concurrent-target" {
+			t.Fatalf("rollback deleted concurrent target: %q", got)
+		}
+		if _, statErr := os.Stat(filepath.Join(stage, "published")); statErr != nil {
+			t.Fatalf("ambiguous first install did not retain published proof: %v", statErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(stage, "old")); !os.IsNotExist(statErr) {
+			t.Fatalf("first install unexpectedly created old backup: %v", statErr)
+		}
+	})
+
+	t.Run("commit backup removal failure is warning", func(t *testing.T) {
+		_, stage, target, data, err := installFaultCase(t, true, "RDEV_FAIL_RM_AT=2")
+		requireInstallOutcome[*AgentInstallCommittedError](t, err)
+		if got, _ := os.ReadFile(target); !bytes.Equal(got, data) {
+			t.Fatalf("committed target=%q", got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(stage, "old")); string(got) != "old-agent" {
+			t.Fatalf("committed warning lost backup: %q", got)
+		}
+	})
+
+	t.Run("commit rmdir failure is warning", func(t *testing.T) {
+		_, stage, target, data, err := installFaultCase(t, true, "RDEV_FAIL_RMDIR_AT=1")
+		requireInstallOutcome[*AgentInstallCommittedError](t, err)
+		if got, _ := os.ReadFile(target); !bytes.Equal(got, data) {
+			t.Fatalf("committed target=%q", got)
+		}
+		entries, readErr := os.ReadDir(stage)
+		if readErr != nil || len(entries) != 0 {
+			t.Fatalf("committed rmdir residue entries=%v err=%v", entries, readErr)
+		}
+	})
+}
+
+func TestFirstInstallSignalAtPublicationBoundaryPreservesTargetAndEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		concurrent bool
+		wantTarget string
+	}{
+		{name: "published target", wantTarget: strings.Repeat("signal-safe-agent", 1024)},
+		{name: "concurrent replacement", concurrent: true, wantTarget: "concurrent-target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			stage := filepath.Join(root, "stage")
+			target := filepath.Join(root, "installed")
+			entered := filepath.Join(root, "publication-entered")
+			release := filepath.Join(root, "publication-release")
+			data := []byte(strings.Repeat("signal-safe-agent", 1024))
+			cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, fmt.Sprintf("%x", sha256.Sum256(data)))
+			cmd.Stdin = bytes.NewReader(data)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			cmd.Env = append(installFaultEnvironment(t),
+				"RDEV_BARRIER_LN_AT=3",
+				"RDEV_BARRIER_ENTERED="+entered,
+				"RDEV_BARRIER_RELEASE="+release,
+			)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(entered); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					_ = cmd.Process.Kill()
+					t.Fatal("install did not reach first-publication barrier")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if tc.concurrent {
+				if err := os.Remove(target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, []byte(tc.wantTarget), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(release, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			waitErr := cmd.Wait()
+			if waitErr == nil {
+				t.Fatal("publication-boundary interrupt unexpectedly succeeded")
+			}
+			requireInstallOutcome[*AgentInstallAmbiguousError](t, agentInstallError(waitErr, stderr.String()))
+			if got, readErr := os.ReadFile(target); readErr != nil || string(got) != tc.wantTarget {
+				t.Fatalf("target=%q err=%v, want preserved %q", got, readErr, tc.wantTarget)
+			}
+			if got, readErr := os.ReadFile(filepath.Join(stage, "published")); readErr != nil || !bytes.Equal(got, data) {
+				t.Fatalf("publication proof=%q err=%v", got, readErr)
+			}
+		})
+	}
+}
+
+func TestSecureAgentStagingRejectsExistingObjects(t *testing.T) {
+	data := []byte("new-agent")
+	want := fmt.Sprintf("%x", sha256.Sum256(data))
+	for _, kind := range []string{"symlink", "regular", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			stage, target := filepath.Join(root, "stage"), filepath.Join(root, "installed")
+			if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var victim string
+			switch kind {
+			case "symlink":
+				victim = filepath.Join(root, "victim")
+				if err := os.Mkdir(victim, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(victim, "agent"), []byte("sentinel"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(victim, stage); err != nil {
+					t.Fatal(err)
+				}
+			case "regular":
+				if err := os.WriteFile(stage, []byte("sentinel"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(stage, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runLocalInstallScript(stage, target, data, want); err == nil {
+				t.Fatal("existing staging object was accepted")
+			}
+			if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+				t.Fatalf("installed agent changed to %q", got)
+			}
+			if victim != "" {
+				if got, _ := os.ReadFile(filepath.Join(victim, "agent")); string(got) != "sentinel" {
+					t.Fatalf("link target changed to %q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestSecureAgentStagingFailureCleansOnlyOwnedObject(t *testing.T) {
+	root := t.TempDir()
+	stage, target := filepath.Join(root, "stage"), filepath.Join(root, "installed")
+	if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runLocalInstallScript(stage, target, []byte("partial"), strings.Repeat("0", 64)); err == nil {
+		t.Fatal("digest mismatch succeeded")
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("staging residue: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+		t.Fatalf("installed agent changed to %q", got)
+	}
+}
+
+func TestSecureAgentStagingConcurrentInstallsAreComplete(t *testing.T) {
+	root, target := t.TempDir(), ""
+	target = filepath.Join(root, "installed")
+	payloads := [][]byte{[]byte(strings.Repeat("a", 128<<10)), []byte(strings.Repeat("b", 128<<10))}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(payloads))
+	for i, payload := range payloads {
+		wg.Add(1)
+		go func(i int, payload []byte) {
+			defer wg.Done()
+			err := runLocalInstallScript(filepath.Join(root, fmt.Sprintf("stage-%d", i)), target, payload, fmt.Sprintf("%x", sha256.Sum256(payload)))
+			errs <- err
+		}(i, payload)
+	}
+	wg.Wait()
+	close(errs)
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		var ambiguous *AgentInstallAmbiguousError
+		var committed *AgentInstallCommittedError
+		if errors.As(err, &ambiguous) || errors.As(err, &committed) {
+			t.Fatalf("concurrent no-replace loser reported uncertain outcome: %v", err)
+		}
+	}
+	if successes == 0 {
+		t.Fatal("no concurrent installer published a complete agent")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payloads[0]) && !bytes.Equal(got, payloads[1]) {
+		t.Fatalf("installed partial payload: %d bytes", len(got))
+	}
+	for i := range payloads {
+		if _, err := os.Lstat(filepath.Join(root, fmt.Sprintf("stage-%d", i))); !os.IsNotExist(err) {
+			t.Fatalf("stage %d residue: %v", i, err)
+		}
+	}
+}
+
+func TestAgentStageSuffixIsCryptographicAndUnique(t *testing.T) {
+	seen := make(map[string]struct{}, 256)
+	for i := 0; i < 256; i++ {
+		suffix, err := randomStageSuffix()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(suffix) != 32 {
+			t.Fatalf("suffix length=%d", len(suffix))
+		}
+		if _, exists := seen[suffix]; exists {
+			t.Fatalf("duplicate suffix %q", suffix)
+		}
+		seen[suffix] = struct{}{}
 	}
 }
 

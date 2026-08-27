@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,10 +22,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -50,19 +53,72 @@ type Host struct {
 	ForceAgentUpload bool
 }
 
-// remoteDir returns the agent state directory, defaulting when unset.
-func (h *Host) remoteDir() string {
-	if h.RemoteDir == "" {
-		return ".cache/rdev"
+// ValidateDestination checks the exact value placed in ssh's destination slot.
+// It intentionally permits ssh_config aliases and IPv6 spellings, but rejects
+// anything ssh could reinterpret as an option or split into extra argv words.
+func ValidateDestination(addr string, port int) error {
+	if addr == "" {
+		return errors.New("empty ssh destination")
 	}
-	return strings.TrimPrefix(strings.TrimPrefix(h.RemoteDir, "~/"), "/")
+	if strings.HasPrefix(addr, "-") {
+		return fmt.Errorf("ssh destination %q must not start with '-'", addr)
+	}
+	for _, r := range addr {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("ssh destination %q contains whitespace or a control character", addr)
+		}
+	}
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("ssh port %d must be 0 (default) or within 1..65535", port)
+	}
+	return nil
+}
+
+// ValidateRemoteDir returns the canonical, home-relative state directory.
+// A leading "~/" is accepted for compatibility, but absolute paths, traversal,
+// shell metacharacters, empty components, and non-canonical spellings fail.
+func ValidateRemoteDir(dir string) (string, error) {
+	if dir == "" {
+		return ".cache/rdev", nil
+	}
+	original := dir
+	if strings.HasPrefix(dir, "~/") {
+		dir = strings.TrimPrefix(dir, "~/")
+	} else if strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "~") {
+		return "", fmt.Errorf("remote_dir %q must be relative to the remote home directory", original)
+	}
+	if dir == "" || path.Clean(dir) != dir || len(dir) > 512 {
+		return "", fmt.Errorf("remote_dir %q is not a canonical relative path", original)
+	}
+	for _, component := range strings.Split(dir, "/") {
+		if component == "" || component == "." || component == ".." {
+			return "", fmt.Errorf("remote_dir %q contains an unsafe path component", original)
+		}
+		for _, r := range component {
+			if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+				!(r >= '0' && r <= '9') && r != '.' && r != '_' && r != '-' {
+				return "", fmt.Errorf("remote_dir %q contains unsafe character %q", original, r)
+			}
+		}
+	}
+	return dir, nil
+}
+
+// ValidateHost is the shared validation boundary used before any ssh sink.
+func ValidateHost(h Host) error {
+	if err := ValidateDestination(h.Addr, h.Port); err != nil {
+		return err
+	}
+	_, err := ValidateRemoteDir(h.RemoteDir)
+	return err
 }
 
 // Conn is a live connection to one remote agent. Safe for concurrent use, and
 // genuinely concurrent: requests carry an ID and are matched to replies by it, so
 // a slow command does not delay unrelated ones on the same host.
 type Conn struct {
-	host Host
+	host        Host
+	stageSuffix func() (string, error)
 
 	// mu guards the fields below plus in-flight bookkeeping. It is never held
 	// across a write or a round trip -- only long enough to register a pending
@@ -130,8 +186,8 @@ type AgentBinary struct {
 // lookup resolves an agent build for the remote platform. It is called only
 // when an upload is required, so a warm connection costs one ssh round trip.
 func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*AgentBinary, error)) (*Conn, error) {
-	if host.Addr == "" {
-		return nil, errors.New("host addr required")
+	if err := ValidateHost(host); err != nil {
+		return nil, fmt.Errorf("invalid host %q: %w", host.Name, err)
 	}
 
 	c := &Conn{
@@ -156,8 +212,9 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		return nil, err
 	}
 	c.host.GOOS, c.host.GOARCH = probe.goos, probe.goarch
-	c.stateDir = probe.home + "/" + host.remoteDir()
-	c.agentPath = probe.home + "/" + host.remoteDir() + "/rdev-agent"
+	remoteDir, _ := ValidateRemoteDir(host.RemoteDir) // validated before the probe
+	c.stateDir = probe.home + "/" + remoteDir
+	c.agentPath = probe.home + "/" + remoteDir + "/rdev-agent"
 
 	bin, err := lookup(probe.goos, probe.goarch)
 	if err != nil {
@@ -237,17 +294,17 @@ func (c *Conn) probeRemote(ctx context.Context) (*remoteProbe, error) {
 	const script = `printf 'rdev-os %s\n' "$(uname -s)"
 printf 'rdev-arch %s\n' "$(uname -m)"
 printf 'rdev-home %s\n' "$HOME"
-a="$HOME/` + agentRelPathPlaceholder + `"
+a="$HOME/$1"
 if [ -f "$a" ]; then
   s=$(sha256sum "$a" 2>/dev/null || shasum -a 256 "$a" 2>/dev/null || true)
   printf 'rdev-sha %s\n' "${s%% *}"
 fi`
 
-	// The agent path is the only variable, and it is a fixed relative path from
-	// the host's own config, not user input from a tool call.
-	sh := strings.Replace(script, agentRelPathPlaceholder, c.host.remoteDir()+"/rdev-agent", 1)
-
-	out, err := c.runSSH(ctx, "sh", "-c", shellQuote(sh))
+	remoteDir, err := ValidateRemoteDir(c.host.RemoteDir)
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.runShell(ctx, script, remoteDir+"/rdev-agent")
 	if err != nil {
 		// A failure here is a real connectivity or auth problem; surface ssh's own
 		// message, which explains it better than a wrapped error would. Two shapes
@@ -357,22 +414,43 @@ func parseProbe(out string) (*remoteProbe, error) {
 	return p, nil
 }
 
-// agentRelPathPlaceholder marks where the agent's relative path is substituted
-// into the probe script.
-const agentRelPathPlaceholder = "__RDEV_AGENT__"
-
 // shellQuote wraps s in single quotes for safe passage through ssh's remote
 // shell, which concatenates arguments into one command line.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// runSSH executes one auxiliary command over the shared connection. argv is
-// passed as distinct ssh arguments; ssh still concatenates them into a remote
-// shell command, so this is used only for fixed, argument-free probes.
-func (c *Conn) runSSH(ctx context.Context, argv ...string) (string, error) {
+// shellCommand returns a fixed shell program plus safely quoted positional
+// parameters. Dynamic values are never concatenated into the program text.
+func shellCommand(script string, argv ...string) []string {
+	args := []string{"sh", "-c", shellQuote(script), "rdev"}
+	for _, arg := range argv {
+		args = append(args, shellQuote(arg))
+	}
+	return args
+}
+
+// sshArgs is the final shared boundary before every ssh process creation.
+func (c *Conn) sshArgs(remote ...string) ([]string, error) {
+	if err := ValidateHost(c.host); err != nil {
+		return nil, fmt.Errorf("invalid host %q: %w", c.host.Name, err)
+	}
 	args := append(c.sshBase(), c.host.Addr)
-	args = append(args, argv...)
+	return append(args, remote...), nil
+}
+
+func (c *Conn) runShell(ctx context.Context, script string, argv ...string) (string, error) {
+	return c.runSSH(ctx, shellCommand(script, argv...)...)
+}
+
+// runSSH executes one auxiliary command over the shared connection. ssh still
+// concatenates remote argv into a command line, so callers either use fixed
+// tokens or shellCommand, which keeps dynamic values in positional parameters.
+func (c *Conn) runSSH(ctx context.Context, argv ...string) (string, error) {
+	args, err := c.sshArgs(argv...)
+	if err != nil {
+		return "", err
+	}
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	var out, errBuf strings.Builder
 	cmd.Stdout = &out
@@ -454,23 +532,10 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 		}
 	}
 
-	// Upload to a unique temp name, then chmod and rename in one round trip. The
-	// rename is atomic within a directory, so a racing bootstrap (possibly from
-	// another rdev process) sees either the old binary or the new one, never a
-	// partial file, and never a file that is complete but not yet executable.
-	tmp := fmt.Sprintf("%s.tmp.%d", c.agentPath, os.Getpid())
-	if _, err := c.runSSH(ctx, "mkdir", "-p", c.stateDir+"/jobs"); err != nil {
+	if _, err := c.runShell(ctx, `mkdir -p -- "$1/jobs"`, c.stateDir); err != nil {
 		return fmt.Errorf("create remote dir: %w", err)
 	}
-	if err := c.upload(ctx, bin.Data, tmp); err != nil {
-		return err
-	}
-	if _, err := c.runSSH(ctx, "sh", "-c", shellQuote(
-		fmt.Sprintf("chmod 755 %s && mv -f %s %s", shellQuote(tmp), shellQuote(tmp), shellQuote(c.agentPath)),
-	)); err != nil {
-		return fmt.Errorf("install agent: %w", err)
-	}
-	return nil
+	return c.installAgent(ctx, bin.Data, want)
 }
 
 // agentVersionTimeout bounds the installed agent's -version call.
@@ -497,7 +562,7 @@ func (c *Conn) checkNotDowngrade(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, agentVersionTimeout)
 	defer cancel()
 
-	out, err := c.runSSH(ctx, shellQuote(c.agentPath), "-version")
+	out, err := c.runShell(ctx, `exec "$1" -version`, c.agentPath)
 	if err != nil {
 		// Cannot run it: assume it is broken and let the upload fix it.
 		return nil
@@ -538,10 +603,377 @@ func downgradeError(installed, local buildinfo.Build, host Host) error {
 		host.Addr, installed, local, host.Name, host.Addr)
 }
 
-// upload streams data to a remote path via `dd`, which avoids scp/sftp
-// availability differences and reuses the ControlMaster connection.
-func (c *Conn) upload(ctx context.Context, data []byte, remotePath string) error {
-	args := append(c.sshBase(), c.host.Addr, "dd", "of="+remotePath, "status=none")
+func randomStageSuffix() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+const installAgentScript = `set -eu
+stage=$1
+target=$2
+want=$3
+file=$stage/agent
+ready=$stage/ready
+proof=$stage/published
+old=$stage/old
+failed=$stage/failed
+owned=0
+state=STAGED
+had_target=0
+published_ident=
+publication_pending=0
+published_by_us=0
+old_ident=
+old_digest=
+umask 077
+mkdir -- "$stage"
+owned=1
+chmod 700 "$stage"
+set -C
+exec 8> "$file"
+uid=$(id -u)
+if stat -c '%u:%h' -- "$file" >/dev/null 2>&1; then
+  meta() { stat -Lc '%u:%h' -- "$1"; }
+  owner() { stat -Lc '%u' -- "$1"; }
+  links() { stat -Lc '%h' -- "$1"; }
+  ident() { stat -Lc '%d:%i' -- "$1"; }
+  fd=/proc/$$/fd/8
+  readfd=/proc/$$/fd/9
+  verifyfd=/proc/$$/fd/7
+  digest() { sha256sum -- "$1" | awk '{print $1}'; }
+else
+  meta() { stat -f '%u:%l' -- "$1"; }
+  owner() { stat -f '%u' -- "$1"; }
+  links() { stat -f '%l' -- "$1"; }
+  ident() { stat -f '%i' -- "$1"; }
+  fd=/dev/fd/8
+  readfd=/dev/fd/9
+  verifyfd=/dev/fd/7
+  digest() { shasum -a 256 -- "$1" | awk '{print $1}'; }
+fi
+
+emit_ambiguous() {
+  printf 'RDEV_AGENT_INSTALL_AMBIGUOUS:%s\n' "$1" >&2
+  exit 74
+}
+
+emit_committed() {
+  printf 'RDEV_AGENT_INSTALL_COMMITTED:%s\n' "$1" >&2
+  exit 75
+}
+
+verify_target() {
+  expected_ident=$1
+  expected_digest=$2
+  [ -f "$target" ] || return 1
+  [ ! -L "$target" ] || return 1
+  exec 7< "$target" || return 1
+  actual_ident=$(ident "$verifyfd") || { exec 7<&-; return 1; }
+  actual_owner=$(owner "$verifyfd") || { exec 7<&-; return 1; }
+  actual_digest=$(digest "$verifyfd") || { exec 7<&-; return 1; }
+  path_ident=$(ident "$target") || { exec 7<&-; return 1; }
+  exec 7<&-
+  [ "$actual_owner" = "$uid" ] || return 1
+  [ "$actual_ident" = "$expected_ident" ] || return 1
+  [ "$path_ident" = "$expected_ident" ] || return 1
+  [ "$actual_digest" = "$expected_digest" ]
+}
+
+publication_visible() {
+  [ -f "$target" ] || return 1
+  [ ! -L "$target" ] || return 1
+  [ "$(ident "$target")" = "$published_ident" ]
+}
+
+cleanup_staged() {
+  cleanup_ok=1
+  if ! rm -f -- "$file" "$ready" "$proof" "$old" "$failed"; then
+    printf 'rdev agent staging cleanup failed\n' >&2
+    cleanup_ok=0
+  fi
+  if ! rmdir -- "$stage"; then
+    printf 'rdev agent staging directory cleanup failed\n' >&2
+    cleanup_ok=0
+  fi
+  [ "$cleanup_ok" = 1 ]
+}
+
+restore_moved_object() {
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    if ! ln -- "$failed" "$target"; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+rollback_install() {
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    if [ "$had_target" = 1 ]; then
+      return 2
+    fi
+    cleanup_staged || return 2
+    return 0
+  fi
+  current_ident=$(ident "$target") || return 2
+  if [ "$current_ident" != "$published_ident" ]; then
+    if [ "$had_target" = 1 ] && [ "$current_ident" = "$old_ident" ] && verify_target "$old_ident" "$old_digest"; then
+      cleanup_staged || return 2
+      return 0
+    fi
+    return 2
+  fi
+
+  # Quarantine the current pathname before restoring anything. If a concurrent
+  # writer won the race after the identity check, verification below detects it
+  # and restores that object without ever unlinking it.
+  if ! mv -- "$target" "$failed"; then
+    return 2
+  fi
+  moved_ident=$(ident "$failed") || return 2
+  if [ "$moved_ident" != "$published_ident" ]; then
+    restore_moved_object || return 2
+    return 2
+  fi
+
+  if [ "$had_target" = 1 ]; then
+    if ! ln -- "$old" "$target"; then
+      return 2
+    fi
+    verify_target "$old_ident" "$old_digest" || return 2
+  fi
+
+  # Keep every recovery hard link until the restored pathname has passed its
+  # final fd/inode/digest check. If a same-UID writer replaces target during
+  # that check, the old and failed inodes remain available for diagnosis or a
+  # subsequent verified recovery.
+  if [ "$had_target" = 1 ]; then
+    verify_target "$old_ident" "$old_digest" || return 2
+  elif [ -e "$target" ] || [ -L "$target" ]; then
+    return 2
+  fi
+
+  if ! rm -f -- "$failed"; then
+    return 2
+  fi
+  if ! rm -f -- "$proof"; then
+    return 2
+  fi
+  if [ "$had_target" = 1 ]; then
+    if ! rm -f -- "$old"; then
+      return 2
+    fi
+  fi
+  if ! rm -f -- "$file" "$ready"; then
+    return 2
+  fi
+  if ! rmdir -- "$stage"; then
+    return 1
+  fi
+  return 0
+}
+
+on_exit() {
+  status=$1
+  trap - EXIT HUP INT TERM
+  [ "$status" -ne 0 ] || exit 0
+  if [ "$publication_pending" = 1 ]; then
+    # The publication command may already have made target visible even though
+    # the shell has not executed the next assignment. Preserve both target and
+    # staging evidence; inode reconciliation makes this independent of state.
+    if publication_visible; then
+      published_by_us=1
+    fi
+    emit_ambiguous "interrupted at first-publication boundary"
+  fi
+  if [ "$published_by_us" = 1 ] && [ "$state" = VERIFIED ]; then
+    state=INSTALLING
+  fi
+  case "$state" in
+    STAGED)
+      cleanup_staged
+      exit "$status"
+      ;;
+    VERIFIED)
+      if [ "$had_target" = 1 ] && ! verify_target "$old_ident" "$old_digest"; then
+        emit_ambiguous "pre-publication target changed after preserving old inode"
+      fi
+      cleanup_staged
+      exit "$status"
+      ;;
+    INSTALLING)
+      rollback_status=0
+      rollback_install || rollback_status=$?
+      if [ "$rollback_status" -eq 2 ]; then
+        emit_ambiguous "rollback could not be verified"
+      fi
+      exit "$status"
+      ;;
+    COMMITTED)
+      emit_committed "agent installed; staging cleanup incomplete"
+      ;;
+    *)
+      emit_ambiguous "unknown install state"
+      ;;
+  esac
+}
+trap 'on_exit $?' EXIT
+trap 'on_exit 129' HUP
+trap 'on_exit 130' INT
+trap 'on_exit 143' TERM
+
+[ -f "$fd" ]
+[ ! -L "$file" ]
+[ "$(meta "$fd")" = "$uid:1" ]
+[ "$(ident "$file")" = "$(ident "$fd")" ]
+dd bs=65536 >&8 2>/dev/null
+[ -f "$fd" ]
+[ ! -L "$file" ]
+[ "$(meta "$fd")" = "$uid:1" ]
+[ "$(ident "$file")" = "$(ident "$fd")" ]
+chmod 755 "$fd"
+ln -- "$file" "$ready"
+[ -f "$ready" ]
+[ ! -L "$ready" ]
+[ "$(meta "$fd")" = "$uid:2" ]
+[ "$(ident "$ready")" = "$(ident "$fd")" ]
+rm -f -- "$file"
+[ -f "$ready" ]
+[ ! -L "$ready" ]
+[ "$(meta "$fd")" = "$uid:1" ]
+[ "$(ident "$ready")" = "$(ident "$fd")" ]
+exec 9< "$ready"
+[ -f "$readfd" ]
+[ "$(meta "$readfd")" = "$uid:1" ]
+[ "$(ident "$readfd")" = "$(ident "$fd")" ]
+[ "$(digest "$readfd")" = "$want" ]
+exec 9<&-
+[ "$(ident "$ready")" = "$(ident "$fd")" ]
+state=VERIFIED
+
+ln -- "$ready" "$proof"
+published_ident=$(ident "$fd")
+[ "$(ident "$proof")" = "$published_ident" ]
+preserve_target() {
+  [ -f "$target" ]
+  [ ! -L "$target" ]
+  [ "$(owner "$target")" = "$uid" ]
+  [ "$(links "$target")" -ge 1 ]
+  ln -- "$target" "$old"
+  [ -f "$old" ]
+  [ ! -L "$old" ]
+  [ "$(owner "$old")" = "$uid" ]
+  [ "$(links "$old")" -ge 2 ]
+  [ "$(ident "$target")" = "$(ident "$old")" ]
+  old_ident=$(ident "$old")
+  old_digest=$(digest "$old")
+  had_target=1
+  verify_target "$old_ident" "$old_digest"
+}
+if [ -e "$target" ] || [ -L "$target" ]; then
+  preserve_target
+  [ "$(ident "$target")" = "$(ident "$old")" ]
+  state=INSTALLING
+  mv -f -- "$ready" "$target"
+else
+  # link(2) provides no-replace publication for the first install. A racing
+  # bootstrap that wins this name makes this command fail without removing it.
+  # Set the pending flag before the observable publication action. Until the
+  # published flag and INSTALLING state are both recorded, the trap preserves
+  # target and proof and reports an explicit ambiguous outcome.
+  publication_pending=1
+  if ln -- "$ready" "$target"; then
+    published_by_us=1
+    state=INSTALLING
+    publication_pending=0
+    rm -f -- "$ready"
+  else
+    # A concurrent publisher owns target. Stay VERIFIED so cleanup is confined
+    # to this unpredictable staging directory and never removes the winner.
+    publication_pending=0
+    state=VERIFIED
+    false
+  fi
+fi
+verify_target "$published_ident" "$want"
+state=COMMITTED
+exec 8>&-
+
+if [ "$had_target" = 1 ]; then
+  rm -f -- "$old"
+fi
+rm -f -- "$proof" "$file" "$ready" "$failed"
+rmdir -- "$stage"
+trap - EXIT HUP INT TERM`
+
+const (
+	agentInstallAmbiguousMarker = "RDEV_AGENT_INSTALL_AMBIGUOUS:"
+	agentInstallCommittedMarker = "RDEV_AGENT_INSTALL_COMMITTED:"
+)
+
+// AgentInstallAmbiguousError means publication started but neither the new
+// agent nor a verified rollback can be asserted. Staging evidence is retained.
+type AgentInstallAmbiguousError struct {
+	Detail string
+	Cause  error
+}
+
+func (e *AgentInstallAmbiguousError) Error() string {
+	return fmt.Sprintf("agent install outcome is ambiguous: %s: %v", e.Detail, e.Cause)
+}
+
+func (e *AgentInstallAmbiguousError) Unwrap() error { return e.Cause }
+
+// AgentInstallCommittedError is a post-commit cleanup warning. The target is
+// the verified uploaded inode, but staging backup removal was incomplete.
+type AgentInstallCommittedError struct {
+	Detail string
+	Cause  error
+}
+
+func (e *AgentInstallCommittedError) Error() string {
+	return fmt.Sprintf("agent install committed with warning: %s: %v", e.Detail, e.Cause)
+}
+
+func (e *AgentInstallCommittedError) Unwrap() error { return e.Cause }
+
+func agentInstallError(runErr error, stderr string) error {
+	message := strings.TrimSpace(stderr)
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimSpace(line)
+		if detail, ok := strings.CutPrefix(line, agentInstallAmbiguousMarker); ok {
+			return &AgentInstallAmbiguousError{Detail: detail, Cause: runErr}
+		}
+		if detail, ok := strings.CutPrefix(line, agentInstallCommittedMarker); ok {
+			return &AgentInstallCommittedError{Detail: detail, Cause: runErr}
+		}
+	}
+	if message == "" {
+		message = runErr.Error()
+	}
+	return fmt.Errorf("secure agent install: %s", message)
+}
+
+// installAgent binds the upload to a cryptographically unpredictable,
+// exclusively-created staging object and atomically replaces the installed
+// agent only after identity and digest checks succeed.
+func (c *Conn) installAgent(ctx context.Context, data []byte, want string) error {
+	suffixFn := c.stageSuffix
+	if suffixFn == nil {
+		suffixFn = randomStageSuffix
+	}
+	suffix, err := suffixFn()
+	if err != nil {
+		return fmt.Errorf("name agent staging object: %w", err)
+	}
+	stage := c.stateDir + "/.rdev-agent.stage-" + suffix
+	args, err := c.sshArgs(shellCommand(installAgentScript, stage, c.agentPath, want)...)
+	if err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	// bytes.NewReader, not strings.NewReader(string(data)): the latter copies the
 	// whole embedded agent (~9 MB) for nothing.
@@ -549,11 +981,7 @@ func (c *Conn) upload(ctx context.Context, data []byte, remotePath string) error
 	var errBuf strings.Builder
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(errBuf.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return fmt.Errorf("upload to %s: %s", remotePath, msg)
+		return agentInstallError(err, errBuf.String())
 	}
 	return nil
 }
@@ -564,7 +992,10 @@ func (c *Conn) upload(ctx context.Context, data []byte, remotePath string) error
 // this host installed it. Letting the agent default independently would silently
 // split the two sides apart whenever RemoteDir is customized.
 func (c *Conn) startAgent(ctx context.Context) error {
-	args := append(c.sshBase(), c.host.Addr, c.agentPath, "-state", c.stateDir)
+	args, err := c.sshArgs(shellCommand(`exec "$1" -state "$2"`, c.agentPath, c.stateDir)...)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("ssh", args...) // no ctx: lifetime is managed by Close
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

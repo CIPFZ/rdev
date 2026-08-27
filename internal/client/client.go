@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/secrets"
@@ -23,12 +24,30 @@ import (
 // AgentLookup resolves an agent build for a remote platform.
 type AgentLookup func(goos, goarch string) (*transport.AgentBinary, error)
 
+type remoteConnection interface {
+	Do(context.Context, *proto.Request) (*proto.Response, error)
+	Host() transport.Host
+	SSHArgs() []string
+	Close() error
+}
+
+type pooledConnection struct {
+	conn        remoteConnection
+	fingerprint string
+	generation  uint64
+}
+
+type dialFunc func(context.Context, transport.Host, AgentLookup) (remoteConnection, error)
+type rsyncRunner func(context.Context, []string) (string, string, error)
+
 // Client is the entry point for remote operations.
 type Client struct {
 	Hosts   *session.Registry
 	Secrets *secrets.Store
 
 	lookup AgentLookup
+	dial   dialFunc
+	rsync  rsyncRunner
 
 	// warn reports a non-fatal problem. It exists so the quiet paths -- notably a
 	// credential file that could not be read -- are observable in a test rather
@@ -36,7 +55,7 @@ type Client struct {
 	warn func(format string, args ...any)
 
 	mu    sync.Mutex
-	conns map[string]*transport.Conn
+	conns map[string]pooledConnection
 	// dialing serializes connection setup per host. MCP dispatches tool calls
 	// concurrently, and without this several goroutines would bootstrap the same
 	// host at once, racing on the agent upload's temp file.
@@ -44,14 +63,21 @@ type Client struct {
 }
 
 func New(lookup AgentLookup) *Client {
-	return &Client{
+	c := &Client{
 		Hosts:   session.NewRegistry(),
 		Secrets: secrets.New(),
 		lookup:  lookup,
-		conns:   make(map[string]*transport.Conn),
+		dial: func(ctx context.Context, host transport.Host, lookup AgentLookup) (remoteConnection, error) {
+			return transport.Dial(ctx, host, lookup)
+		},
+		conns:   make(map[string]pooledConnection),
 		dialing: make(map[string]*sync.Mutex),
 	}
+	c.Hosts.SetHostChangeHook(c.invalidateHost)
+	return c
 }
+
+func (c *Client) invalidateHost(name string, _ uint64) { c.Disconnect(name) }
 
 // warnf reports a non-fatal problem, defaulting to stderr.
 //
@@ -78,48 +104,106 @@ func (c *Client) dialLock(name string) *sync.Mutex {
 }
 
 // conn returns a pooled connection, dialing on first use.
-func (c *Client) conn(ctx context.Context, hostName string) (*transport.Conn, error) {
-	host, err := c.Hosts.Host(hostName)
+func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, error) {
+	resolved, err := c.Hosts.Resolve(hostName)
 	if err != nil {
 		return nil, err
-	}
-
-	c.mu.Lock()
-	existing, ok := c.conns[host.Name]
-	c.mu.Unlock()
-	if ok {
-		return existing, nil
 	}
 
 	// Serialize setup for this host: bootstrap writes a shared temp file on the
 	// remote, so two concurrent dials would clobber each other.
-	lock := c.dialLock(host.Name)
+	lock := c.dialLock(resolved.Host.Name)
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Re-check under the lock: another goroutine may have finished dialing
-	// while we waited, in which case we reuse its connection.
-	c.mu.Lock()
-	existing, ok = c.conns[host.Name]
-	c.mu.Unlock()
-	if ok {
-		return existing, nil
+	for {
+		resolved, err = c.Hosts.Resolve(hostName)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		existing, ok := c.conns[resolved.Host.Name]
+		if ok && existing.generation == resolved.Generation && existing.fingerprint == resolved.Fingerprint {
+			c.mu.Unlock()
+			return existing.conn, nil
+		}
+		if ok {
+			delete(c.conns, resolved.Host.Name)
+		}
+		c.mu.Unlock()
+		if ok {
+			_ = existing.conn.Close()
+		}
+
+		conn, dialErr := c.dial(ctx, resolved.Host, c.lookup)
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		latest, resolveErr := c.Hosts.Resolve(hostName)
+		if resolveErr != nil {
+			_ = conn.Close()
+			return nil, resolveErr
+		}
+		if latest.Generation != resolved.Generation || latest.Fingerprint != resolved.Fingerprint {
+			_ = conn.Close()
+			continue
+		}
+
+		c.mu.Lock()
+		c.conns[latest.Host.Name] = pooledConnection{conn: conn, fingerprint: latest.Fingerprint, generation: latest.Generation}
+		c.mu.Unlock()
+		// Recheck after publication: an update hook that ran between the prior
+		// Resolve and insertion may have had nothing to evict.
+		current, resolveErr := c.Hosts.Resolve(hostName)
+		if resolveErr != nil || current.Generation != latest.Generation || current.Fingerprint != latest.Fingerprint {
+			c.Disconnect(latest.Host.Name)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			continue
+		}
+		c.loadHostSecrets(ctx, latest.Host.Name, conn)
+		current, resolveErr = c.Hosts.Resolve(hostName)
+		c.mu.Lock()
+		published, stillPublished := c.conns[latest.Host.Name]
+		c.mu.Unlock()
+		if resolveErr != nil || current.Generation != latest.Generation || current.Fingerprint != latest.Fingerprint || !stillPublished || published.conn != conn {
+			c.Disconnect(latest.Host.Name)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			continue
+		}
+		return conn, nil
 	}
+}
 
-	conn, err := transport.Dial(ctx, host, c.lookup)
-	if err != nil {
-		return nil, err
+func (c *Client) leasedConn(ctx context.Context, hostName string) (remoteConnection, func(), error) {
+	for {
+		conn, err := c.conn(ctx, hostName)
+		if err != nil {
+			return nil, nil, err
+		}
+		name := conn.Host().Name
+		c.mu.Lock()
+		pooled, ok := c.conns[name]
+		c.mu.Unlock()
+		if !ok || pooled.conn != conn {
+			continue
+		}
+		release, ok := c.Hosts.AcquireIdentity(name, pooled.generation, pooled.fingerprint)
+		if !ok {
+			continue
+		}
+		c.mu.Lock()
+		current, stillPublished := c.conns[name]
+		c.mu.Unlock()
+		if !stillPublished || current.conn != conn || current.generation != pooled.generation {
+			release()
+			continue
+		}
+		return conn, release, nil
 	}
-
-	c.mu.Lock()
-	c.conns[host.Name] = conn
-	c.mu.Unlock()
-
-	// Register this host's declared credential files before returning the
-	// connection, so the very first command already has redaction in place. Doing
-	// it lazily would leave a window where a token could be echoed verbatim.
-	c.loadHostSecrets(ctx, host.Name)
-	return conn, nil
 }
 
 // loadHostSecrets reads the credential files a host declares and registers them
@@ -133,7 +217,7 @@ func (c *Client) conn(ctx context.Context, hostName string) (*transport.Conn, er
 // stop the host from being usable, and the caller learns about it from the
 // unredacted output rather than from a failed dial. Already-registered names are
 // left alone so an explicit rdev_secrets call wins over the config.
-func (c *Client) loadHostSecrets(ctx context.Context, hostName string) {
+func (c *Client) loadHostSecrets(ctx context.Context, hostName string, conn remoteConnection) {
 	st := c.Hosts.State(hostName)
 	if len(st.Secrets) == 0 {
 		return
@@ -145,11 +229,31 @@ func (c *Client) loadHostSecrets(ctx context.Context, hostName string) {
 		if _, exists := c.Secrets.Get(name); exists {
 			continue
 		}
-		if err := c.SetSecretFromRemoteFile(ctx, hostName, name, path); err != nil {
+		var loadErr error
+		if conn == nil {
+			loadErr = errors.New("no active connection")
+		} else {
+			resp, err := conn.Do(ctx, &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes}})
+			if err != nil {
+				loadErr = err
+			} else if resp.Read == nil {
+				loadErr = errors.New("agent returned no content")
+			} else if resp.Read.ContentB64 {
+				loadErr = fmt.Errorf("%s looks binary; a credential file should be text", path)
+			} else {
+				value := strings.TrimSpace(resp.Read.Content)
+				if value == "" {
+					loadErr = fmt.Errorf("%s on %s is empty", path, hostName)
+				} else {
+					loadErr = c.Secrets.Set(name, value)
+				}
+			}
+		}
+		if loadErr != nil {
 			// Surfaced rather than swallowed: an unredacted credential is worth a
 			// warning, and stderr does not corrupt the MCP stdout stream.
 			c.warnf("rdev: warning: secret %q from %s:%s not registered: %v\n",
-				name, hostName, path, err)
+				name, hostName, path, c.redactErr(loadErr))
 		}
 	}
 }
@@ -160,12 +264,13 @@ func (c *Client) loadHostSecrets(ctx context.Context, hostName string) {
 // the network blipped, the remote rebooted. Retrying once turns that into a
 // hiccup instead of an error the caller has to interpret.
 func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*proto.Response, error) {
-	conn, err := c.conn(ctx, hostName)
+	conn, release, err := c.leasedConn(ctx, hostName)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := conn.Do(ctx, req)
+	release()
 	if err == nil {
 		return resp, nil
 	}
@@ -178,16 +283,17 @@ func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*
 	}
 
 	c.mu.Lock()
-	if c.conns[conn.Host().Name] == conn {
+	if pooled, ok := c.conns[conn.Host().Name]; ok && pooled.conn == conn {
 		delete(c.conns, conn.Host().Name)
 	}
 	c.mu.Unlock()
 	conn.Close()
 
-	fresh, dialErr := c.conn(ctx, hostName)
+	fresh, releaseFresh, dialErr := c.leasedConn(ctx, hostName)
 	if dialErr != nil {
 		return nil, fmt.Errorf("%w (reconnect failed: %v)", err, dialErr)
 	}
+	defer releaseFresh()
 	return fresh.Do(ctx, req)
 }
 
@@ -623,51 +729,45 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	if opts.Local == "" || opts.Remote == "" {
 		return nil, errors.New("local and remote paths required")
 	}
+	if opts.Direction != "" && opts.Direction != "push" && opts.Direction != "pull" {
+		return nil, fmt.Errorf("direction must be push or pull, got %q", opts.Direction)
+	}
+	if err := validateLocalSyncPath(opts.Local); err != nil {
+		return nil, err
+	}
+	if err := validateRemoteSyncPath(opts.Remote); err != nil {
+		return nil, err
+	}
 	if _, err := exec.LookPath("rsync"); err != nil {
 		return nil, errors.New("rsync not found on the local host")
 	}
 
 	// Dial first so the ControlMaster exists and the remote host is validated
 	// before rsync tries to use the socket.
-	conn, err := c.conn(ctx, opts.Host)
+	conn, release, err := c.leasedConn(ctx, opts.Host)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 
-	sshCmd := append([]string{"ssh"}, conn.SSHArgs()...)
-	// Only long-standing flags: macOS ships openrsync, which rejects newer
-	// options like --info=stats1 that samba rsync accepts. -v gives a
-	// transferred-file list on both implementations.
-	args := []string{"-az", "-v", "-e", strings.Join(sshCmd, " ")}
-	if opts.DryRun {
-		args = append(args, "--dry-run")
-	}
-	if opts.Delete {
-		args = append(args, "--delete")
-	}
-	for _, ex := range opts.Exclude {
-		args = append(args, "--exclude", ex)
-	}
+	args := buildSyncArgs(conn.Host(), conn.SSHArgs(), opts)
 
-	remoteSpec := conn.Host().Addr + ":" + opts.Remote
-	switch opts.Direction {
-	case "push", "":
-		args = append(args, opts.Local, remoteSpec)
-	case "pull":
-		args = append(args, remoteSpec, opts.Local)
-	default:
-		return nil, fmt.Errorf("direction must be push or pull, got %q", opts.Direction)
+	var stdout, stderr string
+	var runErr error
+	if c.rsync != nil {
+		stdout, stderr, runErr = c.rsync(ctx, args)
+	} else {
+		cmd := exec.CommandContext(ctx, "rsync", args...)
+		var out, errBuf strings.Builder
+		cmd.Stdout = &out
+		cmd.Stderr = &errBuf
+		runErr = cmd.Run()
+		stdout, stderr = out.String(), errBuf.String()
 	}
-
-	cmd := exec.CommandContext(ctx, "rsync", args...)
-	var out, errBuf strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	runErr := cmd.Run()
 
 	res := &SyncResult{
-		Stdout: c.Secrets.Redact(out.String()),
-		Stderr: c.Secrets.Redact(errBuf.String()),
+		Stdout: c.Secrets.Redact(stdout),
+		Stderr: c.Secrets.Redact(stderr),
 		DryRun: opts.DryRun,
 		// Redacted like the streams above. This echoes the assembled argv, and argv
 		// is caller-supplied: an --exclude pattern or a path can carry a credential.
@@ -683,6 +783,67 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		return nil, fmt.Errorf("run rsync: %w", runErr)
 	}
 	return res, nil
+}
+
+func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []string {
+	sshCmd := append([]string{"ssh"}, sshArgs...)
+	// Only long-standing flags: macOS ships openrsync, which rejects newer
+	// options like --info=stats1 that samba rsync accepts. -v gives a
+	// transferred-file list on both implementations.
+	args := []string{"-az", "-v", "-e", strings.Join(sshCmd, " ")}
+	if opts.DryRun {
+		args = append(args, "--dry-run")
+	}
+	if opts.Delete {
+		args = append(args, "--delete")
+	}
+	for _, ex := range opts.Exclude {
+		args = append(args, "--exclude", ex)
+	}
+
+	remoteSpec := host.Addr + ":" + opts.Remote
+	switch opts.Direction {
+	case "push", "":
+		args = append(args, "--", opts.Local, remoteSpec)
+	case "pull":
+		args = append(args, "--", remoteSpec, opts.Local)
+	}
+
+	return args
+}
+
+// validateLocalSyncPath rejects only values that cannot be represented safely as
+// a local rsync operand. A leading '-' is legitimate because Sync inserts '--'.
+func validateLocalSyncPath(p string) error {
+	if p == "" {
+		return errors.New("local sync path required")
+	}
+	for _, r := range p {
+		if r == 0 || unicode.IsControl(r) {
+			return errors.New("local sync path contains a control character")
+		}
+	}
+	return nil
+}
+
+// validateRemoteSyncPath is deliberately narrower because rsync sends the
+// operand through a remote shell. The supported spelling covers ordinary
+// absolute, relative, and ~/ paths without relying on remote-shell quoting.
+func validateRemoteSyncPath(p string) error {
+	if p == "" {
+		return errors.New("remote sync path required")
+	}
+	if strings.HasPrefix(p, "-") {
+		return fmt.Errorf("remote sync path %q must not start with '-'", p)
+	}
+	for _, r := range p {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+			!(r >= '0' && r <= '9') && r != '.' && r != '_' && r != '-' &&
+			r != '/' && r != '~' {
+			return fmt.Errorf("remote sync path %q contains unsupported character %q", p, r)
+		}
+	}
+	return nil
 }
 
 // Ping verifies connectivity and reports agent identity.
@@ -807,18 +968,18 @@ func (c *Client) Disconnect(hostName string) bool {
 	if !ok {
 		return false
 	}
-	conn.Close()
+	conn.conn.Close()
 	return true
 }
 
 // Close tears down all pooled connections.
 func (c *Client) Close() {
 	c.mu.Lock()
-	conns := make([]*transport.Conn, 0, len(c.conns))
+	conns := make([]remoteConnection, 0, len(c.conns))
 	for _, conn := range c.conns {
-		conns = append(conns, conn)
+		conns = append(conns, conn.conn)
 	}
-	c.conns = make(map[string]*transport.Conn)
+	c.conns = make(map[string]pooledConnection)
 	c.mu.Unlock()
 
 	for _, conn := range conns {

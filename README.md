@@ -32,6 +32,10 @@ claude mcp add rdev --scope user -- $PWD/bin/rdev serve
 cd ~/works/myproject
 ~/works/rdev/bin/rdev hosts add dev user@1.2.3.4 -port 36000 -cwd '~/myproject' -save
 
+# 新进程首次加载 project 配置前，核对文件及摘要并批准精确内容
+~/works/rdev/bin/rdev hosts trust
+~/works/rdev/bin/rdev hosts approve-project <上一步显示的 sha256>
+
 # 首次连接自动上传 agent，无需在远端做任何准备
 ~/works/rdev/bin/rdev ping dev
 ```
@@ -46,7 +50,16 @@ cd ~/works/myproject
 | **project 主机** | `<项目>/.rdev/hosts.json` | 仅在该目录下工作时 |
 | **global 主机** | `~/.rdev/hosts.json` | 所有项目 |
 
-加载顺序是 global → project，**同名时 project 覆盖 global**，所以一个仓库可以把 `dev` 指向自己的机器。
+加载顺序是 global → project；但 project 配置默认不可信，只有在用户批准其**绝对路径 + 当前 SHA-256** 后才会加载。批准后同名 project host 才覆盖 global。文件内容发生任何变化都会让批准失效，未批准的仓库不能触发 SSH 或 bootstrap。
+
+首次遇到项目配置时，rdev 会打印路径、摘要和精确批准命令：
+
+```bash
+rdev hosts trust                              # 查看当前待审路径和摘要
+rdev hosts approve-project <sha256>           # 摘要必须与当前文件完全一致
+```
+
+MCP 侧先用无更新参数调用 `rdev_session` 查看 `project_trust`，确认内容后把同一摘要传给 `approve_project_digest`。批准记录保存在 `~/.rdev/trusted-projects.json`，不会写回仓库。
 
 `hosts add` 默认写 project scope（在某个 repo 里注册的机器，基本上就属于那个 repo）；跨项目复用的机器加 `-global`。
 
@@ -367,7 +380,7 @@ If the builds are from different branches, or you mean to roll back, force it:
 | **`make check-agents`** | ✅ 改一行源码不重建 agent → 4 个平台全部 `STALE` 并给出下一步 |
 | **构建可复现** | ✅ 同源两次 `-trimpath` 构建 SHA-256 完全一致（`check-agents` 用内容比对的前提） |
 | **拒绝降级（真实 host）** | ✅ 装入 clean 2027 stamp 的 agent 后，声称 2020 的 rdev 被拒，错误里同时给出两侧 stamp |
-| **拒绝发生在上传之前** | ✅ 单测断言 ssh 调用里没有 `dd of=`——不是先覆盖再报错 |
+| **拒绝发生在上传之前** | ✅ 单测断言 ssh 调用里没有固定上传脚本的 `exec dd`——不是先覆盖再报错 |
 | **`-force-agent-upload`** | ✅ 同一个被拒的 rdev 装上了，且**不再**发起 `-version` 探测；`hosts list` 显示该标记 |
 | **正常升级不受影响** | ✅ 2020 stamp → 当前 commit 自动上传，无需 force |
 | **不可比时放行** | ✅ 无 stamp / 无时间戳 / 任一侧 dirty，全部继续上传（否则损坏的远端 agent 将无法修复） |
@@ -439,6 +452,8 @@ rdev ls dev ~/app -limit 50                               # 结构化，不用�
 echo "content" | rdev write dev /tmp/f.txt
 rdev sync dev push ./src /remote/dst -exclude .git -dry-run
 rdev hosts list                    # 含 scope / remote_dir / env
+rdev hosts trust                   # 项目配置路径、SHA-256 和批准状态
+rdev hosts approve-project <sha256>
 rdev hosts add dev user@h -port 36000 -save          # project scope
 rdev hosts add prod user@h -global -save             # 全局可见
 rdev hosts add dev user@h -env PROXY=http://p:1 -remote-dir '~/.cache/myrdev' -no-login -save
@@ -470,15 +485,17 @@ long-lived process that goes on to use the value.
 
 ## 平台支持
 
-本地和远端是**两套独立要求**，agent 只被交叉编译成四个 POSIX 组合。
+本地和远端是**两套独立要求**，agent 只被交叉编译成四个 POSIX 组合。交叉编译成功不等于真实环境认证；`rdev support` 输出带 schema 版本的机器可读矩阵，避免把 build-only 平台误报为 Tier 1。
 
-| | 本地（跑 rdev） | 远端（跑 rdev-agent） |
+| 组合 | 本地（跑 rdev） | 远端（跑 rdev-agent） |
 |---|---|---|
-| **Linux** amd64 / arm64 | ✅ | ✅ |
-| **macOS** amd64 / arm64 | ✅ | ✅ |
-| **Windows** | ❌ 未验证 | ❌ 不支持 |
+| macOS arm64 | **Tier 1 开发/测试基线** | build-only |
+| macOS amd64 | build-only | build-only |
+| Linux amd64 | build-only | **Tier 1 真实 SSH 手工基线** |
+| Linux arm64 | build-only | build-only |
+| Windows | 不支持 | 不支持 |
 
-所以 macOS ↔ Linux 四种方向任意组合都可以（本地 mac 连 Linux 开发机是主用法，实测在 Linux x86_64 上跑过；mac 连 mac、Linux 连 Linux 也在支持范围内）。
+当前认证过的主路径是 macOS arm64 本地连接 Linux amd64 远端。其他 POSIX 组合保持构建兼容，但在隔离的真实 OpenSSH/ProxyJump/rsync harness 完成前不作为默认运行时承诺。OpenSSH 必须提供 `BatchMode`、`ControlMaster`、`ControlPath` 和 `ControlPersist`；最低版本尚未认证，不在文档中猜测一个数字。
 
 ### Windows 远端：三层障碍，不是一层
 
@@ -489,8 +506,8 @@ long-lived process that goes on to use the value.
 | 步骤 | 实际命令 | Windows 上 |
 |---|---|---|
 | 探测 | `sh -c` 跑 `uname -s`、`uname -m`、`$HOME`、`sha256sum`\|`shasum` | 全都没有 |
-| 上传 | `ssh … dd of=<path> status=none` + stdin 灌 9MB | 没有 `dd` |
-| 安装 | `sh -c 'chmod 755 … && mv -f …'` | 没有 `chmod`/`mv` |
+| 上传 | 固定 `sh -c` 脚本执行 `dd`，路径通过位置参数、内容走 stdin | 没有 `dd` |
+| 安装 | 固定 `sh -c` 脚本执行 `chmod`/`mv`，路径只走位置参数 | 没有 `chmod`/`mv` |
 
 Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**——连「这是台什么机器」都问不出来，而要先知道是 Windows 才能换命令，鸡生蛋。PowerShell 侧有对应物（`Get-FileHash`、`$env:USERPROFILE`），但 9MB 二进制经 stdin 灌进 PowerShell 是出名的难搞（编码改写）。
 
@@ -531,6 +548,8 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 已完成的项留在这里作为记录：**首次连接的 host key 提示**、**secrets 跨断连存活**（结论是本来就安全，但补了测试）、**脱敏加 MCP 边界兜底**（见决策 6；bug 17 暴露了逐字段写法会漏，现在新字段自动覆盖）。那几轮还抓到一个假测试和一个真泄露，见 bug 台账 16、17。
 
 本轮完成：**job 记录并发安全**（决策 8，flock；实测过的两种错误答案里，「全员谎报删除成功」比裸 errno 更危险）、**拒绝静默降级 agent**（决策 10；hash 比不出新旧，所以最后连上的永远赢）、**构建标识 + `make check-agents`**（`rdev version` 现在能回答「我这个二进制带的什么 agent」）、**`secrets` CLI 面对齐**（`set` 不是漏了而是做不到，写下来了）。
+
+安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地；独立验证通过全量门禁、两个 bootstrap 边界测试各 100 轮，以及 Ubuntu 首次 bootstrap、最小 exec 和双重清理。Phase 0 只落了本批需要的 `SECURITY.md`、安全事件/低基数指标 seam、characterization/race 测试和支持矩阵基础；连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd harness 与 fuzz 基础设施仍按[演进规划](docs/rdev-evolution-security-plan.md)后续实施。原生 `IdentityFile`/`IdentitiesOnly`、host-scoped secret 初始化 lease、CLI 裸前导 dash operand、truncation 可见性和取消传播仍是后续阶段验收项。
 
 **P1 — `exec` 的流式输出。** 命令跑完(或超时)才返回,期间拿不到增量。
 实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
@@ -616,6 +635,8 @@ internal/client/     连接池 + 会话应用 + 脱敏（CLI 与 MCP 共享）
 internal/mcpsrv/     MCP 工具定义
 internal/secrets/    凭据脱敏
 internal/session/    host 注册表 + 粘性状态
+internal/observe/    稳定安全事件 + 低基数 metrics seam
+internal/support/    带 schema 的支持矩阵与 non-goals
 ```
 
 ## 许可
@@ -635,4 +656,3 @@ MIT，见 [LICENSE](LICENSE)。
 Apache-2.0，尚未取得转授权同意的原贡献仍是 MIT。两者都允许在 MIT 项目里使用。
 只是如果将来要分发**含 SDK 代码**的产物（本项目不这么做——`go.mod` 引用而非 vendor），
 Apache-2.0 的第 4 条要求保留其 NOTICE 和变更声明。
-
