@@ -378,19 +378,98 @@ func TestControlPathIsShortAndStable(t *testing.T) {
 }
 
 func TestRemoteDirNormalization(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"", ".cache/rdev"},
-		{"~/.cache/rdev", ".cache/rdev"},
-		{"/opt/rdev", "opt/rdev"},
-		{"custom/dir", "custom/dir"},
+	valid := map[string]string{
+		"":                  ".cache/rdev",
+		"~/.cache/custom":   ".cache/custom",
+		".cache/custom":     ".cache/custom",
+		"state-1/jobs_data": "state-1/jobs_data",
 	}
-	for _, c := range cases {
-		h := Host{RemoteDir: c.in}
-		if got := h.remoteDir(); got != c.want {
-			t.Errorf("remoteDir(%q) = %q, want %q", c.in, got, c.want)
+	for in, want := range valid {
+		got, err := ValidateRemoteDir(in)
+		if err != nil || got != want {
+			t.Errorf("ValidateRemoteDir(%q) = %q, %v; want %q", in, got, err, want)
 		}
+	}
+
+	invalid := []string{
+		"/.cache/custom", "../state", ".cache/../state", ".cache//state",
+		".cache/state/", ".cache/'quoted'", ".cache/$(touch-pwned)",
+		".cache/`id`", ".cache/with space", ".cache/with\nnewline", "~root/state",
+	}
+	for _, in := range invalid {
+		if _, err := ValidateRemoteDir(in); err == nil {
+			t.Errorf("ValidateRemoteDir(%q) should fail", in)
+		}
+	}
+}
+
+func TestValidateDestinationRejectsOptionAndWhitespaceInjection(t *testing.T) {
+	valid := []Host{
+		{Addr: "u@host"}, {Addr: "ssh-alias", Port: 22},
+		{Addr: "u@[2001:db8::1]", Port: 65535},
+	}
+	for _, host := range valid {
+		if err := ValidateHost(host); err != nil {
+			t.Errorf("ValidateHost(%+v): %v", host, err)
+		}
+	}
+
+	invalid := []Host{
+		{Addr: ""},
+		{Addr: "-oProxyCommand=sh"},
+		{Addr: "u@host -oProxyCommand=sh"},
+		{Addr: "u@host\n-oProxyCommand=sh"},
+		{Addr: "u@host", Port: -1},
+		{Addr: "u@host", Port: 65536},
+	}
+	for _, host := range invalid {
+		if err := ValidateHost(host); err == nil {
+			t.Errorf("ValidateHost(%+v) should fail", host)
+		}
+	}
+}
+
+func TestEverySSHSinkUsesDestinationValidation(t *testing.T) {
+	log := fakeSSH(t, "", 0)
+	c := &Conn{
+		host:   Host{Addr: "-oProxyCommand=touch-pwned"},
+		stderr: &lockedBuilder{},
+	}
+	if _, err := c.runSSH(t.Context(), "true"); err == nil {
+		t.Error("runSSH accepted an option-shaped destination")
+	}
+	if err := c.upload(t.Context(), []byte("x"), "/tmp/x"); err == nil {
+		t.Error("upload accepted an option-shaped destination")
+	}
+	if err := c.startAgent(t.Context()); err == nil {
+		t.Error("startAgent accepted an option-shaped destination")
+	}
+	if calls := sshCalls(t, log); calls != "" {
+		t.Fatalf("an invalid destination reached ssh:\n%s", calls)
+	}
+}
+
+func TestShellCommandKeepsDynamicValuesOutOfProgram(t *testing.T) {
+	const program = `printf '%s' "$1"`
+	marker := filepath.Join(t.TempDir(), "pwned")
+	value := "$(touch " + marker + "); ' quoted\nnext"
+	argv := shellCommand(program, value)
+	if len(argv) != 5 {
+		t.Fatalf("shellCommand argv = %v", argv)
+	}
+	if strings.Contains(argv[2], value) {
+		t.Fatalf("dynamic value entered shell source: %q", argv[2])
+	}
+	commandLine := strings.Join(argv, " ")
+	out, err := exec.Command("sh", "-c", commandLine).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != value {
+		t.Errorf("positional value round-tripped as %q, want %q", out, value)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("dynamic value executed instead of remaining data: %v", err)
 	}
 }
 

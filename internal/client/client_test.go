@@ -111,6 +111,36 @@ func TestSyncRejectsMissingPaths(t *testing.T) {
 	}
 }
 
+func TestBuildSyncArgsTerminatesOptionsBeforeOperands(t *testing.T) {
+	opts := SyncOptions{
+		Direction: "push", Local: "-leading-local", Remote: "~/dst",
+		Exclude: []string{".git"}, DryRun: true,
+	}
+	if err := validateLocalSyncPath(opts.Local); err != nil {
+		t.Fatalf("leading '-' is safe after --: %v", err)
+	}
+	args := buildSyncArgs(transport.Host{Addr: "u@h"}, []string{"-o", "BatchMode=yes"}, opts)
+	wantTail := []string{"--", "-leading-local", "u@h:~/dst"}
+	if len(args) < len(wantTail) || !reflect.DeepEqual(args[len(args)-len(wantTail):], wantTail) {
+		t.Errorf("rsync operand tail = %v, want suffix %v", args, wantTail)
+	}
+}
+
+func TestSyncPathValidationRejectsRemoteShellSyntax(t *testing.T) {
+	for _, remote := range []string{
+		"-server-option", "~/with space", "~/$(touch-pwned)", "~/`id`", "~/x;id", "~/x\nnext",
+	} {
+		if err := validateRemoteSyncPath(remote); err == nil {
+			t.Errorf("remote path %q should fail", remote)
+		}
+	}
+	for _, local := range []string{"local\npath", "local\x00path"} {
+		if err := validateLocalSyncPath(local); err == nil {
+			t.Errorf("local path %q should fail", local)
+		}
+	}
+}
+
 func TestSyncRejectsBadDirection(t *testing.T) {
 	c := newTestClient()
 	_, err := c.Sync(t.Context(), SyncOptions{

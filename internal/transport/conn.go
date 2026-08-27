@@ -21,10 +21,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -50,12 +52,64 @@ type Host struct {
 	ForceAgentUpload bool
 }
 
-// remoteDir returns the agent state directory, defaulting when unset.
-func (h *Host) remoteDir() string {
-	if h.RemoteDir == "" {
-		return ".cache/rdev"
+// ValidateDestination checks the exact value placed in ssh's destination slot.
+// It intentionally permits ssh_config aliases and IPv6 spellings, but rejects
+// anything ssh could reinterpret as an option or split into extra argv words.
+func ValidateDestination(addr string, port int) error {
+	if addr == "" {
+		return errors.New("empty ssh destination")
 	}
-	return strings.TrimPrefix(strings.TrimPrefix(h.RemoteDir, "~/"), "/")
+	if strings.HasPrefix(addr, "-") {
+		return fmt.Errorf("ssh destination %q must not start with '-'", addr)
+	}
+	for _, r := range addr {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("ssh destination %q contains whitespace or a control character", addr)
+		}
+	}
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("ssh port %d must be 0 (default) or within 1..65535", port)
+	}
+	return nil
+}
+
+// ValidateRemoteDir returns the canonical, home-relative state directory.
+// A leading "~/" is accepted for compatibility, but absolute paths, traversal,
+// shell metacharacters, empty components, and non-canonical spellings fail.
+func ValidateRemoteDir(dir string) (string, error) {
+	if dir == "" {
+		return ".cache/rdev", nil
+	}
+	original := dir
+	if strings.HasPrefix(dir, "~/") {
+		dir = strings.TrimPrefix(dir, "~/")
+	} else if strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "~") {
+		return "", fmt.Errorf("remote_dir %q must be relative to the remote home directory", original)
+	}
+	if dir == "" || path.Clean(dir) != dir || len(dir) > 512 {
+		return "", fmt.Errorf("remote_dir %q is not a canonical relative path", original)
+	}
+	for _, component := range strings.Split(dir, "/") {
+		if component == "" || component == "." || component == ".." {
+			return "", fmt.Errorf("remote_dir %q contains an unsafe path component", original)
+		}
+		for _, r := range component {
+			if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+				!(r >= '0' && r <= '9') && r != '.' && r != '_' && r != '-' {
+				return "", fmt.Errorf("remote_dir %q contains unsafe character %q", original, r)
+			}
+		}
+	}
+	return dir, nil
+}
+
+// ValidateHost is the shared validation boundary used before any ssh sink.
+func ValidateHost(h Host) error {
+	if err := ValidateDestination(h.Addr, h.Port); err != nil {
+		return err
+	}
+	_, err := ValidateRemoteDir(h.RemoteDir)
+	return err
 }
 
 // Conn is a live connection to one remote agent. Safe for concurrent use, and
@@ -130,8 +184,8 @@ type AgentBinary struct {
 // lookup resolves an agent build for the remote platform. It is called only
 // when an upload is required, so a warm connection costs one ssh round trip.
 func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*AgentBinary, error)) (*Conn, error) {
-	if host.Addr == "" {
-		return nil, errors.New("host addr required")
+	if err := ValidateHost(host); err != nil {
+		return nil, fmt.Errorf("invalid host %q: %w", host.Name, err)
 	}
 
 	c := &Conn{
@@ -156,8 +210,9 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		return nil, err
 	}
 	c.host.GOOS, c.host.GOARCH = probe.goos, probe.goarch
-	c.stateDir = probe.home + "/" + host.remoteDir()
-	c.agentPath = probe.home + "/" + host.remoteDir() + "/rdev-agent"
+	remoteDir, _ := ValidateRemoteDir(host.RemoteDir) // validated before the probe
+	c.stateDir = probe.home + "/" + remoteDir
+	c.agentPath = probe.home + "/" + remoteDir + "/rdev-agent"
 
 	bin, err := lookup(probe.goos, probe.goarch)
 	if err != nil {
@@ -237,17 +292,17 @@ func (c *Conn) probeRemote(ctx context.Context) (*remoteProbe, error) {
 	const script = `printf 'rdev-os %s\n' "$(uname -s)"
 printf 'rdev-arch %s\n' "$(uname -m)"
 printf 'rdev-home %s\n' "$HOME"
-a="$HOME/` + agentRelPathPlaceholder + `"
+a="$HOME/$1"
 if [ -f "$a" ]; then
   s=$(sha256sum "$a" 2>/dev/null || shasum -a 256 "$a" 2>/dev/null || true)
   printf 'rdev-sha %s\n' "${s%% *}"
 fi`
 
-	// The agent path is the only variable, and it is a fixed relative path from
-	// the host's own config, not user input from a tool call.
-	sh := strings.Replace(script, agentRelPathPlaceholder, c.host.remoteDir()+"/rdev-agent", 1)
-
-	out, err := c.runSSH(ctx, "sh", "-c", shellQuote(sh))
+	remoteDir, err := ValidateRemoteDir(c.host.RemoteDir)
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.runShell(ctx, script, remoteDir+"/rdev-agent")
 	if err != nil {
 		// A failure here is a real connectivity or auth problem; surface ssh's own
 		// message, which explains it better than a wrapped error would. Two shapes
@@ -357,22 +412,43 @@ func parseProbe(out string) (*remoteProbe, error) {
 	return p, nil
 }
 
-// agentRelPathPlaceholder marks where the agent's relative path is substituted
-// into the probe script.
-const agentRelPathPlaceholder = "__RDEV_AGENT__"
-
 // shellQuote wraps s in single quotes for safe passage through ssh's remote
 // shell, which concatenates arguments into one command line.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// runSSH executes one auxiliary command over the shared connection. argv is
-// passed as distinct ssh arguments; ssh still concatenates them into a remote
-// shell command, so this is used only for fixed, argument-free probes.
-func (c *Conn) runSSH(ctx context.Context, argv ...string) (string, error) {
+// shellCommand returns a fixed shell program plus safely quoted positional
+// parameters. Dynamic values are never concatenated into the program text.
+func shellCommand(script string, argv ...string) []string {
+	args := []string{"sh", "-c", shellQuote(script), "rdev"}
+	for _, arg := range argv {
+		args = append(args, shellQuote(arg))
+	}
+	return args
+}
+
+// sshArgs is the final shared boundary before every ssh process creation.
+func (c *Conn) sshArgs(remote ...string) ([]string, error) {
+	if err := ValidateHost(c.host); err != nil {
+		return nil, fmt.Errorf("invalid host %q: %w", c.host.Name, err)
+	}
 	args := append(c.sshBase(), c.host.Addr)
-	args = append(args, argv...)
+	return append(args, remote...), nil
+}
+
+func (c *Conn) runShell(ctx context.Context, script string, argv ...string) (string, error) {
+	return c.runSSH(ctx, shellCommand(script, argv...)...)
+}
+
+// runSSH executes one auxiliary command over the shared connection. ssh still
+// concatenates remote argv into a command line, so callers either use fixed
+// tokens or shellCommand, which keeps dynamic values in positional parameters.
+func (c *Conn) runSSH(ctx context.Context, argv ...string) (string, error) {
+	args, err := c.sshArgs(argv...)
+	if err != nil {
+		return "", err
+	}
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	var out, errBuf strings.Builder
 	cmd.Stdout = &out
@@ -459,15 +535,13 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 	// another rdev process) sees either the old binary or the new one, never a
 	// partial file, and never a file that is complete but not yet executable.
 	tmp := fmt.Sprintf("%s.tmp.%d", c.agentPath, os.Getpid())
-	if _, err := c.runSSH(ctx, "mkdir", "-p", c.stateDir+"/jobs"); err != nil {
+	if _, err := c.runShell(ctx, `mkdir -p -- "$1/jobs"`, c.stateDir); err != nil {
 		return fmt.Errorf("create remote dir: %w", err)
 	}
 	if err := c.upload(ctx, bin.Data, tmp); err != nil {
 		return err
 	}
-	if _, err := c.runSSH(ctx, "sh", "-c", shellQuote(
-		fmt.Sprintf("chmod 755 %s && mv -f %s %s", shellQuote(tmp), shellQuote(tmp), shellQuote(c.agentPath)),
-	)); err != nil {
+	if _, err := c.runShell(ctx, `chmod 755 -- "$1" && mv -f -- "$1" "$2"`, tmp, c.agentPath); err != nil {
 		return fmt.Errorf("install agent: %w", err)
 	}
 	return nil
@@ -497,7 +571,7 @@ func (c *Conn) checkNotDowngrade(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, agentVersionTimeout)
 	defer cancel()
 
-	out, err := c.runSSH(ctx, shellQuote(c.agentPath), "-version")
+	out, err := c.runShell(ctx, `exec "$1" -version`, c.agentPath)
 	if err != nil {
 		// Cannot run it: assume it is broken and let the upload fix it.
 		return nil
@@ -541,7 +615,10 @@ func downgradeError(installed, local buildinfo.Build, host Host) error {
 // upload streams data to a remote path via `dd`, which avoids scp/sftp
 // availability differences and reuses the ControlMaster connection.
 func (c *Conn) upload(ctx context.Context, data []byte, remotePath string) error {
-	args := append(c.sshBase(), c.host.Addr, "dd", "of="+remotePath, "status=none")
+	args, err := c.sshArgs(shellCommand(`exec dd "of=$1" status=none`, remotePath)...)
+	if err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	// bytes.NewReader, not strings.NewReader(string(data)): the latter copies the
 	// whole embedded agent (~9 MB) for nothing.
@@ -564,7 +641,10 @@ func (c *Conn) upload(ctx context.Context, data []byte, remotePath string) error
 // this host installed it. Letting the agent default independently would silently
 // split the two sides apart whenever RemoteDir is customized.
 func (c *Conn) startAgent(ctx context.Context) error {
-	args := append(c.sshBase(), c.host.Addr, c.agentPath, "-state", c.stateDir)
+	args, err := c.sshArgs(shellCommand(`exec "$1" -state "$2"`, c.agentPath, c.stateDir)...)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("ssh", args...) // no ctx: lifetime is managed by Close
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/secrets"
@@ -623,6 +624,15 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	if opts.Local == "" || opts.Remote == "" {
 		return nil, errors.New("local and remote paths required")
 	}
+	if opts.Direction != "" && opts.Direction != "push" && opts.Direction != "pull" {
+		return nil, fmt.Errorf("direction must be push or pull, got %q", opts.Direction)
+	}
+	if err := validateLocalSyncPath(opts.Local); err != nil {
+		return nil, err
+	}
+	if err := validateRemoteSyncPath(opts.Remote); err != nil {
+		return nil, err
+	}
 	if _, err := exec.LookPath("rsync"); err != nil {
 		return nil, errors.New("rsync not found on the local host")
 	}
@@ -634,30 +644,7 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		return nil, err
 	}
 
-	sshCmd := append([]string{"ssh"}, conn.SSHArgs()...)
-	// Only long-standing flags: macOS ships openrsync, which rejects newer
-	// options like --info=stats1 that samba rsync accepts. -v gives a
-	// transferred-file list on both implementations.
-	args := []string{"-az", "-v", "-e", strings.Join(sshCmd, " ")}
-	if opts.DryRun {
-		args = append(args, "--dry-run")
-	}
-	if opts.Delete {
-		args = append(args, "--delete")
-	}
-	for _, ex := range opts.Exclude {
-		args = append(args, "--exclude", ex)
-	}
-
-	remoteSpec := conn.Host().Addr + ":" + opts.Remote
-	switch opts.Direction {
-	case "push", "":
-		args = append(args, opts.Local, remoteSpec)
-	case "pull":
-		args = append(args, remoteSpec, opts.Local)
-	default:
-		return nil, fmt.Errorf("direction must be push or pull, got %q", opts.Direction)
-	}
+	args := buildSyncArgs(conn.Host(), conn.SSHArgs(), opts)
 
 	cmd := exec.CommandContext(ctx, "rsync", args...)
 	var out, errBuf strings.Builder
@@ -683,6 +670,67 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		return nil, fmt.Errorf("run rsync: %w", runErr)
 	}
 	return res, nil
+}
+
+func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []string {
+	sshCmd := append([]string{"ssh"}, sshArgs...)
+	// Only long-standing flags: macOS ships openrsync, which rejects newer
+	// options like --info=stats1 that samba rsync accepts. -v gives a
+	// transferred-file list on both implementations.
+	args := []string{"-az", "-v", "-e", strings.Join(sshCmd, " ")}
+	if opts.DryRun {
+		args = append(args, "--dry-run")
+	}
+	if opts.Delete {
+		args = append(args, "--delete")
+	}
+	for _, ex := range opts.Exclude {
+		args = append(args, "--exclude", ex)
+	}
+
+	remoteSpec := host.Addr + ":" + opts.Remote
+	switch opts.Direction {
+	case "push", "":
+		args = append(args, "--", opts.Local, remoteSpec)
+	case "pull":
+		args = append(args, "--", remoteSpec, opts.Local)
+	}
+
+	return args
+}
+
+// validateLocalSyncPath rejects only values that cannot be represented safely as
+// a local rsync operand. A leading '-' is legitimate because Sync inserts '--'.
+func validateLocalSyncPath(p string) error {
+	if p == "" {
+		return errors.New("local sync path required")
+	}
+	for _, r := range p {
+		if r == 0 || unicode.IsControl(r) {
+			return errors.New("local sync path contains a control character")
+		}
+	}
+	return nil
+}
+
+// validateRemoteSyncPath is deliberately narrower because rsync sends the
+// operand through a remote shell. The supported spelling covers ordinary
+// absolute, relative, and ~/ paths without relying on remote-shell quoting.
+func validateRemoteSyncPath(p string) error {
+	if p == "" {
+		return errors.New("remote sync path required")
+	}
+	if strings.HasPrefix(p, "-") {
+		return fmt.Errorf("remote sync path %q must not start with '-'", p)
+	}
+	for _, r := range p {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+			!(r >= '0' && r <= '9') && r != '.' && r != '_' && r != '-' &&
+			r != '/' && r != '~' {
+			return fmt.Errorf("remote sync path %q contains unsupported character %q", p, r)
+		}
+	}
+	return nil
 }
 
 // Ping verifies connectivity and reports agent identity.

@@ -6,6 +6,7 @@
 package session
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
 
@@ -48,23 +50,92 @@ const (
 
 // Registry tracks known hosts and their state. Safe for concurrent use.
 type Registry struct {
-	mu     sync.RWMutex
-	hosts  map[string]transport.Host
-	state  map[string]*State
-	scopes map[string]Scope
+	mu           sync.RWMutex
+	hosts        map[string]transport.Host
+	state        map[string]*State
+	scopes       map[string]Scope
+	projectTrust ProjectTrust
+	observe      *observe.Registry
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		hosts:  make(map[string]transport.Host),
-		state:  make(map[string]*State),
-		scopes: make(map[string]Scope),
+		hosts:   make(map[string]transport.Host),
+		state:   make(map[string]*State),
+		scopes:  make(map[string]Scope),
+		observe: observe.New(nil),
 	}
+}
+
+// SetObserver installs the process-local security metrics and structured event
+// sink. It is primarily a stable seam for the future status/doctor exporter.
+func (r *Registry) SetObserver(registry *observe.Registry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if registry == nil {
+		registry = observe.New(nil)
+	}
+	r.observe = registry
+}
+
+func (r *Registry) SecuritySnapshot() observe.Snapshot {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	return registry.Snapshot()
+}
+
+func (r *Registry) reject(reason observe.SecurityReason, target string) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.Reject(reason, target)
+}
+
+func configReadReason(err error) observe.SecurityReason {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "symlink") || strings.Contains(message, "no-follow") ||
+		strings.Contains(message, "too many levels of symbolic links") {
+		return observe.ReasonConfigSymlink
+	}
+	return observe.ReasonConfigInvalid
 }
 
 // hostFile is the on-disk registry format.
 type hostFile struct {
 	Hosts []hostEntry `json:"hosts"`
+}
+
+const trustFileVersion = 1
+
+type trustFile struct {
+	Version  int              `json:"version"`
+	Projects []trustedProject `json:"projects"`
+}
+
+type trustedProject struct {
+	Path   string `json:"path"`
+	Digest string `json:"digest"`
+}
+
+// ProjectTrust is the reviewable trust decision for the current project file.
+// Approval binds both its absolute path and the SHA-256 of its exact bytes.
+type ProjectTrust struct {
+	Path     string `json:"path,omitempty"`
+	Digest   string `json:"digest,omitempty"`
+	Approved bool   `json:"approved"`
+}
+
+// UntrustedProjectError means a project file was deliberately not loaded.
+// Global hosts remain available; only the unapproved repository data is skipped.
+type UntrustedProjectError struct {
+	Trust ProjectTrust
+}
+
+func (e *UntrustedProjectError) Error() string {
+	return fmt.Sprintf(
+		"project host config is not approved: %s (sha256:%s); review it, then run `rdev hosts approve-project %s`",
+		e.Trust.Path, e.Trust.Digest, e.Trust.Digest)
 }
 
 type hostEntry struct {
@@ -103,8 +174,9 @@ type hostEntry struct {
 // Load reads the global registry and then the project one, so a project can
 // define hosts that exist only while you work in that directory.
 //
-// Order matters: the project file is read last and wins on name collisions,
-// letting a repo pin "dev" to its own machine even if a global alias exists.
+// Order matters: an approved project file is read last and wins on name
+// collisions, letting a repo pin "dev" to its own machine without allowing an
+// unreviewed checkout to replace a global destination.
 // A missing file at either level is not an error; hosts can also be registered
 // at runtime.
 func (r *Registry) Load() error {
@@ -119,7 +191,28 @@ func (r *Registry) Load() error {
 	// The MCP server inherits the project directory as its cwd, which is what
 	// makes a project-scoped host file work without extra configuration.
 	if project, err := ProjectConfigPath(); err == nil {
-		if err := r.loadFile(project, ScopeProject); err != nil {
+		b, err := readConfigFile(project)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			r.reject(configReadReason(err), project)
+			return err
+		}
+		trust := ProjectTrust{Path: filepath.Clean(project), Digest: digestBytes(b)}
+		approved, err := projectDigestApproved(trust.Path, trust.Digest)
+		if err != nil {
+			return fmt.Errorf("read project trust store: %w", err)
+		}
+		trust.Approved = approved
+		r.mu.Lock()
+		r.projectTrust = trust
+		r.mu.Unlock()
+		if !approved {
+			r.reject(observe.ReasonProjectUntrusted, trust.Path)
+			return &UntrustedProjectError{Trust: trust}
+		}
+		if err := r.loadBytes(project, b, ScopeProject); err != nil {
 			return err
 		}
 	}
@@ -128,29 +221,56 @@ func (r *Registry) Load() error {
 
 // loadFile merges one host file into the registry, tagging each entry's scope.
 func (r *Registry) loadFile(path string, scope Scope) error {
-	b, err := os.ReadFile(path)
+	b, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		r.reject(configReadReason(err), path)
 		return err
 	}
 
+	return r.loadBytes(path, b, scope)
+}
+
+func (r *Registry) loadBytes(path string, b []byte, scope Scope) error {
 	var hf hostFile
 	if err := json.Unmarshal(b, &hf); err != nil {
+		r.reject(observe.ReasonConfigInvalid, path)
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
+	type candidate struct {
+		host  transport.Host
+		entry hostEntry
+	}
+	candidates := make([]candidate, 0, len(hf.Hosts))
 	for _, e := range hf.Hosts {
 		if e.Name == "" || e.Addr == "" {
-			continue
+			r.reject(observe.ReasonConfigInvalid, path)
+			return fmt.Errorf("parse %s: every host requires non-empty name and addr", path)
 		}
-		r.Add(transport.Host{
+		h := transport.Host{
 			Name:             e.Name,
 			Addr:             e.Addr,
 			Port:             e.Port,
 			RemoteDir:        e.RemoteDir,
 			ForceAgentUpload: e.ForceAgentUpload,
-		})
+		}
+		if err := transport.ValidateHost(h); err != nil {
+			reason := observe.ReasonRemoteDir
+			if destErr := transport.ValidateDestination(h.Addr, h.Port); destErr != nil {
+				reason = observe.ReasonDestination
+			}
+			r.reject(reason, e.Name)
+			return fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
+		}
+		candidates = append(candidates, candidate{host: h, entry: e})
+	}
+	for _, c := range candidates {
+		e, h := c.entry, c.host
+		if err := r.Add(h); err != nil {
+			return fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
+		}
 		r.mu.Lock()
 		r.scopes[e.Name] = scope
 		r.mu.Unlock()
@@ -192,10 +312,6 @@ func (r *Registry) Save(scope Scope) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-
 	r.mu.RLock()
 	hf := hostFile{}
 	for name, h := range r.hosts {
@@ -238,7 +354,113 @@ func (r *Registry) Save(scope Scope) error {
 	}
 	// Written 0600: it records hostnames and usernames, not secrets, but there
 	// is no reason to make it world-readable.
-	return os.WriteFile(path, append(b, '\n'), 0o600)
+	return atomicWriteConfigFile(path, append(b, '\n'))
+}
+
+func digestBytes(b []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+func trustPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".rdev", "trusted-projects.json"), nil
+}
+
+func loadTrustFile() (trustFile, error) {
+	p, err := trustPath()
+	if err != nil {
+		return trustFile{}, err
+	}
+	b, err := readConfigFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return trustFile{Version: trustFileVersion}, nil
+		}
+		return trustFile{}, err
+	}
+	var tf trustFile
+	if err := json.Unmarshal(b, &tf); err != nil {
+		return trustFile{}, fmt.Errorf("parse %s: %w", p, err)
+	}
+	if tf.Version != trustFileVersion {
+		return trustFile{}, fmt.Errorf("unsupported trust store version %d", tf.Version)
+	}
+	return tf, nil
+}
+
+func projectDigestApproved(projectPath, digest string) (bool, error) {
+	tf, err := loadTrustFile()
+	if err != nil {
+		return false, err
+	}
+	for _, project := range tf.Projects {
+		if project.Path == projectPath && project.Digest == digest {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ProjectTrustStatus returns the current project's path, digest, and approval.
+func (r *Registry) ProjectTrustStatus() ProjectTrust {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.projectTrust
+}
+
+// ApproveProject loads the current project config only after the caller repeats
+// its exact digest. The approval is persisted outside the repository.
+func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
+	projectPath, err := ProjectConfigPath()
+	if err != nil {
+		return ProjectTrust{}, err
+	}
+	b, err := readConfigFile(projectPath)
+	if err != nil {
+		return ProjectTrust{}, err
+	}
+	trust := ProjectTrust{Path: filepath.Clean(projectPath), Digest: digestBytes(b)}
+	if digest == "" || !strings.EqualFold(digest, trust.Digest) {
+		return trust, fmt.Errorf("project config digest mismatch: got %q, current sha256 is %s", digest, trust.Digest)
+	}
+	if err := r.loadBytes(projectPath, b, ScopeProject); err != nil {
+		return trust, err
+	}
+	tf, err := loadTrustFile()
+	if err != nil {
+		return trust, err
+	}
+	projects := make([]trustedProject, 0, len(tf.Projects)+1)
+	for _, project := range tf.Projects {
+		if project.Path != trust.Path {
+			projects = append(projects, project)
+		}
+	}
+	projects = append(projects, trustedProject{Path: trust.Path, Digest: trust.Digest})
+	sort.Slice(projects, func(i, j int) bool { return projects[i].Path < projects[j].Path })
+	tf.Version = trustFileVersion
+	tf.Projects = projects
+	out, err := json.MarshalIndent(tf, "", "  ")
+	if err != nil {
+		return trust, err
+	}
+	p, err := trustPath()
+	if err != nil {
+		return trust, err
+	}
+	if err := atomicWriteConfigFile(p, append(out, '\n')); err != nil {
+		return trust, err
+	}
+	trust.Approved = true
+	r.mu.Lock()
+	r.projectTrust = trust
+	registry := r.observe
+	r.mu.Unlock()
+	registry.ProjectApproved(trust.Path)
+	return trust, nil
 }
 
 // SetScope records which config file a host belongs to.
@@ -258,8 +480,18 @@ func (r *Registry) ScopeOf(name string) Scope {
 	return ScopeGlobal
 }
 
-// Add registers or replaces a host, initializing its state.
-func (r *Registry) Add(h transport.Host) {
+// Add registers or replaces a validated host, initializing its state.
+func (r *Registry) Add(h transport.Host) error {
+	if err := transport.ValidateHost(h); err != nil {
+		reason := observe.ReasonConfigInvalid
+		if destErr := transport.ValidateDestination(h.Addr, h.Port); destErr != nil {
+			reason = observe.ReasonDestination
+		} else {
+			reason = observe.ReasonRemoteDir
+		}
+		r.reject(reason, h.Name)
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if h.Name == "" {
@@ -269,6 +501,7 @@ func (r *Registry) Add(h transport.Host) {
 	if _, ok := r.state[h.Name]; !ok {
 		r.state[h.Name] = &State{LoginShell: true}
 	}
+	return nil
 }
 
 // Host resolves a host by name.
@@ -285,7 +518,9 @@ func (r *Registry) Host(name string) (transport.Host, error) {
 	}
 
 	if parsed, err := parseDestination(name); err == nil {
-		r.Add(parsed)
+		if err := r.Add(parsed); err != nil {
+			return transport.Host{}, err
+		}
 		return parsed, nil
 	}
 	return transport.Host{}, fmt.Errorf("unknown host %q (known: %s)", name, strings.Join(r.Names(), ", "))
@@ -300,7 +535,7 @@ func parseDestination(s string) (transport.Host, error) {
 	h := transport.Host{Name: s, Addr: addr}
 	if hasPort {
 		port, err := strconv.Atoi(portStr)
-		if err != nil {
+		if err != nil || port < 1 || port > 65535 {
 			return transport.Host{}, fmt.Errorf("invalid port %q", portStr)
 		}
 		h.Port = port
@@ -309,6 +544,9 @@ func parseDestination(s string) (transport.Host, error) {
 	// unknown host rather than silently treated as a hostname.
 	if !strings.Contains(addr, "@") && !hasPort {
 		return transport.Host{}, fmt.Errorf("%q is not a host alias or ssh destination", s)
+	}
+	if err := transport.ValidateDestination(h.Addr, h.Port); err != nil {
+		return transport.Host{}, err
 	}
 	return h, nil
 }
@@ -395,6 +633,11 @@ func ProjectConfigPath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
+	}
+	// Bind approvals to one physical project identity rather than allowing the
+	// same checkout to accumulate separate decisions through symlink aliases.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
 	}
 	return filepath.Join(cwd, ".rdev", "hosts.json"), nil
 }

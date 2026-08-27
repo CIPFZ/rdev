@@ -15,6 +15,7 @@ import (
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
@@ -593,15 +594,16 @@ func registerSync(s *mcp.Server, c *client.Client) {
 type SessionIn struct {
 	Host string `json:"host,omitempty" jsonschema:"Host to inspect or update. Omit to list all hosts."`
 
-	Addr       string            `json:"addr,omitempty" jsonschema:"Register or update the ssh destination, e.g. user@1.2.3.4."`
-	Port       int               `json:"port,omitempty"`
-	RemoteDir  string            `json:"remote_dir,omitempty" jsonschema:"Directory holding the agent binary and job records. Defaults to ~/.cache/rdev. Changing it starts a fresh job history, since existing jobs live under the old path."`
-	Cwd        string            `json:"cwd,omitempty" jsonschema:"Sticky working directory inherited by later calls on this host."`
-	Env        map[string]string `json:"env,omitempty" jsonschema:"Sticky environment variables merged into later calls."`
-	LoginShell *bool             `json:"login_shell,omitempty" jsonschema:"Default login-shell behaviour for this host."`
-	Secrets    map[string]string `json:"secrets,omitempty" jsonschema:"Credential files on this host to register for redaction on first connect, as {\"gftoken\": \"~/.nexus/auth/gongfeng/key\"}. Only the path is saved; the value is read over the connection each session and never reaches local disk."`
-	Scope      string            `json:"scope,omitempty" jsonschema:"Where to save: 'project' writes ./.rdev/hosts.json so the host is only visible while working in this directory, 'global' writes ~/.rdev/hosts.json. Defaults to the host's current scope, or project for a new host."`
-	Persist    bool              `json:"persist,omitempty" jsonschema:"Save the host registry to the scope's file."`
+	Addr                 string            `json:"addr,omitempty" jsonschema:"Register or update the ssh destination, e.g. user@1.2.3.4."`
+	Port                 int               `json:"port,omitempty"`
+	RemoteDir            string            `json:"remote_dir,omitempty" jsonschema:"Directory holding the agent binary and job records. Defaults to ~/.cache/rdev. Changing it starts a fresh job history, since existing jobs live under the old path."`
+	Cwd                  string            `json:"cwd,omitempty" jsonschema:"Sticky working directory inherited by later calls on this host."`
+	Env                  map[string]string `json:"env,omitempty" jsonschema:"Sticky environment variables merged into later calls."`
+	LoginShell           *bool             `json:"login_shell,omitempty" jsonschema:"Default login-shell behaviour for this host."`
+	Secrets              map[string]string `json:"secrets,omitempty" jsonschema:"Credential files on this host to register for redaction on first connect, as {\"gftoken\": \"~/.nexus/auth/gongfeng/key\"}. Only the path is saved; the value is read over the connection each session and never reaches local disk."`
+	Scope                string            `json:"scope,omitempty" jsonschema:"Where to save: 'project' writes ./.rdev/hosts.json so the host is only visible while working in this directory, 'global' writes ~/.rdev/hosts.json. Defaults to the host's current scope, or project for a new host."`
+	Persist              bool              `json:"persist,omitempty" jsonschema:"Save the host registry to the scope's file."`
+	ApproveProjectDigest string            `json:"approve_project_digest,omitempty" jsonschema:"Approve and load the current .rdev/hosts.json only when this exact SHA-256 matches. Call with no updates first to inspect the pending path and digest."`
 }
 
 type HostOut struct {
@@ -619,10 +621,12 @@ type HostOut struct {
 }
 
 type SessionOut struct {
-	Hosts     []HostOut `json:"hosts"`
-	Saved     bool      `json:"saved,omitempty"`
-	SavedTo   string    `json:"saved_to,omitempty"`
-	SavedNote string    `json:"saved_note,omitempty"`
+	Hosts        []HostOut            `json:"hosts"`
+	ProjectTrust session.ProjectTrust `json:"project_trust"`
+	Security     observe.Snapshot     `json:"security"`
+	Saved        bool                 `json:"saved,omitempty"`
+	SavedTo      string               `json:"saved_to,omitempty"`
+	SavedNote    string               `json:"saved_note,omitempty"`
 }
 
 func registerSession(s *mcp.Server, c *client.Client) {
@@ -630,10 +634,16 @@ func registerSession(s *mcp.Server, c *client.Client) {
 		Name: "rdev_session",
 		Description: "Inspect or update per-host state. Setting cwd once removes the need to repeat it. " +
 			"Hosts saved with scope 'project' live in ./.rdev/hosts.json and are only reachable while " +
-			"working in that directory, which is the right choice for a machine that belongs to one codebase. " +
+			"working in that directory. A project file is ignored until approve_project_digest matches its " +
+			"reported absolute path and SHA-256; any content change requires a new approval. " +
 			"Use 'secrets' to declare credential files that should be registered for redaction automatically on " +
 			"every connect, so a token is masked without having to remember rdev_secrets each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionIn) (*mcp.CallToolResult, SessionOut, error) {
+		if in.ApproveProjectDigest != "" {
+			if _, err := c.Hosts.ApproveProject(in.ApproveProjectDigest); err != nil {
+				return nil, SessionOut{}, err
+			}
+		}
 		isNew := false
 		if in.Host != "" {
 			if _, err := c.Hosts.Host(in.Host); err != nil {
@@ -642,9 +652,11 @@ func registerSession(s *mcp.Server, c *client.Client) {
 		}
 
 		if in.Host != "" && in.Addr != "" {
-			c.Hosts.Add(transport.Host{
+			if err := c.Hosts.Add(transport.Host{
 				Name: in.Host, Addr: in.Addr, Port: in.Port, RemoteDir: in.RemoteDir,
-			})
+			}); err != nil {
+				return nil, SessionOut{}, fmt.Errorf("invalid host: %w", err)
+			}
 		} else if in.Host != "" && in.RemoteDir != "" {
 			// Updating only the state directory: keep the existing destination
 			// rather than requiring the caller to repeat it.
@@ -653,7 +665,9 @@ func registerSession(s *mcp.Server, c *client.Client) {
 				return nil, SessionOut{}, err
 			}
 			h.RemoteDir = in.RemoteDir
-			c.Hosts.Add(h)
+			if err := c.Hosts.Add(h); err != nil {
+				return nil, SessionOut{}, fmt.Errorf("invalid host: %w", err)
+			}
 		}
 		// A live connection was started against the previous address and state
 		// directory, so redefining either must retire it rather than let the next
@@ -703,7 +717,10 @@ func registerSession(s *mcp.Server, c *client.Client) {
 			})
 		}
 
-		var out SessionOut
+		out := SessionOut{
+			ProjectTrust: c.Hosts.ProjectTrustStatus(),
+			Security:     c.Hosts.SecuritySnapshot(),
+		}
 		if in.Persist {
 			if err := c.Hosts.Save(scope); err != nil {
 				return nil, SessionOut{}, fmt.Errorf("save host registry: %w", err)

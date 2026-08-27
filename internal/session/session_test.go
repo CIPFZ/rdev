@@ -1,9 +1,12 @@
 package session
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/CIPFZ/rdev/internal/transport"
@@ -96,6 +99,10 @@ func TestParseDestination(t *testing.T) {
 		{"host:2222", "host", 2222, false},
 		{"bareword", "", 0, true},
 		{"user@host:notaport", "", 0, true},
+		{"-oProxyCommand=touch-pwned", "", 0, true},
+		{"user@host -oProxyCommand=x", "", 0, true},
+		{"user@host:0", "", 0, true},
+		{"user@host:65536", "", 0, true},
 		{"", "", 0, true},
 	}
 	for _, tt := range tests {
@@ -307,5 +314,288 @@ func TestSaveRoundTripsForceAgentUpload(t *testing.T) {
 	}
 	if other.ForceAgentUpload {
 		t.Error("a host that never asked for it must not come back with ForceAgentUpload set")
+	}
+}
+
+func TestUntrustedProjectCannotOverrideGlobalUntilDigestApproval(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+
+	globalDir := filepath.Join(home, ".rdev")
+	projectDir := filepath.Join(project, ".rdev")
+	for _, dir := range []string{globalDir, projectDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	globalJSON := []byte(`{"hosts":[{"name":"dev","addr":"u@global"}]}`)
+	projectJSON := []byte(`{"hosts":[{"name":"dev","addr":"u@project"}]}`)
+	if err := os.WriteFile(filepath.Join(globalDir, "hosts.json"), globalJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(projectDir, "hosts.json")
+	if err := os.WriteFile(projectPath, projectJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRegistry()
+	err := r.Load()
+	var untrusted *UntrustedProjectError
+	if !errors.As(err, &untrusted) {
+		t.Fatalf("Load error = %v, want UntrustedProjectError", err)
+	}
+	host, err := r.Host("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host.Addr != "u@global" {
+		t.Fatalf("untrusted project overrode global host with %q", host.Addr)
+	}
+	trust := r.ProjectTrustStatus()
+	canonicalProjectPath, err := ProjectConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trust.Approved || trust.Path != canonicalProjectPath || trust.Digest == "" {
+		t.Fatalf("pending trust = %+v", trust)
+	}
+	if got := r.SecuritySnapshot().SecurityRejects["project_untrusted"]; got != 1 {
+		t.Errorf("project_untrusted metric = %d, want 1", got)
+	}
+
+	if _, err := r.ApproveProject(strings.Repeat("0", 64)); err == nil {
+		t.Fatal("wrong digest approved the project")
+	}
+	approved, err := r.ApproveProject(trust.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !approved.Approved {
+		t.Fatalf("approval = %+v", approved)
+	}
+	host, _ = r.Host("dev")
+	if host.Addr != "u@project" {
+		t.Errorf("approved project did not override global host: %q", host.Addr)
+	}
+
+	trustStore := filepath.Join(globalDir, "trusted-projects.json")
+	info, err := os.Stat(trustStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("trust store mode = %o, want 600", info.Mode().Perm())
+	}
+	fresh := NewRegistry()
+	if err := fresh.Load(); err != nil {
+		t.Fatalf("persisted approval was not honored: %v", err)
+	}
+	if host, _ := fresh.Host("dev"); host.Addr != "u@project" {
+		t.Errorf("fresh approved load resolved %q", host.Addr)
+	}
+
+	// Any byte change invalidates the approval and falls back to the global host.
+	changed := []byte(`{"hosts":[{"name":"dev","addr":"u@changed"}]}`)
+	if err := os.WriteFile(projectPath, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	afterChange := NewRegistry()
+	if err := afterChange.Load(); !errors.As(err, &untrusted) {
+		t.Fatalf("changed project Load error = %v, want untrusted", err)
+	}
+	if host, _ := afterChange.Host("dev"); host.Addr != "u@global" {
+		t.Errorf("changed unapproved project overrode global with %q", host.Addr)
+	}
+}
+
+func TestApprovalDoesNotBlessInvalidProjectConfig(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	if err := os.MkdirAll(filepath.Join(home, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(project, ".rdev", "hosts.json")
+	b := []byte(`{"hosts":[{"name":"dev","addr":"-oProxyCommand=touch-pwned"}]}`)
+	if err := os.WriteFile(projectPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	var untrusted *UntrustedProjectError
+	if err := r.Load(); !errors.As(err, &untrusted) {
+		t.Fatalf("Load error = %v", err)
+	}
+	if _, err := r.ApproveProject(untrusted.Trust.Digest); err == nil {
+		t.Fatal("invalid destination was persisted as trusted")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".rdev", "trusted-projects.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid config created trust state: %v", err)
+	}
+}
+
+func TestInvalidConfigIsRejectedBeforeAnyEntryMerges(t *testing.T) {
+	r := NewRegistry()
+	b := []byte(`{"hosts":[
+		{"name":"safe","addr":"u@safe"},
+		{"name":"bad","addr":"-oProxyCommand=touch-pwned"}
+	]}`)
+	if err := r.loadBytes("project/.rdev/hosts.json", b, ScopeProject); err == nil {
+		t.Fatal("mixed config with an invalid destination was accepted")
+	}
+	if names := r.Names(); len(names) != 0 {
+		t.Fatalf("config validation partially merged entries: %v", names)
+	}
+	if got := r.SecuritySnapshot().SecurityRejects["destination_invalid"]; got != 1 {
+		t.Errorf("destination_invalid metric = %d, want 1", got)
+	}
+}
+
+func TestSaveRejectsConfigFileAndDirectorySymlinks(t *testing.T) {
+	t.Run("file", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := filepath.Join(home, ".rdev")
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		external := filepath.Join(t.TempDir(), "victim")
+		if err := os.WriteFile(external, []byte("sentinel"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, filepath.Join(configDir, "hosts.json")); err != nil {
+			t.Fatal(err)
+		}
+		r := NewRegistry()
+		_ = r.Add(transport.Host{Name: "dev", Addr: "u@h"})
+		r.SetScope("dev", ScopeGlobal)
+		if err := r.Save(ScopeGlobal); err == nil {
+			t.Fatal("Save followed a hosts.json symlink")
+		}
+		if b, _ := os.ReadFile(external); string(b) != "sentinel" {
+			t.Fatalf("symlink target changed to %q", b)
+		}
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		home := t.TempDir()
+		project := t.TempDir()
+		external := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Chdir(project)
+		if err := os.Symlink(external, filepath.Join(project, ".rdev")); err != nil {
+			t.Fatal(err)
+		}
+		r := NewRegistry()
+		_ = r.Add(transport.Host{Name: "dev", Addr: "u@h"})
+		r.SetScope("dev", ScopeProject)
+		if err := r.Save(ScopeProject); err == nil {
+			t.Fatal("Save followed a .rdev directory symlink")
+		}
+		if _, err := os.Stat(filepath.Join(external, "hosts.json")); !os.IsNotExist(err) {
+			t.Fatalf("directory symlink target was written: %v", err)
+		}
+	})
+}
+
+func TestLoadRejectsProjectConfigSymlink(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	if err := os.MkdirAll(filepath.Join(home, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".rdev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "hosts.json")
+	if err := os.WriteFile(external, []byte(`{"hosts":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(project, ".rdev", "hosts.json")); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	if err := r.Load(); err == nil || !strings.Contains(err.Error(), "no-follow") {
+		t.Fatalf("Load symlink error = %v", err)
+	}
+	if got := r.SecuritySnapshot().SecurityRejects["config_symlink"]; got != 1 {
+		t.Errorf("config_symlink metric = %d, want 1", got)
+	}
+}
+
+func TestSaveIsAtomicAndRepairsModes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".rdev")
+	if err := os.MkdirAll(configDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "hosts.json")
+	if err := os.WriteFile(path, []byte("old"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	_ = r.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	r.SetScope("dev", ScopeGlobal)
+	if err := r.Save(ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+	fileInfo, _ := os.Stat(path)
+	dirInfo, _ := os.Stat(configDir)
+	if fileInfo.Mode().Perm() != 0o600 || dirInfo.Mode().Perm() != 0o700 {
+		t.Errorf("modes file=%o dir=%o, want 600/700", fileInfo.Mode().Perm(), dirInfo.Mode().Perm())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || !json.Valid(b) {
+		t.Fatalf("saved config is not complete JSON: %q, %v", b, err)
+	}
+}
+
+func TestAtomicConfigWriteConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts.json")
+	payloads := [][]byte{
+		[]byte(`{"hosts":[{"name":"a","addr":"u@a"}]}`),
+		[]byte(`{"hosts":[{"name":"b","addr":"u@b"}]}`),
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for worker := 0; worker < 32; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				if err := atomicWriteConfigFile(path, payloads[(worker+i)%len(payloads)]); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(b) || (string(b) != string(payloads[0]) && string(b) != string(payloads[1])) {
+		t.Fatalf("concurrent writers exposed partial content: %q", b)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "hosts.json" {
+		t.Fatalf("temporary files leaked after writes: %v", entries)
 	}
 }
