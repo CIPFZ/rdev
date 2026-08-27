@@ -549,7 +549,7 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 
 本轮完成：**job 记录并发安全**（决策 8，flock；实测过的两种错误答案里，「全员谎报删除成功」比裸 errno 更危险）、**拒绝静默降级 agent**（决策 10；hash 比不出新旧，所以最后连上的永远赢）、**构建标识 + `make check-agents`**（`rdev version` 现在能回答「我这个二进制带的什么 agent」）、**`secrets` CLI 面对齐**（`set` 不是漏了而是做不到，写下来了）。
 
-安全演进 Batch A 已完成 Phase 1：项目配置摘要审批、canonical host generation 连接淘汰、事务式批准、集中 SSH destination/`RemoteDir` 校验、安全 bootstrap staging、配置 no-follow/owner/mode/ACL/原子写，以及 rsync `--`/路径验证。独立 Ubuntu 实机和 Claude Code MCP 只读链路已通过。Phase 0 只落了本批需要的 `SECURITY.md`、安全事件/低基数指标 seam、characterization/race 测试和支持矩阵基础；连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd harness 与 fuzz 基础设施仍按[演进规划](docs/rdev-evolution-security-plan.md)后续实施。
+安全演进 Batch A 已实现 Phase 1 的项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、fd/inode 绑定的安全 bootstrap staging、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证；第二轮审查修复正等待独立复验，尚不标记批次完成。此前独立 Ubuntu 实机和 Claude Code MCP 只读链路已通过，本轮修复后的全新 Ubuntu 目录首次 bootstrap 也已重新实机通过并清理。Phase 0 只落了本批需要的 `SECURITY.md`、安全事件/低基数指标 seam、characterization/race 测试和支持矩阵基础；连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd harness 与 fuzz 基础设施仍按[演进规划](docs/rdev-evolution-security-plan.md)后续实施。
 
 **P1 — `exec` 的流式输出。** 命令跑完(或超时)才返回,期间拿不到增量。
 实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,

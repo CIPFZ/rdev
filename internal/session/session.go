@@ -50,6 +50,13 @@ const (
 
 // Registry tracks known hosts and their state. Safe for concurrent use.
 type Registry struct {
+	// Lock order for identity-changing writes is: per-alias lease(s), tx, mu.
+	// A sink holds only one alias lease for its lifetime, so a slow operation on
+	// one machine never serializes unrelated hosts. Multi-alias publications
+	// sort names before locking to avoid lock-order cycles.
+	leaseMu      sync.Mutex
+	identity     map[string]*sync.RWMutex
+	approvalMu   sync.Mutex
 	tx           sync.Mutex
 	mu           sync.RWMutex
 	hosts        map[string]transport.Host
@@ -58,6 +65,7 @@ type Registry struct {
 	generations  map[string]uint64
 	nextGen      uint64
 	projectTrust ProjectTrust
+	fatal        error
 	observe      *observe.Registry
 	onHostChange func(string, uint64)
 	io           registryIO
@@ -75,8 +83,49 @@ func NewRegistry() *Registry {
 		state:       make(map[string]*State),
 		scopes:      make(map[string]Scope),
 		generations: make(map[string]uint64),
+		identity:    make(map[string]*sync.RWMutex),
 		observe:     observe.New(nil),
 		io:          registryIO{read: readConfigFile, marshal: json.MarshalIndent, write: atomicWriteConfigFile},
+	}
+}
+
+func (r *Registry) identityLease(name string) *sync.RWMutex {
+	r.leaseMu.Lock()
+	defer r.leaseMu.Unlock()
+	lease := r.identity[name]
+	if lease == nil {
+		lease = &sync.RWMutex{}
+		r.identity[name] = lease
+	}
+	return lease
+}
+
+func candidateNames(candidates []hostCandidate) []string {
+	names := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		name := candidate.host.Name
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (r *Registry) lockIdentityWrites(names []string) func() {
+	leases := make([]*sync.RWMutex, 0, len(names))
+	for _, name := range names {
+		lease := r.identityLease(name)
+		lease.Lock()
+		leases = append(leases, lease)
+	}
+	return func() {
+		for i := len(leases) - 1; i >= 0; i-- {
+			leases[i].Unlock()
+		}
 	}
 }
 
@@ -118,6 +167,26 @@ func (r *Registry) SecuritySnapshot() observe.Snapshot {
 	registry := r.observe
 	r.mu.RUnlock()
 	return registry.Snapshot()
+}
+
+func (r *Registry) fatalError() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.fatal == nil {
+		return nil
+	}
+	return fmt.Errorf("registry stopped after ambiguous authorization-state write: %w", r.fatal)
+}
+
+func (r *Registry) stopOnAmbiguousWrite(err error) {
+	if !configWriteAmbiguous(err) {
+		return
+	}
+	r.mu.Lock()
+	if r.fatal == nil {
+		r.fatal = err
+	}
+	r.mu.Unlock()
 }
 
 func (r *Registry) reject(reason observe.SecurityReason, target string) {
@@ -331,6 +400,9 @@ func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, erro
 // A missing file at either level is not an error; hosts can also be registered
 // at runtime.
 func (r *Registry) Load() error {
+	if err := r.fatalError(); err != nil {
+		return err
+	}
 	global, err := ConfigPath()
 	if err != nil {
 		return err
@@ -389,6 +461,8 @@ func (r *Registry) loadBytes(path string, b []byte, scope Scope) error {
 	if err != nil {
 		return err
 	}
+	releaseIdentities := r.lockIdentityWrites(candidateNames(candidates))
+	defer releaseIdentities()
 	r.tx.Lock()
 	r.mu.Lock()
 	s := r.snapshotLocked()
@@ -409,6 +483,9 @@ func (r *Registry) loadBytes(path string, b []byte, scope Scope) error {
 // Only hosts belonging to that scope are written, so saving the global file does
 // not silently absorb a project's private hosts (and vice versa).
 func (r *Registry) Save(scope Scope) error {
+	if err := r.fatalError(); err != nil {
+		return err
+	}
 	r.tx.Lock()
 	defer r.tx.Unlock()
 	var path string
@@ -464,7 +541,9 @@ func (r *Registry) Save(scope Scope) error {
 	}
 	// Written 0600: it records hostnames and usernames, not secrets, but there
 	// is no reason to make it world-readable.
-	return r.io.write(path, append(b, '\n'))
+	err = r.io.write(path, append(b, '\n'))
+	r.stopOnAmbiguousWrite(err)
+	return err
 }
 
 func digestBytes(b []byte) string {
@@ -524,8 +603,14 @@ func (r *Registry) ProjectTrustStatus() ProjectTrust {
 // ApproveProject loads the current project config only after the caller repeats
 // its exact digest. The approval is persisted outside the repository.
 func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
-	r.tx.Lock()
-	defer r.tx.Unlock()
+	if err := r.fatalError(); err != nil {
+		return ProjectTrust{}, err
+	}
+	// Approval persistence is serialized separately from live registry writes.
+	// In particular, never hold tx while waiting for an alias lease: otherwise
+	// an active command on host A would also block an update to host B.
+	r.approvalMu.Lock()
+	defer r.approvalMu.Unlock()
 
 	projectPath, err := ProjectConfigPath()
 	if err != nil {
@@ -543,14 +628,6 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	if err != nil {
 		return trust, err
 	}
-
-	// Build the complete replacement off to the side. Live readers continue to
-	// see the old generation until trust persistence has fully succeeded.
-	r.mu.RLock()
-	staged := r.snapshotLocked()
-	r.mu.RUnlock()
-	changed := applyCandidates(&staged, candidates, ScopeProject)
-	staged.trust = trust
 
 	tf, err := r.loadTrustFile()
 	if err != nil {
@@ -574,22 +651,34 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	if err != nil {
 		return trust, err
 	}
-	if err := r.io.write(p, append(out, '\n')); err != nil {
-		return trust, err
+	writeErr := r.io.write(p, append(out, '\n'))
+	if writeErr != nil && !configWriteCommitted(writeErr) {
+		r.stopOnAmbiguousWrite(writeErr)
+		return trust, writeErr
 	}
+
+	// The trust record is durable. Pin every affected alias before taking the
+	// current live snapshot so publication is atomic with respect to active
+	// sinks while unrelated aliases remain fully independent.
+	releaseIdentities := r.lockIdentityWrites(candidateNames(candidates))
+	defer releaseIdentities()
+	r.tx.Lock()
 	trust.Approved = true
-	staged.trust = trust
 	r.mu.Lock()
+	staged := r.snapshotLocked()
+	changed := applyCandidates(&staged, candidates, ScopeProject)
+	staged.trust = trust
 	hook, generations := r.publishLocked(staged)
 	registry := r.observe
 	r.mu.Unlock()
+	r.tx.Unlock()
 	if hook != nil {
 		for _, name := range changed {
 			hook(name, generations[name])
 		}
 	}
 	registry.ProjectApproved(trust.Path)
-	return trust, nil
+	return trust, writeErr
 }
 
 // SetScope records which config file a host belongs to.
@@ -613,6 +702,9 @@ func (r *Registry) ScopeOf(name string) Scope {
 
 // Add registers or replaces a validated host, initializing its state.
 func (r *Registry) Add(h transport.Host) error {
+	if err := r.fatalError(); err != nil {
+		return err
+	}
 	if err := transport.ValidateHost(h); err != nil {
 		reason := observe.ReasonConfigInvalid
 		if destErr := transport.ValidateDestination(h.Addr, h.Port); destErr != nil {
@@ -626,6 +718,8 @@ func (r *Registry) Add(h transport.Host) error {
 	if h.Name == "" {
 		h.Name = h.Addr
 	}
+	releaseIdentity := r.lockIdentityWrites([]string{h.Name})
+	defer releaseIdentity()
 	r.tx.Lock()
 	r.mu.Lock()
 	old, exists := r.hosts[h.Name]
@@ -662,6 +756,9 @@ func (r *Registry) Host(name string) (transport.Host, error) {
 // Resolve returns a host together with the immutable identity used by the
 // connection pool.
 func (r *Registry) Resolve(name string) (ResolvedHost, error) {
+	if err := r.fatalError(); err != nil {
+		return ResolvedHost{}, err
+	}
 	r.mu.RLock()
 	h, ok := r.hosts[name]
 	generation := r.generations[name]
@@ -682,16 +779,24 @@ func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 	return ResolvedHost{}, fmt.Errorf("unknown host %q (known: %s)", name, strings.Join(r.Names(), ", "))
 }
 
-// AcquireIdentity pins one resolved identity until release. A Registry update
-// cannot publish while a sink using the old identity is in progress.
+// AcquireIdentity pins one resolved identity until release. An update to this
+// alias cannot publish while a sink using the old identity is in progress;
+// updates to all other aliases remain independent.
 func (r *Registry) AcquireIdentity(name string, generation uint64, fingerprint string) (func(), bool) {
+	if r.fatalError() != nil {
+		return nil, false
+	}
+	lease := r.identityLease(name)
+	lease.RLock()
 	r.mu.RLock()
 	h, ok := r.hosts[name]
 	if !ok || r.generations[name] != generation || hostFingerprint(h) != fingerprint {
 		r.mu.RUnlock()
+		lease.RUnlock()
 		return nil, false
 	}
-	return r.mu.RUnlock, true
+	r.mu.RUnlock()
+	return lease.RUnlock, true
 }
 
 // parseDestination interprets "user@host", "user@host:port", or "host:port".

@@ -180,16 +180,20 @@ func atomicWriteConfigFileWithHook(path string, data []byte, hook func(string) e
 	tmp := "." + base + ".tmp-" + hex.EncodeToString(random[:])
 	backup := tmp + ".old"
 	backupExists := false
+	preserveBackup := false
 	if existed {
 		if err := unix.Linkat(dirFD, base, dirFD, backup, 0); err != nil {
 			return fmt.Errorf("preserve prior config %s: %w", path, err)
 		}
 		backupExists = true
 		defer func() {
-			if backupExists {
+			if backupExists && !preserveBackup {
 				_ = unix.Unlinkat(dirFD, backup, 0)
 			}
 		}()
+		if err := unix.Fsync(dirFD); err != nil {
+			return fmt.Errorf("durably preserve prior config %s: %w", path, err)
+		}
 	}
 	tmpFD, err := unix.Openat(dirFD, tmp,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
@@ -236,32 +240,56 @@ func atomicWriteConfigFileWithHook(path string, data []byte, hook func(string) e
 		return fmt.Errorf("atomically replace config %s: %w", path, err)
 	}
 	cleanup = false
-	if err := fail("dir-fsync"); err != nil {
+	rollback := func(commitErr error) error {
 		if backupExists {
-			_ = unix.Renameat(dirFD, backup, dirFD, base)
+			if err := fail("rollback-rename"); err != nil {
+				preserveBackup = true
+				return &ConfigWriteAmbiguousError{Cause: commitErr, Rollback: err}
+			}
+			if err := unix.Renameat(dirFD, backup, dirFD, base); err != nil {
+				preserveBackup = true
+				return &ConfigWriteAmbiguousError{Cause: commitErr, Rollback: fmt.Errorf("restore prior config: %w", err)}
+			}
 			backupExists = false
 		} else {
-			_ = unix.Unlinkat(dirFD, base, 0)
+			if err := fail("rollback-unlink"); err != nil {
+				return &ConfigWriteAmbiguousError{Cause: commitErr, Rollback: err}
+			}
+			if err := unix.Unlinkat(dirFD, base, 0); err != nil {
+				return &ConfigWriteAmbiguousError{Cause: commitErr, Rollback: fmt.Errorf("remove uncommitted config: %w", err)}
+			}
 		}
-		_ = unix.Fsync(dirFD)
-		return err
+		if err := fail("rollback-fsync"); err != nil {
+			return &ConfigWriteAmbiguousError{Cause: commitErr, Rollback: err}
+		}
+		if err := unix.Fsync(dirFD); err != nil {
+			return &ConfigWriteAmbiguousError{Cause: commitErr, Rollback: fmt.Errorf("fsync rollback: %w", err)}
+		}
+		return commitErr
+	}
+	if err := fail("dir-fsync"); err != nil {
+		return rollback(err)
 	}
 	if err := unix.Fsync(dirFD); err != nil {
-		if backupExists {
-			_ = unix.Renameat(dirFD, backup, dirFD, base)
-			backupExists = false
-		} else {
-			_ = unix.Unlinkat(dirFD, base, 0)
-		}
-		_ = unix.Fsync(dirFD)
-		return fmt.Errorf("fsync config directory %s: %w", filepath.Dir(path), err)
+		return rollback(fmt.Errorf("fsync config directory %s: %w", filepath.Dir(path), err))
 	}
+	// Commit point: the new file and its directory entry are now durable.
 	if backupExists {
+		if err := fail("backup-unlink"); err != nil {
+			preserveBackup = true
+			return &ConfigWriteCommittedError{Cause: err}
+		}
 		if err := unix.Unlinkat(dirFD, backup, 0); err != nil {
-			return fmt.Errorf("remove prior config backup: %w", err)
+			preserveBackup = true
+			return &ConfigWriteCommittedError{Cause: fmt.Errorf("remove prior config backup: %w", err)}
 		}
 		backupExists = false
-		_ = unix.Fsync(dirFD) // cleanup durability is not part of the authorization commit
+		if err := fail("cleanup-fsync"); err != nil {
+			return &ConfigWriteCommittedError{Cause: err}
+		}
+		if err := unix.Fsync(dirFD); err != nil {
+			return &ConfigWriteCommittedError{Cause: fmt.Errorf("fsync backup cleanup: %w", err)}
+		}
 	}
 	return nil
 }

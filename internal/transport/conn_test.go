@@ -478,7 +478,161 @@ func TestShellCommandKeepsDynamicValuesOutOfProgram(t *testing.T) {
 func runLocalInstallScript(stage, target string, data []byte, want string) error {
 	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, want)
 	cmd.Stdin = bytes.NewReader(data)
-	return cmd.Run()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func TestInstallScriptUsesPortableFDBoundRegularFileChecks(t *testing.T) {
+	for _, localizedTypeProbe := range []string{"%F", "%HT", "regular file", "Regular File"} {
+		if strings.Contains(installAgentScript, localizedTypeProbe) {
+			t.Fatalf("install script still depends on stat type text %q", localizedTypeProbe)
+		}
+	}
+	for _, invariant := range []string{
+		`[ -f "$fd" ]`,
+		`[ "$(ident "$ready")" = "$(ident "$fd")" ]`,
+		`[ "$(ident "$readfd")" = "$(ident "$fd")" ]`,
+		`[ "$(ident "$target")" = "$(ident "$fd")" ]`,
+	} {
+		if !strings.Contains(installAgentScript, invariant) {
+			t.Fatalf("install script missing fd/inode invariant %q", invariant)
+		}
+	}
+	data := []byte("first-install-on-an-empty-staging-file")
+	root := t.TempDir()
+	target := filepath.Join(root, "installed")
+	if err := runLocalInstallScript(filepath.Join(root, "stage"), target, data, fmt.Sprintf("%x", sha256.Sum256(data))); err != nil {
+		t.Fatalf("first install failed: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("installed bytes=%q err=%v", got, err)
+	}
+}
+
+func TestSecureAgentStagingRejectsPathReplacementWhileFDIsOpen(t *testing.T) {
+	root := t.TempDir()
+	stage := filepath.Join(root, "stage")
+	target := filepath.Join(root, "installed")
+	victim := filepath.Join(root, "victim")
+	if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(victim, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(strings.Repeat("new-agent", 1024))
+	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, fmt.Sprintf("%x", sha256.Sum256(data)))
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(stage, "agent")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if info, statErr := os.Lstat(file); statErr == nil && info.Mode().IsRegular() {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatal("staging file was not created")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, file); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = stdin.Write(data)
+	_ = stdin.Close()
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("path replacement was accepted despite the open staging fd")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+		t.Fatalf("installed agent changed to %q", got)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "sentinel" {
+		t.Fatalf("replacement link target changed to %q", got)
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("staging residue: %v", err)
+	}
+}
+
+func TestSecureAgentInstallRollsBackReadyReplacementAfterDigest(t *testing.T) {
+	root := t.TempDir()
+	stage := filepath.Join(root, "stage")
+	target := filepath.Join(root, "installed")
+	if err := os.WriteFile(target, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entered := filepath.Join(root, "mv-entered")
+	release := filepath.Join(root, "mv-release")
+	once := filepath.Join(root, "mv-once")
+	wrapper := `#!/bin/sh
+set -eu
+if mkdir "$RDEV_MV_ONCE" 2>/dev/null; then
+  : > "$RDEV_MV_ENTERED"
+  while [ ! -e "$RDEV_MV_RELEASE" ]; do sleep 0.01; done
+fi
+exec /bin/mv "$@"
+`
+	if err := os.WriteFile(filepath.Join(bin, "mv"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(strings.Repeat("verified-agent", 1024))
+	cmd := exec.Command("sh", "-c", installAgentScript, "rdev-install", stage, target, fmt.Sprintf("%x", sha256.Sum256(data)))
+	cmd.Stdin = bytes.NewReader(data)
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RDEV_MV_ENTERED="+entered,
+		"RDEV_MV_RELEASE="+release,
+		"RDEV_MV_ONCE="+once,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatal("install did not reach the post-digest rename")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ready := filepath.Join(stage, "ready")
+	if err := os.Remove(ready); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ready, []byte("replacement"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("post-digest path replacement was accepted")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "old-agent" {
+		t.Fatalf("failed install did not restore old agent: %q", got)
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("staging residue: %v", err)
+	}
 }
 
 func TestSecureAgentStagingRejectsExistingObjects(t *testing.T) {

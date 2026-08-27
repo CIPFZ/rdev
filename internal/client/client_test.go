@@ -708,3 +708,83 @@ func TestIdentityLeaseCoversExecReadWriteAndSync(t *testing.T) {
 		})
 	}
 }
+
+func TestHostALeaseDoesNotBlockHostBIdentityUpdate(t *testing.T) {
+	c := newTestClient()
+	entered, release := make(chan struct{}), make(chan struct{})
+	oldA := &fakeRemoteConn{
+		host:    transport.Host{Name: "a", Addr: "u@old-a"},
+		entered: entered,
+		release: release,
+	}
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		if h.Name == "a" {
+			return oldA, nil
+		}
+		return &fakeRemoteConn{host: h}, nil
+	}
+	if err := c.Hosts.Add(oldA.host); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Hosts.Add(transport.Host{Name: "b", Addr: "u@old-b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	opDone := make(chan error, 1)
+	go func() {
+		_, err := c.Exec(context.Background(), ExecOptions{Host: "a", Argv: []string{"true"}})
+		opDone <- err
+	}()
+	<-entered
+
+	updateA := make(chan error, 1)
+	go func() { updateA <- c.Hosts.Add(transport.Host{Name: "a", Addr: "u@new-a"}) }()
+	select {
+	case err := <-updateA:
+		t.Fatalf("same-alias update completed during active operation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	updateB := make(chan error, 1)
+	go func() { updateB <- c.Hosts.Add(transport.Host{Name: "b", Addr: "u@new-b"}) }()
+	select {
+	case err := <-updateB:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("host A lease blocked unrelated host B update")
+	}
+	if h, _ := c.Hosts.Host("b"); h.Addr != "u@new-b" {
+		t.Fatalf("host B update published %+v", h)
+	}
+
+	close(release)
+	if err := <-opDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updateA; err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := c.Hosts.Host("a"); h.Addr != "u@new-a" {
+		t.Fatalf("host A update published %+v", h)
+	}
+	oldA.mu.Lock()
+	closed := oldA.closed
+	oldA.mu.Unlock()
+	if !closed {
+		t.Fatal("same-alias publication did not evict old connection")
+	}
+
+	var redials int
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		redials++
+		return &fakeRemoteConn{host: h}, nil
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "a", Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if redials != 1 {
+		t.Fatalf("post-update executions dialed %d times, want one new identity", redials)
+	}
+}

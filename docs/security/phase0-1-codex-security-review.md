@@ -88,3 +88,19 @@ Phase 2+ items such as host-scoped secrets, pre-publication secret initializatio
 non-idempotent replay semantics, response/resource bounds, job identity/ownership,
 ControlMaster directory hardening, and broker capability isolation remain open.
 They are not accepted risks and must satisfy their later phase gates.
+
+## Second-round remediation addendum
+
+Follow-up verification found that the first remediation still held the Registry
+global read lock for an operation lifetime, used localized Darwin/GNU `stat`
+type text during bootstrap, left a pathname identity interval between digest and
+rename, treated post-commit backup cleanup as an uncommitted approval failure,
+and queried Darwin ACLs by pathname. The follow-up patch replaces those controls
+with sorted per-alias leases, numeric plus `test -f` regular-file checks,
+fd/inode-bound digest and hard-link publication with rollback, an explicit
+directory-fsync commit point with typed committed/ambiguous outcomes, and
+`acl_get_fd_np` inspection (fail-closed without cgo). Host-secret reads during
+connection initialization remain a Phase 2 item; the Phase 1 lease claim covers
+the public exec/read/write/sync sinks only. The patch has implementation-task
+tests and a fresh Ubuntu first-bootstrap run, but remains pending independent
+review and is not recorded here as a completed batch.

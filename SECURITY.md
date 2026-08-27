@@ -48,15 +48,26 @@ host's SSH account; rdev does not sandbox commands within that account.
   validated for the representation used by local rsync and the remote shell.
 - Config and trust files are regular files beneath non-symlink config
   directories. POSIX reads require effective-user ownership, no group/other
-  write authority, and no recognized extended ACL. Writes use a same-directory
-  0600 temporary file, file fsync, atomic rename, and directory fsync; final
-  directories are 0700 and a post-rename durability failure restores old state.
+  write authority, and no recognized extended ACL. Darwin ACL inspection is
+  bound to the already-open descriptor; builds without that native capability
+  fail closed. Writes use a same-directory 0600 temporary file, file fsync,
+  atomic rename, and directory fsync; final directories are 0700. The first
+  successful post-rename directory fsync is the commit point: failures before
+  it require a durably verified rollback, ambiguous rollback stops the Registry,
+  and failures that only clean a backup are reported as committed warnings.
 - A pooled connection is valid only for the current immutable canonical host
   fingerprint and Registry generation. Alias replacement atomically publishes
-  approval/config state and invalidates every old connection consumer.
+  approval/config state and invalidates old connections used by the public
+  exec/read/write/sync sinks. Their operation leases are per alias, so one
+  host's long operation does not block unrelated host updates. Pre-publication
+  host-secret initialization remains a Phase 2 boundary and is not covered by
+  this Batch A lease guarantee.
 - Agent bootstrap writes only through an exclusively-created unpredictable
-  staging object whose type, owner, link count, inode, and digest are checked
-  before atomic installation. Failure never replaces the installed agent.
+  staging object. Regular-file type is checked without localized `stat` text;
+  owner, link count, inode, and digest stay bound to open descriptors and a
+  verified hard-link snapshot through installation. First publication is
+  no-replace, replacement keeps a rollback link, and failed verification does
+  not leave a replaced installed agent.
 - Project config remains data after approval. Invalid destinations, paths, ports,
   and unsupported schema fail before any entry is merged into live state.
 - Registered secret values do not persist to config, cross host/principal scope,

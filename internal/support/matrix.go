@@ -25,7 +25,7 @@ func Snapshot() Matrix {
 	return Matrix{
 		SchemaVersion: SchemaVersion,
 		Local: []Platform{
-			{OS: "darwin", Arch: "arm64", Tier: "tier1", Status: "development and test baseline"},
+			{OS: "darwin", Arch: "arm64", Tier: "tier1", Status: "development/test baseline; fd-native config ACL checks require cgo, otherwise fail closed"},
 			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "cross-build only"},
 			{OS: "linux", Arch: "amd64", Tier: "build", Status: "cross-build only"},
 			{OS: "linux", Arch: "arm64", Tier: "build", Status: "cross-build only"},

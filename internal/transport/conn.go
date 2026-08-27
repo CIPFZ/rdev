@@ -616,39 +616,118 @@ stage=$1
 target=$2
 want=$3
 file=$stage/agent
+ready=$stage/ready
+old=$stage/old
 owned=0
-cleanup() { if [ "$owned" = 1 ]; then rm -f -- "$file"; rmdir -- "$stage" 2>/dev/null || true; fi; }
+installing=0
+installed=0
+had_target=0
+cleanup() {
+  if [ "$installing" = 1 ] && [ "$installed" = 0 ]; then
+    if [ "$had_target" = 1 ] && [ -f "$old" ] && [ ! -L "$old" ]; then
+      mv -f -- "$old" "$target" 2>/dev/null || true
+    else
+      rm -f -- "$target" 2>/dev/null || true
+    fi
+  fi
+  if [ "$owned" = 1 ]; then
+    rm -f -- "$file" "$ready" "$old"
+    rmdir -- "$stage" 2>/dev/null || true
+  fi
+}
 trap cleanup EXIT HUP INT TERM
 umask 077
 mkdir -- "$stage"
 owned=1
 chmod 700 "$stage"
 set -C
-exec 3> "$file"
+exec 8> "$file"
 uid=$(id -u)
-if stat -c '%u:%h:%F' -- "$file" >/dev/null 2>&1; then
-  meta() { stat -c '%u:%h:%F' -- "$1"; }
+if stat -c '%u:%h' -- "$file" >/dev/null 2>&1; then
+  meta() { stat -Lc '%u:%h' -- "$1"; }
+  owner() { stat -Lc '%u' -- "$1"; }
+  links() { stat -Lc '%h' -- "$1"; }
   ident() { stat -Lc '%d:%i' -- "$1"; }
-  fd=/proc/$$/fd/3
-  regular="$uid:1:regular file"
+  fd=/proc/$$/fd/8
+  readfd=/proc/$$/fd/9
   digest() { sha256sum -- "$1" | awk '{print $1}'; }
 else
-  meta() { stat -f '%u:%l:%HT' -- "$1"; }
+  meta() { stat -f '%u:%l' -- "$1"; }
+  owner() { stat -f '%u' -- "$1"; }
+  links() { stat -f '%l' -- "$1"; }
   ident() { stat -f '%i' -- "$1"; }
-  fd=/dev/fd/3
-  regular="$uid:1:Regular File"
+  fd=/dev/fd/8
+  readfd=/dev/fd/9
   digest() { shasum -a 256 -- "$1" | awk '{print $1}'; }
 fi
-[ "$(meta "$file")" = "$regular" ]
+[ -f "$fd" ]
+[ ! -L "$file" ]
+[ "$(meta "$fd")" = "$uid:1" ]
 [ "$(ident "$file")" = "$(ident "$fd")" ]
-dd bs=65536 >&3 2>/dev/null
-[ "$(meta "$file")" = "$regular" ]
+dd bs=65536 >&8 2>/dev/null
+[ -f "$fd" ]
+[ ! -L "$file" ]
+[ "$(meta "$fd")" = "$uid:1" ]
 [ "$(ident "$file")" = "$(ident "$fd")" ]
-exec 3>&-
-[ "$(digest "$file")" = "$want" ]
-chmod 755 "$file"
-[ "$(meta "$file")" = "$uid:1:regular file" ] 2>/dev/null || [ "$(meta "$file")" = "$uid:1:Regular File" ]
-mv -f -- "$file" "$target"
+chmod 755 "$fd"
+ln -- "$file" "$ready"
+[ -f "$ready" ]
+[ ! -L "$ready" ]
+[ "$(meta "$fd")" = "$uid:2" ]
+[ "$(ident "$ready")" = "$(ident "$fd")" ]
+rm -f -- "$file"
+[ -f "$ready" ]
+[ ! -L "$ready" ]
+[ "$(meta "$fd")" = "$uid:1" ]
+[ "$(ident "$ready")" = "$(ident "$fd")" ]
+exec 9< "$ready"
+[ -f "$readfd" ]
+[ "$(meta "$readfd")" = "$uid:1" ]
+[ "$(ident "$readfd")" = "$(ident "$fd")" ]
+[ "$(digest "$readfd")" = "$want" ]
+exec 9<&-
+[ "$(ident "$ready")" = "$(ident "$fd")" ]
+preserve_target() {
+  [ -f "$target" ]
+  [ ! -L "$target" ]
+  [ "$(owner "$target")" = "$uid" ]
+  [ "$(links "$target")" -ge 1 ]
+  ln -- "$target" "$old"
+  [ -f "$old" ]
+  [ ! -L "$old" ]
+  [ "$(owner "$old")" = "$uid" ]
+  [ "$(links "$old")" -ge 2 ]
+  [ "$(ident "$target")" = "$(ident "$old")" ]
+  had_target=1
+}
+if [ -e "$target" ] || [ -L "$target" ]; then
+  preserve_target
+  [ "$(ident "$target")" = "$(ident "$old")" ]
+  installing=1
+  mv -f -- "$ready" "$target"
+else
+  # link(2) provides no-replace publication for the first install. A racing
+  # bootstrap that wins this name makes this command fail without removing it.
+  if ln -- "$ready" "$target"; then
+    installing=1
+    rm -f -- "$ready"
+  else
+    # Another valid bootstrap may have won the absent-target race. Re-enter
+    # the verified replacement path; links and non-regular objects still fail.
+    preserve_target
+    [ "$(ident "$target")" = "$(ident "$old")" ]
+    installing=1
+    mv -f -- "$ready" "$target"
+  fi
+fi
+[ -f "$target" ]
+[ ! -L "$target" ]
+[ "$(owner "$fd")" = "$uid" ]
+[ "$(links "$fd")" -ge 1 ]
+[ "$(ident "$target")" = "$(ident "$fd")" ]
+installed=1
+rm -f -- "$old"
+exec 8>&-
 rmdir -- "$stage"
 trap - EXIT HUP INT TERM`
 

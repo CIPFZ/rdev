@@ -707,6 +707,138 @@ func TestApproveProjectPublishesOnlyAfterDurableWrite(t *testing.T) {
 	}
 }
 
+func trustStoreContains(t *testing.T, path, digest string) bool {
+	t.Helper()
+	p, err := trustPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tf trustFile
+	if err := json.Unmarshal(b, &tf); err != nil {
+		t.Fatalf("parse trust store: %v", err)
+	}
+	for _, project := range tf.Projects {
+		if project.Path == path && project.Digest == digest {
+			return true
+		}
+	}
+	return false
+}
+
+func seedPriorTrustStore(t *testing.T) {
+	t.Helper()
+	p, err := trustPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := []byte("{\n  \"version\": 1,\n  \"projects\": [{\"path\": \"/prior\", \"digest\": \"old\"}]\n}\n")
+	if err := atomicWriteConfigFile(p, prior); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApproveProjectWriteOutcomeSemantics(t *testing.T) {
+	tests := []struct {
+		name          string
+		seedPrior     bool
+		failStages    map[string]bool
+		ambiguous     bool
+		committed     bool
+		diskApproved  bool
+		livePublished bool
+	}{
+		{
+			name:       "first directory fsync rolls back",
+			failStages: map[string]bool{"dir-fsync": true},
+		},
+		{
+			name:         "rollback rename failure is fatal ambiguous",
+			seedPrior:    true,
+			failStages:   map[string]bool{"dir-fsync": true, "rollback-rename": true},
+			ambiguous:    true,
+			diskApproved: true,
+		},
+		{
+			name:         "rollback unlink failure is fatal ambiguous",
+			failStages:   map[string]bool{"dir-fsync": true, "rollback-unlink": true},
+			ambiguous:    true,
+			diskApproved: true,
+		},
+		{
+			name:       "rollback fsync failure is fatal ambiguous",
+			failStages: map[string]bool{"dir-fsync": true, "rollback-fsync": true},
+			ambiguous:  true,
+		},
+		{
+			name:          "backup unlink failure is committed warning",
+			seedPrior:     true,
+			failStages:    map[string]bool{"backup-unlink": true},
+			committed:     true,
+			diskApproved:  true,
+			livePublished: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, pending := setupApprovalTransaction(t)
+			if tc.seedPrior {
+				seedPriorTrustStore(t)
+			}
+			r.io.write = func(path string, data []byte) error {
+				return atomicWriteConfigFileWithHook(path, data, func(stage string) error {
+					if tc.failStages[stage] {
+						return errors.New("injected " + stage + " failure")
+					}
+					return nil
+				})
+			}
+			trust, err := r.ApproveProject(pending.Digest)
+			if err == nil {
+				t.Fatal("injected write failure returned nil")
+			}
+			var ambiguous *ConfigWriteAmbiguousError
+			if got := errors.As(err, &ambiguous); got != tc.ambiguous {
+				t.Fatalf("ambiguous=%v, want %v: %v", got, tc.ambiguous, err)
+			}
+			var committed *ConfigWriteCommittedError
+			if got := errors.As(err, &committed); got != tc.committed {
+				t.Fatalf("committed=%v, want %v: %v", got, tc.committed, err)
+			}
+			if got := trustStoreContains(t, pending.Path, pending.Digest); got != tc.diskApproved {
+				t.Fatalf("disk approval=%v, want %v", got, tc.diskApproved)
+			}
+			r.mu.RLock()
+			liveHost := r.hosts["dev"]
+			liveTrust := r.projectTrust
+			fatal := r.fatal
+			r.mu.RUnlock()
+			if got := liveHost.Addr == "u@new" && liveTrust.Approved; got != tc.livePublished {
+				t.Fatalf("live publication=%v host=%+v trust=%+v", got, liveHost, liveTrust)
+			}
+			if tc.committed && (!trust.Approved || fatal != nil) {
+				t.Fatalf("committed warning did not return published trust: trust=%+v fatal=%v", trust, fatal)
+			}
+			if tc.ambiguous {
+				if fatal == nil {
+					t.Fatal("ambiguous write did not stop registry")
+				}
+				if _, resolveErr := r.Resolve("dev"); resolveErr == nil || !strings.Contains(resolveErr.Error(), "registry stopped") {
+					t.Fatalf("ordinary service continued after ambiguous write: %v", resolveErr)
+				}
+			} else if fatal != nil {
+				t.Fatalf("non-ambiguous outcome stopped registry: %v", fatal)
+			}
+		})
+	}
+}
+
 func TestHostIdentityGenerationChangesAndNeverReuses(t *testing.T) {
 	r := NewRegistry()
 	for i, h := range []transport.Host{
