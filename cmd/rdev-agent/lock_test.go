@@ -6,7 +6,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -73,6 +75,137 @@ func TestJobRecencyOrderHandlesMixedPrecisionAndTies(t *testing.T) {
 func TestDirSizeFailsClosedWhenRecordCannotBeWalked(t *testing.T) {
 	if _, err := dirSize(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("missing job record was measured as zero bytes instead of returning an error")
+	}
+}
+
+// Exercise the real targeted and sweep removal paths with a deterministic
+// mid-walk stat failure. WalkDir reads and sorts a directory before visiting its
+// children; pausing on meta.json and removing a later entry guarantees that the
+// later DirEntry.Info fails without timing or permission assumptions.
+func TestJobRmFailsClosedWhenRecordChangesDuringMeasurement(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params func(string) *proto.JobParams
+		sweep  bool
+	}{
+		{
+			name: "targeted",
+			params: func(id string) *proto.JobParams {
+				return &proto.JobParams{ID: id}
+			},
+		},
+		{
+			name: "sweep",
+			params: func(string) *proto.JobParams {
+				return &proto.JobParams{OlderThanSec: 1}
+			},
+			sweep: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newJobState(t)
+			id := "20200101-000000-deadbeef"
+			dir := jobDir(state, id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			stamp := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+				ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+				"exit_code": 0, "ended_at": stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(dir, "zz-walk-victim")
+			payload := []byte("must be counted exactly after retry")
+			if err := os.WriteFile(victim, payload, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			dirSizeVisitHook = func(root, path string) {
+				if root == dir && path == filepath.Join(dir, "meta.json") {
+					once.Do(func() {
+						close(entered)
+						<-release
+					})
+				}
+			}
+			t.Cleanup(func() { dirSizeVisitHook = nil })
+
+			type outcome struct {
+				res *proto.JobResult
+				err error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				res, err := jobRm(tc.params(id), state)
+				done <- outcome{res: res, err: err}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("removal did not reach the mid-measurement barrier")
+			}
+			if err := os.Remove(victim); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+
+			var first outcome
+			select {
+			case first = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("removal did not return after the injected stat failure")
+			}
+			dirSizeVisitHook = nil
+
+			if tc.sweep {
+				if first.err != nil {
+					t.Fatalf("sweep should skip a record it cannot measure, got %v", first.err)
+				}
+				if len(first.res.Removed) != 0 || len(first.res.Skipped) != 0 || first.res.FreedBytes != 0 {
+					t.Fatalf("failed sweep measurement reported removal: %+v", first.res)
+				}
+			} else {
+				if first.err == nil {
+					t.Fatal("targeted removal hid the measurement error")
+				}
+				if first.res != nil || !errors.Is(first.err, fs.ErrNotExist) {
+					t.Fatalf("targeted failure = (%+v, %v), want nil result and stat ENOENT", first.res, first.err)
+				}
+			}
+			if _, err := os.Stat(dir); err != nil {
+				t.Fatalf("job directory was deleted after an incomplete measurement: %v", err)
+			}
+
+			// Recreate the vanished entry, then retry through the same API. Completion
+			// proves the first call released the job lock; exact accounting proves the
+			// failed attempt contributed neither a partial size nor a false removal.
+			if err := os.WriteFile(victim, payload, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			want := measuredDirSize(t, dir)
+			retry, err := jobRm(tc.params(id), state)
+			if err != nil {
+				t.Fatalf("retry after restoring the record: %v", err)
+			}
+			if len(retry.Removed) != 1 || retry.Removed[0] != id || retry.FreedBytes != want {
+				t.Fatalf("retry = %+v, want Removed=[%s] FreedBytes=%d", retry, id, want)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("job directory survived successful retry: %v", err)
+			}
+			if _, err := os.Stat(lockPath(dir)); !os.IsNotExist(err) {
+				t.Fatalf("job lock file survived successful retry: %v", err)
+			}
+		})
 	}
 }
 
@@ -185,50 +318,69 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 			want += s
 		}
 
-		// A sweeper claiming every job, racing a targeted rm for each one.
-		var wg sync.WaitGroup
-		start := make(chan struct{})
-		var mu sync.Mutex
-		var results []*proto.Response
-		record := func(r *proto.Response) {
-			mu.Lock()
-			results = append(results, r)
-			mu.Unlock()
+		ordered, err := jobList(&proto.JobParams{Limit: jobs}, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// keep_last=1 is a valid sweep filter. The oldest listed job is certain to
+		// be a sweep candidate, so blocking its measurement proves the sweep has
+		// entered the delete-side critical section before targeted removals start.
+		target := ordered.List[len(ordered.List)-1].ID
+		targetDir := jobDir(state, target)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var barrierOnce sync.Once
+		dirSizeVisitHook = func(root, path string) {
+			if root == targetDir && path == filepath.Join(targetDir, "meta.json") {
+				barrierOnce.Do(func() {
+					close(entered)
+					<-release
+				})
+			}
 		}
 
-		wg.Add(1)
+		results := make([]*proto.Response, jobs+1)
+		sweepDone := make(chan struct{})
 		go func() {
-			defer wg.Done()
-			<-start
-			// keep_last covers everything present; an age filter would spare these,
-			// since they just ended.
-			record(handleSafely(&proto.Request{
-				Op: proto.OpJobRm, Job: &proto.JobParams{KeepLast: 0, OlderThanSec: 0},
-			}, state))
+			results[0] = handleSafely(&proto.Request{
+				Op: proto.OpJobRm, Job: &proto.JobParams{KeepLast: 1},
+			}, state)
+			close(sweepDone)
 		}()
-		for _, id := range ids {
-			wg.Add(1)
-			go func(id string) {
-				defer wg.Done()
-				<-start
-				record(handleSafely(&proto.Request{
-					Op: proto.OpJobRm, Job: &proto.JobParams{ID: id},
-				}, state))
-			}(id)
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			close(release)
+			<-sweepDone
+			dirSizeVisitHook = nil
+			t.Fatalf("round %d: sweep did not enter deletion for target %s", round, target)
 		}
-		close(start)
+
+		var wg sync.WaitGroup
+		started := make(chan struct{}, jobs)
+		for i, id := range ids {
+			wg.Add(1)
+			go func(i int, id string) {
+				defer wg.Done()
+				started <- struct{}{}
+				results[i+1] = handleSafely(&proto.Request{
+					Op: proto.OpJobRm, Job: &proto.JobParams{ID: id},
+				}, state)
+			}(i, id)
+		}
+		for range ids {
+			<-started
+		}
+		close(release)
 		wg.Wait()
+		<-sweepDone
+		dirSizeVisitHook = nil
 
 		seen := map[string]int{}
 		var freed int64
-		for _, r := range results {
+		for i, r := range results {
 			if !r.OK {
-				// A filterless sweep is rejected by validation, which is a usage
-				// error rather than a race. Anything else is the bug under test.
-				if r.Job == nil && r.Error != nil && r.Error.Code == proto.CodeInvalidRequest {
-					continue
-				}
-				t.Fatalf("round %d: a racer surfaced an error: %s", round, r.Err)
+				t.Fatalf("round %d: racer %d surfaced an error: %s", round, i, r.Err)
 			}
 			for _, id := range r.Job.Removed {
 				seen[id]++
@@ -245,6 +397,15 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 		}
 		if freed != want {
 			t.Fatalf("round %d: freed_bytes = %d, want %d", round, freed, want)
+		}
+		for i, id := range ids {
+			if id != target {
+				continue
+			}
+			r := results[i+1].Job
+			if len(r.Removed) != 0 || len(r.Missing) != 1 || r.Missing[0] != target {
+				t.Fatalf("round %d: targeted loser for %s = %+v, want one Missing", round, target, r)
+			}
 		}
 	}
 }

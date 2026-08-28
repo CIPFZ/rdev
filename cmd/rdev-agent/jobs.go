@@ -226,10 +226,11 @@ func newJobID() string {
 
 // jobList reports jobs, newest first.
 //
-// Limit is applied before any metadata is read. Job IDs are timestamp-prefixed,
-// so sorting directory names already puts them in chronological order, and
-// listing the newest 20 on a host with 5000 jobs costs 20 file reads instead of
-// 5000 -- each of which is a stat plus a JSON parse plus liveness probes.
+// StartedAt, not the directory name, defines recency, so every readable metadata
+// record must participate before Limit is applied. The bounded heap keeps memory
+// proportional to Limit, and liveness probes still run only for the selected
+// records; the full scan pays one metadata read per directory without retaining
+// every record in memory.
 func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	root := filepath.Join(state, "jobs")
 	dir, err := os.Open(root)
@@ -248,8 +249,8 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if limit == 0 {
 		limit = defaultJobListLimit
 	}
-	names := &stringMinHeap{}
-	heap.Init(names)
+	selected := &oldestJobHeap{}
+	heap.Init(selected)
 	total := 0
 	for {
 		entries, readErr := dir.ReadDir(256)
@@ -258,11 +259,17 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 				continue
 			}
 			total++
-			if names.Len() < limit {
-				heap.Push(names, entry.Name())
-			} else if entry.Name() > (*names)[0] {
-				(*names)[0] = entry.Name()
-				heap.Fix(names, 0)
+			jobDir := filepath.Join(root, entry.Name())
+			meta, err := readMeta(jobDir)
+			if err != nil {
+				continue // skip half-written or foreign directories
+			}
+			candidate := jobListCandidate{dir: jobDir, meta: meta}
+			if selected.Len() < limit {
+				heap.Push(selected, candidate)
+			} else if jobMetaNewer(candidate.meta, (*selected)[0].meta) {
+				(*selected)[0] = candidate
+				heap.Fix(selected, 0)
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
@@ -272,42 +279,41 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 			return nil, readErr
 		}
 	}
-	selected := append([]string(nil), (*names)...)
-	// Descending, so the newest directories come first.
-	sort.Sort(sort.Reverse(sort.StringSlice(selected)))
+	candidates := append([]jobListCandidate(nil), (*selected)...)
+	sort.Slice(candidates, func(i, j int) bool {
+		return jobMetaNewer(candidates[i].meta, candidates[j].meta)
+	})
 
-	list := make([]*proto.JobInfo, 0, len(selected))
-	for _, name := range selected {
-		if len(list) >= limit {
-			break
-		}
-		dir := filepath.Join(root, name)
-		meta, err := readMeta(dir)
-		if err != nil {
-			continue // skip half-written or foreign directories
-		}
-		list = append(list, metaToInfo(meta, dir))
+	list := make([]*proto.JobInfo, 0, len(candidates))
+	for _, candidate := range candidates {
+		list = append(list, metaToInfo(candidate.meta, candidate.dir))
 	}
-
-	// StartedAt is authoritative for ordering: a hand-created or clock-skewed
-	// directory name could otherwise misplace an entry. Cheap, since this only
-	// sorts what is being returned. The shared comparator also gives equal
-	// timestamps the same deterministic order used by keep_last.
-	sort.Slice(list, func(i, j int) bool { return jobInfoNewer(list[i], list[j]) })
 
 	res := &proto.JobResult{List: list}
 	res.Total = total
-	res.Truncated = total > len(selected)
+	// Total has always counted directories, including an unreadable record, and
+	// Truncated has always meant that the directory count exceeded Limit. Keep
+	// those observability semantics while choosing valid records by metadata.
+	res.Truncated = total > limit
 	return res, nil
 }
 
-type stringMinHeap []string
+type jobListCandidate struct {
+	dir  string
+	meta *jobMeta
+}
 
-func (h stringMinHeap) Len() int           { return len(h) }
-func (h stringMinHeap) Less(i, j int) bool { return h[i] < h[j] }
-func (h stringMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *stringMinHeap) Push(value any)    { *h = append(*h, value.(string)) }
-func (h *stringMinHeap) Pop() any {
+// oldestJobHeap keeps the least-recent selected record at its root, so a newer
+// record found later in the directory scan can replace it in O(log Limit).
+type oldestJobHeap []jobListCandidate
+
+func (h oldestJobHeap) Len() int      { return len(h) }
+func (h oldestJobHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h oldestJobHeap) Less(i, j int) bool {
+	return jobMetaNewer(h[j].meta, h[i].meta)
+}
+func (h *oldestJobHeap) Push(value any) { *h = append(*h, value.(jobListCandidate)) }
+func (h *oldestJobHeap) Pop() any {
 	old := *h
 	last := old[len(old)-1]
 	*h = old[:len(old)-1]
@@ -328,8 +334,16 @@ const defaultJobListLimit = 100
 // record ahead of a valid deletion candidate; two invalid values still get a
 // deterministic textual order.
 func jobInfoNewer(a, b *proto.JobInfo) bool {
-	at, aErr := time.Parse(time.RFC3339Nano, a.StartedAt)
-	bt, bErr := time.Parse(time.RFC3339Nano, b.StartedAt)
+	return jobRecencyNewer(a.StartedAt, a.ID, b.StartedAt, b.ID)
+}
+
+func jobMetaNewer(a, b *jobMeta) bool {
+	return jobRecencyNewer(a.StartedAt, a.ID, b.StartedAt, b.ID)
+}
+
+func jobRecencyNewer(aStartedAt, aID, bStartedAt, bID string) bool {
+	at, aErr := time.Parse(time.RFC3339Nano, aStartedAt)
+	bt, bErr := time.Parse(time.RFC3339Nano, bStartedAt)
 	switch {
 	case aErr == nil && bErr == nil && !at.Equal(bt):
 		return at.After(bt)
@@ -337,9 +351,9 @@ func jobInfoNewer(a, b *proto.JobInfo) bool {
 		return true
 	case aErr == nil && bErr != nil:
 		return false
-	case aErr != nil && bErr != nil && a.StartedAt != b.StartedAt:
-		return a.StartedAt > b.StartedAt
+	case aErr != nil && bErr != nil && aStartedAt != bStartedAt:
+		return aStartedAt > bStartedAt
 	default:
-		return a.ID > b.ID
+		return aID > bID
 	}
 }

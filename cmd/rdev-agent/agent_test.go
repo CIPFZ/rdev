@@ -1566,8 +1566,8 @@ func TestJobWaitManyTimesOutWithoutAffectingJobs(t *testing.T) {
 	jobStop(&proto.JobParams{ID: id, Signal: "KILL"}, state)
 }
 
-// The limit is applied before metadata is read, which is what makes listing a
-// host with thousands of jobs cheap.
+// The limit bounds the returned records after the metadata-defined global order
+// is known. Total still reports every directory seen.
 func TestJobListLimitAndTotals(t *testing.T) {
 	state := t.TempDir()
 	root := filepath.Join(state, "jobs")
@@ -1598,6 +1598,134 @@ func TestJobListLimitAndTotals(t *testing.T) {
 	for i := 1; i < len(res.List); i++ {
 		if res.List[i-1].StartedAt < res.List[i].StartedAt {
 			t.Errorf("results are not newest-first at %d", i)
+		}
+	}
+}
+
+// Directory names are only an operational convenience; StartedAt plus ID is the
+// shared strict order for listing and keep_last. This fixture has 101 valid jobs
+// in one timestamp-prefixed name bucket, with the lexically smallest ID carrying
+// the newest nanosecond timestamp. Selecting 100 names before reading metadata
+// drops that actual newest job. It also exercises legacy whole-second records,
+// equal-nanosecond ID ties, an old outlier, a damaged record, and every limit
+// boundary in one deterministic fixture.
+func TestJobListLimitUsesGlobalMetadataOrderAndMatchesSweep(t *testing.T) {
+	state := t.TempDir()
+	root := filepath.Join(state, "jobs")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const validJobs = 101
+	base := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	ids := make([]string, validJobs)
+	for i := range ids {
+		id := fmt.Sprintf("20260828-120000-%08x", i)
+		ids[i] = id
+		startedAt := base.Format(time.RFC3339) // legacy whole-second record
+		switch i {
+		case 0:
+			startedAt = base.Add(2 * time.Nanosecond).Format(time.RFC3339Nano)
+		case 99, 100:
+			startedAt = base.Add(time.Nanosecond).Format(time.RFC3339Nano)
+		case 50:
+			startedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		}
+		dir := jobDir(state, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: startedAt,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+			"exit_code": 0, "ended_at": startedAt,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	badDir := filepath.Join(root, "000-corrupt")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "meta.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	list100, err := jobList(&proto.JobParams{Limit: 100}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list100.List) != 100 || list100.Total != validJobs+1 || !list100.Truncated {
+		t.Fatalf("limit 100 result: len=%d Total=%d Truncated=%v, want 100/%d/true",
+			len(list100.List), list100.Total, list100.Truncated, validJobs+1)
+	}
+	if got := list100.List[0].ID; got != ids[0] {
+		t.Fatalf("newest ID = %s, want lexically smallest but metadata-newest %s", got, ids[0])
+	}
+	if got := []string{list100.List[1].ID, list100.List[2].ID}; got[0] != ids[100] || got[1] != ids[99] {
+		t.Fatalf("equal-nanosecond order = %v, want descending IDs [%s %s]", got, ids[100], ids[99])
+	}
+	listed := make(map[string]bool, len(list100.List))
+	for _, info := range list100.List {
+		listed[info.ID] = true
+	}
+	if listed[ids[50]] {
+		t.Fatalf("old outlier %s displaced a newer record", ids[50])
+	}
+
+	defaultList, err := jobList(&proto.JobParams{Limit: 0}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaultList.List) != 100 {
+		t.Fatalf("default limit returned %d jobs, want 100", len(defaultList.List))
+	}
+	for i := range defaultList.List {
+		if defaultList.List[i].ID != list100.List[i].ID {
+			t.Fatalf("default limit differs from explicit 100 at %d: %s != %s",
+				i, defaultList.List[i].ID, list100.List[i].ID)
+		}
+	}
+	large, err := jobList(&proto.JobParams{Limit: 1000}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(large.List) != validJobs || large.Total != validJobs+1 || large.Truncated {
+		t.Fatalf("limit 1000 result: len=%d Total=%d Truncated=%v, want %d/%d/false",
+			len(large.List), large.Total, large.Truncated, validJobs, validJobs+1)
+	}
+	for _, invalid := range []int{-1, 1001} {
+		if _, err := jobList(&proto.JobParams{Limit: invalid}, state); err == nil {
+			t.Errorf("limit %d unexpectedly succeeded", invalid)
+		}
+	}
+
+	swept, err := jobRm(&proto.JobParams{KeepLast: 100}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(swept.Removed) != 1 || swept.Removed[0] != ids[50] {
+		t.Fatalf("keep_last removed %v, want only old outlier %s", swept.Removed, ids[50])
+	}
+	if _, err := os.Stat(badDir); err != nil {
+		t.Fatalf("damaged metadata directory should remain untouched: %v", err)
+	}
+
+	after, err := jobList(&proto.JobParams{Limit: 100}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.List) != 100 || after.Total != 101 || !after.Truncated {
+		t.Fatalf("post-sweep result: len=%d Total=%d Truncated=%v, want 100/101/true",
+			len(after.List), after.Total, after.Truncated)
+	}
+	for i, info := range after.List {
+		if info.ID != list100.List[i].ID {
+			t.Fatalf("list/sweep retained sets differ at %d: %s != %s", i, info.ID, list100.List[i].ID)
 		}
 	}
 }

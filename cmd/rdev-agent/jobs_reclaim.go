@@ -202,6 +202,11 @@ func endedBefore(info *proto.JobInfo, now time.Time, d time.Duration) bool {
 	return now.Sub(t) > d
 }
 
+// dirSizeVisitHook is a test seam for deterministic filesystem fault and lock
+// interleaving tests. Production leaves it nil, so normal measurement behavior
+// is unchanged. Tests set and clear it only while no other test is running.
+var dirSizeVisitHook func(root, path string)
+
 // dirSize sums the logical size of every non-directory entry in a job record.
 //
 // Callers measure while holding the job lock and only after confirming that no
@@ -214,12 +219,15 @@ func endedBefore(info *proto.JobInfo, now time.Time, d time.Duration) bool {
 // evidence had already been destroyed.
 func dirSize(dir string) (int64, error) {
 	var total int64
-	err := filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			return nil
+		}
+		if dirSizeVisitHook != nil {
+			dirSizeVisitHook(dir, path)
 		}
 		info, err := d.Info()
 		if err != nil {

@@ -189,8 +189,8 @@ type JobParams struct {
 	// rest. Combined with OlderThanSec, a job must satisfy both to be removed.
 	KeepLast int `json:"keep_last,omitempty"`
 
-	// Limit caps how many jobs job_list returns, newest first. Applied before
-	// metadata is read, so a small limit is cheap on a host with many jobs.
+	// Limit caps how many jobs job_list returns, newest first by StartedAt and ID.
+	// Metadata is scanned before the limit so the result is globally newest.
 	Limit int `json:"limit,omitempty"`
 }
 
