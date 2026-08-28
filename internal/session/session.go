@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/CIPFZ/rdev/internal/observe"
+	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
 
@@ -34,6 +35,43 @@ type State struct {
 	// Secrets maps a secret name to a file path on this host, read on first
 	// connect. Paths only; values never touch local disk.
 	Secrets map[string]string `json:"secrets,omitempty"`
+}
+
+// HostUpdate is one atomic patch to a registry host. Front ends populate the
+// fields they received and call ApplyHostUpdate once; validation, optional
+// persistence, live publication, generation advancement, and invalidation all
+// happen at this boundary.
+type HostUpdate struct {
+	Name string
+	// Host replaces the complete transport definition when non-nil. Its Name
+	// must either be empty or match Name.
+	Host *transport.Host
+	// RemoteDir patches only the state directory while retaining the existing
+	// destination. It is ignored when Host is supplied.
+	RemoteDir *string
+
+	Scope        Scope
+	SetScope     bool
+	DefaultScope Scope
+
+	Cwd        *string
+	Env        map[string]string
+	LoginShell *bool
+	Secrets    map[string]string
+	Persist    bool
+}
+
+// HostUpdateResult describes the single committed registry publication.
+type HostUpdateResult struct {
+	Scope      Scope
+	Generation uint64
+	SavedTo    string
+}
+
+// HostSnapshot is an atomic host/scope/state observation.
+type HostSnapshot struct {
+	ResolvedHost
+	State State
 }
 
 // Scope identifies which config file a host is defined in.
@@ -54,14 +92,18 @@ type Registry struct {
 	// A sink holds only one alias lease for its lifetime, so a slow operation on
 	// one machine never serializes unrelated hosts. Multi-alias publications
 	// sort names before locking to avoid lock-order cycles.
-	leaseMu      sync.Mutex
-	identity     map[string]*sync.RWMutex
-	approvalMu   sync.Mutex
-	tx           sync.Mutex
-	mu           sync.RWMutex
-	hosts        map[string]transport.Host
-	state        map[string]*State
-	scopes       map[string]Scope
+	leaseMu    sync.Mutex
+	identity   map[string]*sync.RWMutex
+	approvalMu sync.Mutex
+	tx         sync.Mutex
+	mu         sync.RWMutex
+	hosts      map[string]transport.Host
+	state      map[string]*State
+	scopes     map[string]Scope
+	// persistence is the per-alias scope migration state machine. It keeps the
+	// durable locations and an in-progress live-only move in one value so every
+	// load, rewrite, and live scope transition is published together.
+	persistence  map[string]scopePersistence
 	generations  map[string]uint64
 	nextGen      uint64
 	projectTrust ProjectTrust
@@ -82,6 +124,7 @@ func NewRegistry() *Registry {
 		hosts:       make(map[string]transport.Host),
 		state:       make(map[string]*State),
 		scopes:      make(map[string]Scope),
+		persistence: make(map[string]scopePersistence),
 		generations: make(map[string]uint64),
 		identity:    make(map[string]*sync.RWMutex),
 		observe:     observe.New(nil),
@@ -132,14 +175,25 @@ func (r *Registry) lockIdentityWrites(names []string) func() {
 // ResolvedHost is an immutable connection identity. Generation prevents an old
 // connection from becoming valid again if an alias is changed and later reverted.
 type ResolvedHost struct {
-	Host        transport.Host
-	Fingerprint string
-	Generation  uint64
+	Host                  transport.Host
+	Scope                 Scope
+	Fingerprint           string
+	ConnectionFingerprint string
+	Generation            uint64
 }
 
-func hostFingerprint(h transport.Host) string {
+func hostFingerprint(h transport.Host, scope Scope) string {
 	remoteDir, _ := transport.ValidateRemoteDir(h.RemoteDir)
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%t", h.Addr, h.Port, remoteDir, h.ForceAgentUpload)))
+	// ForceAgentUpload controls the next bootstrap but does not change the
+	// credential identity. Treating it as identity would purge exact scoped
+	// secrets even though address, user, port, namespace, and scope were stable.
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s", h.Addr, h.Port, remoteDir, scope)))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func connectionFingerprint(h transport.Host, scope Scope) string {
+	remoteDir, _ := transport.ValidateRemoteDir(h.RemoteDir)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%t\x00%s", h.Addr, h.Port, remoteDir, h.ForceAgentUpload, scope)))
 	return fmt.Sprintf("%x", sum[:])
 }
 
@@ -167,6 +221,34 @@ func (r *Registry) SecuritySnapshot() observe.Snapshot {
 	registry := r.observe
 	r.mu.RUnlock()
 	return registry.Snapshot()
+}
+
+func (r *Registry) RecordSecretLoadFailure(reason observe.SecretReason, target string) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.SecretLoadFailed(reason, target)
+}
+
+func (r *Registry) RecordSecretRejection(reason observe.SecretReason, target string) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.SecretRejected(reason, target)
+}
+
+func (r *Registry) RecordConnectionSecurityState(state observe.ConnectionSecurityState, target string) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.ConnectionSecurityStateChanged(state, target)
+}
+
+func (r *Registry) RecordRedactionHit(count uint64) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.RedactionHit(count)
 }
 
 func (r *Registry) fatalError() error {
@@ -284,9 +366,63 @@ type registrySnapshot struct {
 	hosts       map[string]transport.Host
 	state       map[string]*State
 	scopes      map[string]Scope
+	persistence map[string]scopePersistence
 	generations map[string]uint64
 	nextGen     uint64
 	trust       ProjectTrust
+}
+
+// scopePersistence is an explicit two-state migration ledger:
+//
+//   - stable: movingFrom is empty; persisted is the exact set of files that
+//     contain the alias.
+//   - live-moved: movingFrom names a still-persisted source while scopes holds
+//     the unsaved destination. Persisting that destination is rejected until
+//     an authoritative rewrite removes the source.
+//
+// Rewriting the source transitions live-moved back to stable. A later reverse
+// move therefore starts a new migration instead of being mistaken for a
+// cancellation of stale state from the previous completed migration.
+type scopePersistence struct {
+	persisted  uint8
+	movingFrom Scope
+}
+
+func (p scopePersistence) load(scope Scope) scopePersistence {
+	p.persisted |= scopeBit(scope)
+	p.movingFrom = ""
+	return p
+}
+
+func (p scopePersistence) move(from, to Scope) scopePersistence {
+	if from == to {
+		return p
+	}
+	if p.movingFrom == "" {
+		p.movingFrom = from
+	} else if to == p.movingFrom {
+		p.movingFrom = ""
+	}
+	return p.normalize()
+}
+
+func (p scopePersistence) rewrite(scope, liveScope Scope) scopePersistence {
+	p.persisted &^= scopeBit(scope)
+	if liveScope == scope {
+		p.persisted |= scopeBit(scope)
+	}
+	return p.normalize()
+}
+
+func (p scopePersistence) normalize() scopePersistence {
+	if p.movingFrom != "" && p.persisted&scopeBit(p.movingFrom) == 0 {
+		p.movingFrom = ""
+	}
+	return p
+}
+
+func (p scopePersistence) empty() bool {
+	return p.persisted == 0 && p.movingFrom == ""
 }
 
 func cloneState(st *State) *State {
@@ -299,11 +435,16 @@ func cloneState(st *State) *State {
 	}
 }
 
+func cloneStateValue(st *State) State {
+	return *cloneState(st)
+}
+
 func (r *Registry) snapshotLocked() registrySnapshot {
 	s := registrySnapshot{
 		hosts:       make(map[string]transport.Host, len(r.hosts)),
 		state:       make(map[string]*State, len(r.state)),
 		scopes:      make(map[string]Scope, len(r.scopes)),
+		persistence: make(map[string]scopePersistence, len(r.persistence)),
 		generations: make(map[string]uint64, len(r.generations)),
 		nextGen:     r.nextGen, trust: r.projectTrust,
 	}
@@ -316,6 +457,9 @@ func (r *Registry) snapshotLocked() registrySnapshot {
 	for k, v := range r.scopes {
 		s.scopes[k] = v
 	}
+	for k, v := range r.persistence {
+		s.persistence[k] = v
+	}
 	for k, v := range r.generations {
 		s.generations[k] = v
 	}
@@ -327,18 +471,26 @@ func applyCandidates(s *registrySnapshot, candidates []hostCandidate, scope Scop
 	for _, c := range candidates {
 		h, e := c.host, c.entry
 		old, exists := s.hosts[h.Name]
-		if !exists || hostFingerprint(old) != hostFingerprint(h) {
+		oldScope := s.scopes[h.Name]
+		oldState := s.state[h.Name]
+		declarationsChanged := oldState == nil || !equalStringMap(oldState.Secrets, e.Secrets)
+		securityChanged := !exists || hostFingerprint(old, oldScope) != hostFingerprint(h, scope) || declarationsChanged
+		connectionChanged := !exists || connectionFingerprint(old, oldScope) != connectionFingerprint(h, scope)
+		if securityChanged {
 			s.nextGen++
 			s.generations[h.Name] = s.nextGen
+		}
+		if securityChanged || connectionChanged {
 			changed = append(changed, h.Name)
 		}
 		s.hosts[h.Name] = h
 		s.scopes[h.Name] = scope
-		st, ok := s.state[h.Name]
-		if !ok {
-			st = &State{LoginShell: true}
-			s.state[h.Name] = st
-		}
+		s.persistence[h.Name] = s.persistence[h.Name].load(scope)
+		// A config entry is an authoritative snapshot, not a patch. Reusing the
+		// prior map would retain env or secret declarations removed from disk.
+		// Identity changes additionally advance the generation above.
+		st := &State{LoginShell: true}
+		s.state[h.Name] = st
 		if e.Cwd != "" {
 			st.Cwd = e.Cwd
 		}
@@ -357,6 +509,7 @@ func applyCandidates(s *registrySnapshot, candidates []hostCandidate, scope Scop
 
 func (r *Registry) publishLocked(s registrySnapshot) (func(string, uint64), map[string]uint64) {
 	r.hosts, r.state, r.scopes = s.hosts, s.state, s.scopes
+	r.persistence = s.persistence
 	r.generations, r.nextGen, r.projectTrust = s.generations, s.nextGen, s.trust
 	gens := make(map[string]uint64, len(s.generations))
 	for k, v := range s.generations {
@@ -384,6 +537,10 @@ func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, erro
 				reason = observe.ReasonDestination
 			}
 			r.reject(reason, e.Name)
+			return nil, fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
+		}
+		if err := secrets.ValidateDeclarations(e.Secrets); err != nil {
+			r.reject(observe.ReasonConfigInvalid, path)
 			return nil, fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
 		}
 		candidates = append(candidates, hostCandidate{host: h, entry: e})
@@ -486,30 +643,106 @@ func (r *Registry) Save(scope Scope) error {
 	if err := r.fatalError(); err != nil {
 		return err
 	}
+	if !validScope(scope) {
+		return fmt.Errorf("scope must be project or global, got %q", scope)
+	}
 	r.tx.Lock()
 	defer r.tx.Unlock()
-	var path string
-	var err error
-	switch scope {
-	case ScopeProject:
-		path, err = ProjectConfigPath()
-	default:
-		path, err = ConfigPath()
+	r.mu.RLock()
+	s := r.snapshotLocked()
+	r.mu.RUnlock()
+	if err := rejectImplicitScopeMigration(s, scope); err != nil {
+		return err
 	}
+	path, b, err := r.marshalScopeSnapshot(s, scope)
 	if err != nil {
 		return err
 	}
-	r.mu.RLock()
+	// Written 0600: it records hostnames and usernames, not secrets, but there
+	// is no reason to make it world-readable.
+	err = r.io.write(path, b)
+	if err != nil && !configWriteCommitted(err) {
+		r.stopOnAmbiguousWrite(err)
+		return err
+	}
+	r.mu.Lock()
+	recordScopeRewrite(&s, scope)
+	r.persistence = s.persistence
+	r.mu.Unlock()
+	return err
+}
+
+func validScope(scope Scope) bool {
+	return scope == ScopeGlobal || scope == ScopeProject
+}
+
+func scopeBit(scope Scope) uint8 {
+	if scope == ScopeGlobal {
+		return 1
+	}
+	if scope == ScopeProject {
+		return 2
+	}
+	return 0
+}
+
+// rejectImplicitScopeMigration prevents a single scope rewrite from silently
+// becoming half of a two-file migration. The storage layer provides atomic
+// replacement for one hosts.json, but has no crash-recovery journal spanning
+// the global and project files. Callers must first Save the old scope (which
+// removes the live-moved alias there), then retry the destination write.
+func rejectImplicitScopeMigration(s registrySnapshot, scope Scope) error {
+	for name := range s.hosts {
+		state := s.persistence[name]
+		if s.scopes[name] == scope && state.movingFrom != "" {
+			from := state.movingFrom
+			return fmt.Errorf("cannot persist host %q from %s to %s atomically: registry storage has no crash-consistent cross-file transaction; explicitly save/remove it from the %s scope first, then persist the %s scope", name, from, scope, from, scope)
+		}
+	}
+	return nil
+}
+
+// recordScopeRewrite updates durable-location bookkeeping after a committed
+// authoritative rewrite of one config file.
+func recordScopeRewrite(s *registrySnapshot, scope Scope) {
+	for name, state := range s.persistence {
+		state = state.rewrite(scope, s.scopes[name])
+		if state.empty() {
+			delete(s.persistence, name)
+		} else {
+			s.persistence[name] = state
+		}
+	}
+	for name := range s.hosts {
+		if s.scopes[name] == scope {
+			state := s.persistence[name].rewrite(scope, scope)
+			s.persistence[name] = state
+		}
+	}
+}
+
+func configPathForScope(scope Scope) (string, error) {
+	if scope == ScopeProject {
+		return ProjectConfigPath()
+	}
+	return ConfigPath()
+}
+
+func (r *Registry) marshalScopeSnapshot(s registrySnapshot, scope Scope) (string, []byte, error) {
+	path, err := configPathForScope(scope)
+	if err != nil {
+		return "", nil, err
+	}
 	hf := hostFile{}
-	for name, h := range r.hosts {
-		if r.scopes[name] != scope {
+	for name, h := range s.hosts {
+		if s.scopes[name] != scope {
 			continue
 		}
 		e := hostEntry{
 			Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
 			ForceAgentUpload: h.ForceAgentUpload,
 		}
-		if st, ok := r.state[name]; ok {
+		if st, ok := s.state[name]; ok {
 			e.Cwd = st.Cwd
 			if len(st.Env) > 0 {
 				e.Env = make(map[string]string, len(st.Env))
@@ -532,18 +765,169 @@ func (r *Registry) Save(scope Scope) error {
 		}
 		hf.Hosts = append(hf.Hosts, e)
 	}
-	r.mu.RUnlock()
-
 	sort.Slice(hf.Hosts, func(i, j int) bool { return hf.Hosts[i].Name < hf.Hosts[j].Name })
 	b, err := r.io.marshal(hf, "", "  ")
 	if err != nil {
-		return err
+		return "", nil, err
 	}
-	// Written 0600: it records hostnames and usernames, not secrets, but there
-	// is no reason to make it world-readable.
-	err = r.io.write(path, append(b, '\n'))
-	r.stopOnAmbiguousWrite(err)
-	return err
+	return path, append(b, '\n'), nil
+}
+
+// ApplyHostUpdate validates and stages a complete host patch, optionally writes
+// that staged snapshot durably, and only then publishes it to readers. No live
+// registry state or invalidation hook changes on a pre-commit failure.
+func (r *Registry) ApplyHostUpdate(update HostUpdate) (HostUpdateResult, error) {
+	if err := r.fatalError(); err != nil {
+		return HostUpdateResult{}, err
+	}
+	if strings.TrimSpace(update.Name) == "" {
+		return HostUpdateResult{}, errors.New("host name required")
+	}
+	if update.SetScope && !validScope(update.Scope) {
+		return HostUpdateResult{}, fmt.Errorf("scope must be project or global, got %q", update.Scope)
+	}
+	if update.DefaultScope != "" && !validScope(update.DefaultScope) {
+		return HostUpdateResult{}, fmt.Errorf("default scope must be project or global, got %q", update.DefaultScope)
+	}
+	if err := secrets.ValidateDeclarations(update.Secrets); err != nil {
+		return HostUpdateResult{}, err
+	}
+	var replacement *transport.Host
+	if update.Host != nil {
+		h := *update.Host
+		if h.Name == "" {
+			h.Name = update.Name
+		}
+		if h.Name != update.Name {
+			return HostUpdateResult{}, fmt.Errorf("host update name %q does not match transport name %q", update.Name, h.Name)
+		}
+		if err := transport.ValidateHost(h); err != nil {
+			return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
+		}
+		replacement = &h
+	} else if update.RemoteDir != nil {
+		if _, err := transport.ValidateRemoteDir(*update.RemoteDir); err != nil {
+			return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
+		}
+	}
+
+	releaseIdentity := r.lockIdentityWrites([]string{update.Name})
+	defer releaseIdentity()
+	r.tx.Lock()
+	txLocked := true
+	defer func() {
+		if txLocked {
+			r.tx.Unlock()
+		}
+	}()
+	if err := r.fatalError(); err != nil {
+		return HostUpdateResult{}, err
+	}
+
+	r.mu.RLock()
+	staged := r.snapshotLocked()
+	r.mu.RUnlock()
+	oldHost, exists := staged.hosts[update.Name]
+	oldScope := staged.scopes[update.Name]
+	oldState := staged.state[update.Name]
+	if !exists && replacement == nil {
+		return HostUpdateResult{}, fmt.Errorf("unknown host %q", update.Name)
+	}
+
+	newHost := oldHost
+	if replacement != nil {
+		newHost = *replacement
+	} else if update.RemoteDir != nil {
+		newHost.RemoteDir = *update.RemoteDir
+	}
+	if err := transport.ValidateHost(newHost); err != nil {
+		return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
+	}
+
+	newScope := oldScope
+	if !exists {
+		newScope = update.DefaultScope
+		if newScope == "" {
+			newScope = ScopeGlobal
+		}
+	}
+	if update.SetScope {
+		newScope = update.Scope
+	}
+	if !validScope(newScope) {
+		return HostUpdateResult{}, fmt.Errorf("scope must be project or global, got %q", newScope)
+	}
+
+	identityChanged := !exists || hostFingerprint(oldHost, oldScope) != hostFingerprint(newHost, newScope)
+	newState := cloneState(oldState)
+	if identityChanged {
+		newState = &State{LoginShell: true}
+	}
+	if update.Cwd != nil {
+		newState.Cwd = *update.Cwd
+	}
+	if len(update.Env) > 0 {
+		newState.Env = MergeEnv(newState.Env, update.Env)
+	}
+	if update.LoginShell != nil {
+		newState.LoginShell = *update.LoginShell
+	}
+	if len(update.Secrets) > 0 {
+		newState.Secrets = MergeEnv(newState.Secrets, update.Secrets)
+	}
+	if err := secrets.ValidateDeclarations(newState.Secrets); err != nil {
+		return HostUpdateResult{}, err
+	}
+
+	declarationsChanged := !equalStringMap(cloneState(oldState).Secrets, newState.Secrets)
+	securityChanged := identityChanged || declarationsChanged
+	connectionChanged := !exists || connectionFingerprint(oldHost, oldScope) != connectionFingerprint(newHost, newScope)
+	staged.hosts[update.Name] = newHost
+	staged.scopes[update.Name] = newScope
+	if exists && oldScope != newScope {
+		state := staged.persistence[update.Name].move(oldScope, newScope)
+		if state.empty() {
+			delete(staged.persistence, update.Name)
+		} else {
+			staged.persistence[update.Name] = state
+		}
+	}
+	staged.state[update.Name] = newState
+	generation := staged.generations[update.Name]
+	if securityChanged {
+		staged.nextGen++
+		generation = staged.nextGen
+		staged.generations[update.Name] = generation
+	}
+
+	result := HostUpdateResult{Scope: newScope, Generation: generation}
+	var writeErr error
+	if update.Persist {
+		if err := rejectImplicitScopeMigration(staged, newScope); err != nil {
+			return HostUpdateResult{}, err
+		}
+		path, data, err := r.marshalScopeSnapshot(staged, newScope)
+		if err != nil {
+			return HostUpdateResult{}, err
+		}
+		writeErr = r.io.write(path, data)
+		if writeErr != nil && !configWriteCommitted(writeErr) {
+			r.stopOnAmbiguousWrite(writeErr)
+			return HostUpdateResult{}, writeErr
+		}
+		recordScopeRewrite(&staged, newScope)
+		result.SavedTo = path
+	}
+
+	r.mu.Lock()
+	hook, _ := r.publishLocked(staged)
+	r.mu.Unlock()
+	r.tx.Unlock()
+	txLocked = false
+	if (securityChanged || connectionChanged) && hook != nil {
+		hook(update.Name, generation)
+	}
+	return result, writeErr
 }
 
 func digestBytes(b []byte) string {
@@ -681,13 +1065,42 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	return trust, writeErr
 }
 
-// SetScope records which config file a host belongs to.
+// SetScope records which config file a host belongs to. Scope is part of the
+// immutable secret identity, so changing it advances the generation, clears
+// sticky state, and invalidates the old connection and credentials.
 func (r *Registry) SetScope(name string, scope Scope) {
+	releaseIdentity := r.lockIdentityWrites([]string{name})
+	defer releaseIdentity()
 	r.tx.Lock()
-	defer r.tx.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	old := r.scopes[name]
+	if old == scope {
+		r.mu.Unlock()
+		r.tx.Unlock()
+		return
+	}
 	r.scopes[name] = scope
+	if _, exists := r.hosts[name]; !exists {
+		r.mu.Unlock()
+		r.tx.Unlock()
+		return
+	}
+	state := r.persistence[name].move(old, scope)
+	if state.empty() {
+		delete(r.persistence, name)
+	} else {
+		r.persistence[name] = state
+	}
+	r.state[name] = &State{LoginShell: true}
+	r.nextGen++
+	generation := r.nextGen
+	r.generations[name] = generation
+	hook := r.onHostChange
+	r.mu.Unlock()
+	r.tx.Unlock()
+	if hook != nil {
+		hook(name, generation)
+	}
 }
 
 // ScopeOf reports which config file a host came from.
@@ -723,12 +1136,19 @@ func (r *Registry) Add(h transport.Host) error {
 	r.tx.Lock()
 	r.mu.Lock()
 	old, exists := r.hosts[h.Name]
+	scope := r.scopes[h.Name]
+	if scope == "" {
+		scope = ScopeGlobal
+		r.scopes[h.Name] = scope
+	}
 	r.hosts[h.Name] = h
-	if _, ok := r.state[h.Name]; !ok {
+	changed := !exists || hostFingerprint(old, scope) != hostFingerprint(h, scope)
+	connectionChanged := !exists || connectionFingerprint(old, scope) != connectionFingerprint(h, scope)
+	credentialsChanged := !exists || hostFingerprint(old, scope) != hostFingerprint(h, scope)
+	if _, ok := r.state[h.Name]; !ok || credentialsChanged {
 		r.state[h.Name] = &State{LoginShell: true}
 	}
-	var generation uint64
-	changed := !exists || hostFingerprint(old) != hostFingerprint(h)
+	generation := r.generations[h.Name]
 	if changed {
 		r.nextGen++
 		generation = r.nextGen
@@ -737,7 +1157,7 @@ func (r *Registry) Add(h transport.Host) error {
 	hook := r.onHostChange
 	r.mu.Unlock()
 	r.tx.Unlock()
-	if changed && hook != nil {
+	if (changed || connectionChanged) && hook != nil {
 		hook(h.Name, generation)
 	}
 	return nil
@@ -762,9 +1182,10 @@ func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 	r.mu.RLock()
 	h, ok := r.hosts[name]
 	generation := r.generations[name]
+	scope := r.scopes[name]
 	r.mu.RUnlock()
 	if ok {
-		return ResolvedHost{Host: h, Fingerprint: hostFingerprint(h), Generation: generation}, nil
+		return ResolvedHost{Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope), ConnectionFingerprint: connectionFingerprint(h, scope), Generation: generation}, nil
 	}
 
 	if parsed, err := parseDestination(name); err == nil {
@@ -772,11 +1193,34 @@ func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 			return ResolvedHost{}, err
 		}
 		r.mu.RLock()
-		h, generation = r.hosts[parsed.Name], r.generations[parsed.Name]
+		h, generation, scope = r.hosts[parsed.Name], r.generations[parsed.Name], r.scopes[parsed.Name]
 		r.mu.RUnlock()
-		return ResolvedHost{Host: h, Fingerprint: hostFingerprint(h), Generation: generation}, nil
+		return ResolvedHost{Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope), ConnectionFingerprint: connectionFingerprint(h, scope), Generation: generation}, nil
 	}
 	return ResolvedHost{}, fmt.Errorf("unknown host %q (known: %s)", name, strings.Join(r.Names(), ", "))
+}
+
+// Inspect returns host identity, scope, generation, and sticky state from one
+// read lock, so status/list callers cannot combine fields from two publications.
+// Unlike Resolve it never auto-registers ssh-shaped names.
+func (r *Registry) Inspect(name string) (HostSnapshot, error) {
+	if err := r.fatalError(); err != nil {
+		return HostSnapshot{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	h, ok := r.hosts[name]
+	if !ok {
+		return HostSnapshot{}, fmt.Errorf("unknown host %q", name)
+	}
+	scope := r.scopes[name]
+	return HostSnapshot{
+		ResolvedHost: ResolvedHost{
+			Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope),
+			ConnectionFingerprint: connectionFingerprint(h, scope), Generation: r.generations[name],
+		},
+		State: cloneStateValue(r.state[name]),
+	}, nil
 }
 
 // AcquireIdentity pins one resolved identity until release. An update to this
@@ -790,13 +1234,35 @@ func (r *Registry) AcquireIdentity(name string, generation uint64, fingerprint s
 	lease.RLock()
 	r.mu.RLock()
 	h, ok := r.hosts[name]
-	if !ok || r.generations[name] != generation || hostFingerprint(h) != fingerprint {
+	scope := r.scopes[name]
+	if !ok || r.generations[name] != generation || hostFingerprint(h, scope) != fingerprint {
 		r.mu.RUnlock()
 		lease.RUnlock()
 		return nil, false
 	}
 	r.mu.RUnlock()
 	return lease.RUnlock, true
+}
+
+// AcquireIdentityWrite excludes every operation using this alias while a
+// host-scoped secret is replaced or deleted. Without it, rotating a value could
+// remove the old redactor before an in-flight response is scrubbed.
+func (r *Registry) AcquireIdentityWrite(name string, generation uint64, fingerprint string) (func(), bool) {
+	if r.fatalError() != nil {
+		return nil, false
+	}
+	lease := r.identityLease(name)
+	lease.Lock()
+	r.mu.RLock()
+	h, ok := r.hosts[name]
+	scope := r.scopes[name]
+	if !ok || r.generations[name] != generation || hostFingerprint(h, scope) != fingerprint {
+		r.mu.RUnlock()
+		lease.Unlock()
+		return nil, false
+	}
+	r.mu.RUnlock()
+	return lease.Unlock, true
 }
 
 // parseDestination interprets "user@host", "user@host:port", or "host:port".
@@ -860,18 +1326,46 @@ func (r *Registry) State(name string) State {
 	return cp
 }
 
-// Update mutates a host's state under lock.
+// Update mutates a host's state under lock. Secret declaration changes advance
+// the host generation so a warm connection cannot continue without loading the
+// new complete declaration set first.
 func (r *Registry) Update(name string, fn func(*State)) {
+	releaseIdentity := r.lockIdentityWrites([]string{name})
+	defer releaseIdentity()
 	r.tx.Lock()
-	defer r.tx.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	st, ok := r.state[name]
 	if !ok {
 		st = &State{LoginShell: true}
 		r.state[name] = st
 	}
+	beforeSecrets := MergeEnv(nil, st.Secrets)
 	fn(st)
+	changed := !equalStringMap(beforeSecrets, st.Secrets)
+	var generation uint64
+	if changed {
+		r.nextGen++
+		generation = r.nextGen
+		r.generations[name] = generation
+	}
+	hook := r.onHostChange
+	r.mu.Unlock()
+	r.tx.Unlock()
+	if changed && hook != nil {
+		hook(name, generation)
+	}
+}
+
+func equalStringMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // MergeEnv layers per-call env over the host's sticky env, with the per-call

@@ -913,6 +913,41 @@ Batch A 已验收：最终代码 SHA 为 `c9a796cc8ea57aee2afbca13671d27b360baae
 
 Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 
+#### Phase 2 实施记录（2026-08-28）
+
+实现状态：
+
+- [x] P2-01：`internal/secrets.Key` 由 registry `scope`、immutable host identity（alias、canonical fingerprint、monotonic generation）和 `name` 组成。`ResolveEnv` 只接受完整精确键；两台 host 的同名值可并存。为兼容既有 hostless MCP/local-file 调用，保留 `scope=output`，但该值只参与输出脱敏，永远不能作为远端 env 的回退来源。
+- [x] P2-02 / ENG-002：地址/用户（包含在 `Addr`）、端口、`RemoteDir` 或 registry scope 变化会推进 generation、清空旧 sticky state，并由 host-change hook 关闭连接及清除该 alias 的 scoped Store 条目。配置 entry 按权威 snapshot 替换而不是 merge，删除的 env/secret 不会在 reload 后残留。仅 `force_agent_upload` 变化会重建连接和重载 secret，但不会误清非身份 sticky 配置。
+- [x] P2-03：连接使用显式 `cold → initializing → ready|failed` 安全初始化状态；状态、声明数、加载数和固定失败 reason 通过 `rdev_session.connection_security` 暴露。identity/generation read lease 覆盖 state snapshot、secret 展开、请求构造、远端 I/O、递归响应/错误脱敏和返回；声明 secret 带 `declarative` provenance，通过临时 batch 全部验证后原子写入 Store，随后连接才发布，重连会刷新声明值而不覆盖 `manual` 值。失败保持 fail-closed 且同一未变化 generation 不反复拨号伪装成 ready。secret rotation/delete 使用 identity write lease；输出另持有操作起点的不可变 redaction snapshot 并与返回时 Store 合并，旧值删除/轮换不会击穿在途响应，也不跨 alias 阻塞。
+- [x] P2-04：Store 对 struct、pointer/interface、slice/array 和 map key/value 做 pre-serialization recursive redaction；map key 脱敏碰撞保留所有 entry。MCP SDK 已生成 `json.RawMessage`/JSON text fallback 时先 decode 为原始字符串、递归处理、再 serialize；CLI `printJSON`、stdout/stderr client result、最终 error 和安全事件使用同一 Store redactor。远端受控 probe/stderr/raw frame 不再拼入 transport error，未知 prospective secret 的初始化/读取错误只返回固定分类。测试覆盖引号、反斜杠、换行、Unicode、嵌套 JSON、纯文本和 error。`content_b64` 是不可信元数据：编码字符串若命中注册值会清除该标志并返回脱敏文本，选择 fail closed 而不是允许 agent 借标志绕过。
+- [x] P2-05：远端 secret 请求 `64 KiB + 1 byte`，接受条件包含 `EOF=true`、`Size <= 64 KiB`、实际返回内容不超过上限且为 text；恰好 64 KiB 接受，观测到额外一字节或 `EOF=false` 均拒绝，失败前不修改 Store。
+- [x] P2-06：所有 Store set/batch/file/remote/inline 入口统一拒绝 `<6 bytes`；验证失败保持旧值不变，不再存在“注入成功但不会脱敏”的状态。
+- [x] Phase 2 观测：security snapshot schema 升为 v2，增加固定 reason 的 secret load/reject 计数、连接安全状态 transition 计数和无标签 redaction hit 计数；事件只带固定 vocabulary 和 host target hash，不携带 secret name/value、路径、argv、远端输出或错误原文。
+
+独立复审验收补充：
+
+- CLI `hosts add` 与 MCP `rdev_session` 现统一调用 Registry 原生 staged transaction；host、scope、sticky state 和完整 secret declarations 先验证，`persist` 先安全写入 staged snapshot，随后在一个临界区发布 host/scope/state/generation，并且每个 alias 最多触发一次失效。普通持久化失败不会改变 live snapshot；并发 status/list 通过原子 `Inspect` 只观察提交前或提交后的完整组合。
+- Registry 的单文件安全写原语不能为 global/project 两个 `hosts.json` 提供带恢复日志的崩溃一致事务，因此 `persist=true` 默认拒绝仍存在旧 scope 持久化定义的跨 scope 迁移，并在任何文件写入前返回明确的显式分步提示。Registry 额外记录每个 alias 实际存在于哪些配置文件，因而先做 live-only scope 变化、再调用 `Save` 或第二次 `ApplyHostUpdate(persist=true)` 也不能绕过保护。调用方必须先显式保存/移除旧 scope 定义，再单独持久化新 scope；旧 scope 删除失败会保留迁移保护和原文件。`persist=false` 的 scope 变化被明确为仅当前进程有效：它仍推进 identity generation、清空旧 sticky/secret declarations 并失效连接，但不改变任一文件，重启恢复磁盘定义。
+- 最终只读复核发现并修复了显式两步迁移后的反向旁路：每个 alias 的持久化位置与 live-only 源现在合并为 `stable` / `live-moved` 状态机，并在 Load、`ApplyHostUpdate`、`SetScope` 和 scope 权威重写时作为一个值转换、快照和发布。旧源重写一旦提交（包括 committed cleanup warning）即同时移除 durable source 并归一化 move source；目标写入失败保留“源已删除、目标未持久化”的准确状态供安全重试，完成后任何反向 `persist=true` 都重新进入 `live-moved` 并在写入前拒绝。
+- 连接池 publication 绑定单调 token，所有 published connection 的 detach、`Close` 与收尾状态发布统一经过同一边界：detach 必须命中连接实例和 publication，阻塞 `Close` 返回后还必须仍持有最新 token 且 alias 没有替代连接，才能写 `cold`/`failed`。显式 disconnect、host invalidation、陈旧池连接、transport retry、初始化失败和 client-wide close 不再有直接状态回写旁路；新连接和 `ready` 在同一锁区发布，旧收尾不能再制造 `connected=true/security=cold`，且关闭过程不持有全局 client 锁。
+- MCP JSON backstop 使用 `UseNumber` 保持大整数原文/语义，同时继续递归脱敏字符串及 map key；secret 文件分类先依据 `EOF/Size` 判定截断，再判 binary，最后只对 text 检查 `Content` 长度，因此恰好 64 KiB 的 base64 payload 不再被编码长度误分类。
+
+兼容与迁移：
+
+- 现有 hosts.json schema 不变，声明式 `secrets: {name:path}` 继续可用；行为从“读取失败只 warning、连接仍可用”收紧为 fail-closed。修复错误路径或用带 `host` 的显式注册提供同一 exact identity 的值后可重新初始化。
+- 既有 `rdev_secrets action=set` / 本地 `set_from_file` 若省略 `host` 仍成功，但现在是明确的 redaction-only registration；需要 `secret:name` 注入时必须提供 host。`list` 保留去重后的 `names` 字段，并新增无值的完整 `secrets` descriptor 列表。
+- Host identity/scope 重定义不迁移旧凭据。非持久化重定义只影响当前进程；持久化跨 scope 变更必须先显式移除旧 scope 的磁盘定义。调用方需要在新 identity 下重新注册；声明式路径会在新连接初始化时重新读取。
+
+本阶段明确未覆盖：
+
+- 尚未引入 Phase 3 的幂等请求分类、协议级 cancel、frame/output 统一硬上限或结构化 error envelope；现有一次 transport retry 未扩大，并新增 immutable identity 检查，alias 在重试间重定义时拒绝把旧请求重放到新目标。
+- 尚未引入 Phase 4 的完整连接池、LRU/TTL、`IdentityFile`/`IdentitiesOnly` execution profile 或历史 secret rotation archive；Phase 2 只实现每 alias 的安全初始化与 operation/mutation lease。
+- 多 principal capability 和共享 broker secret authority 仍属于 Phase 5；当前 scope 是单进程 registry 的 global/project scope，并以 alias-local identity 隔离。
+- 显式的两步跨 scope 文件操作本身不是跨文件原子事务；进程在两步之间崩溃时需要调用方继续第二步或恢复旧文件。本阶段刻意不伪装成拥有不存在的崩溃一致性，自动 `persist=true` 路径保持 fail-closed。若未来要求单命令原子迁移，需要引入可恢复 journal/transaction manifest，并在每次 Load/写入前完成恢复。
+
+验证覆盖包括：跨 host 同名 secret、output-only 禁止注入、Host/Scope/config override 清理、组合更新持久化失败无 live mutation、global↔project 双向持久化迁移拒绝、两步迁移后反向拒绝与连续往返、账本状态归一化、目标优先/源优先顺序、源/目标未提交失败与 committed warning、重启重载旧定义与旧 secret declaration、live-only scope 语义、`SetScope + Save`/第二次 persist 旁路、源 scope 删除失败和目标 writer 不可达、并发不可见半状态、CLI/MCP 共享声明验证、并发首请求、初始化失败与状态可见、显式 disconnect 及 transport retry 的旧连接慢 `Close`/新 `ready` 确定性时序、跨 host 不阻塞、连接安全状态与 metrics 一致性、初始化期间 alias redefinition、请求构造/响应脱敏/secret rotation lease、特殊字符及大整数的 structured/text/error/CLI 路径、64 KiB text/binary 与超一字节边界、短值、Store 不变性、低基数 metrics/event 以及 race。完整门禁结果记录在本次提交说明中。
+
 ### Phase 3：请求语义、取消和资源硬限制
 
 覆盖：SEC-006、SEC-007、ENG-003、ENG-007、ENG-008、ENG-032、ENG-033。

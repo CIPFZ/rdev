@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
@@ -25,11 +28,21 @@ type fakeRemoteConn struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+	handler func(*proto.Request) (*proto.Response, error)
+	closeFn func()
 }
 
 func (f *fakeRemoteConn) Host() transport.Host { return f.host }
 func (f *fakeRemoteConn) SSHArgs() []string    { return []string{"-p", fmt.Sprint(f.host.Port)} }
-func (f *fakeRemoteConn) Close() error         { f.mu.Lock(); f.closed = true; f.mu.Unlock(); return nil }
+func (f *fakeRemoteConn) Close() error {
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	if f.closeFn != nil {
+		f.closeFn()
+	}
+	return nil
+}
 func (f *fakeRemoteConn) Do(_ context.Context, req *proto.Request) (*proto.Response, error) {
 	if f.entered != nil {
 		f.once.Do(func() { close(f.entered) })
@@ -38,12 +51,15 @@ func (f *fakeRemoteConn) Do(_ context.Context, req *proto.Request) (*proto.Respo
 	f.mu.Lock()
 	f.ops = append(f.ops, req.Op)
 	f.mu.Unlock()
+	if f.handler != nil {
+		return f.handler(req)
+	}
 	r := &proto.Response{OK: true}
 	switch req.Op {
 	case proto.OpExec:
 		r.Exec = &proto.ExecResult{}
 	case proto.OpReadFile:
-		r.Read = &proto.ReadResult{}
+		r.Read = &proto.ReadResult{EOF: true}
 	case proto.OpWriteFile:
 		r.Cat = &proto.WriteResult{}
 	case proto.OpPing:
@@ -56,6 +72,21 @@ func newTestClient() *Client {
 	return New(func(goos, goarch string) (*transport.AgentBinary, error) {
 		return &transport.AgentBinary{Data: []byte("fake")}, nil
 	})
+}
+
+func testOperation(c *Client, host string) operationIdentity {
+	resolved, err := c.Hosts.Resolve(host)
+	if err != nil {
+		panic(err)
+	}
+	return operationIdentity{
+		Scope: secrets.Scope(resolved.Scope), Host: secretHostIdentity(resolved), State: c.Hosts.State(host),
+	}
+}
+
+func testHostSecretKey(c *Client, host, name string) secrets.Key {
+	identity := testOperation(c, host)
+	return secrets.HostKey(identity.Scope, identity.Host, name)
 }
 
 func TestExecRejectsEmptyArgv(t *testing.T) {
@@ -83,7 +114,7 @@ func TestBuildExecParamsInheritsSessionState(t *testing.T) {
 	})
 
 	// Per-call values win; unset ones fall back to the sticky session state.
-	params, err := c.buildExecParams("dev", []string{"pwd"}, "", map[string]string{"EXTRA": "2"}, nil)
+	params, err := c.buildExecParams(testOperation(c, "dev"), []string{"pwd"}, "", map[string]string{"EXTRA": "2"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +135,7 @@ func TestBuildExecParamsPerCallOverrides(t *testing.T) {
 	c.Hosts.Update("dev", func(s *session.State) { s.Cwd = "~/nexus" })
 
 	no := false
-	params, err := c.buildExecParams("dev", []string{"pwd"}, "/tmp", nil, &no)
+	params, err := c.buildExecParams(testOperation(c, "dev"), []string{"pwd"}, "/tmp", nil, &no)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,9 +150,9 @@ func TestBuildExecParamsPerCallOverrides(t *testing.T) {
 func TestBuildExecParamsResolvesSecretRef(t *testing.T) {
 	c := newTestClient()
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "user@h"})
-	c.Secrets.Set("tok", "realvalue123")
+	c.Secrets.Set(testHostSecretKey(c, "dev", "tok"), "realvalue123")
 
-	params, err := c.buildExecParams("dev", []string{"env"}, "", map[string]string{"T": "secret:tok"}, nil)
+	params, err := c.buildExecParams(testOperation(c, "dev"), []string{"env"}, "", map[string]string{"T": "secret:tok"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +167,7 @@ func TestBuildExecParamsUnknownSecretErrors(t *testing.T) {
 	c := newTestClient()
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "user@h"})
 
-	_, err := c.buildExecParams("dev", []string{"env"}, "", map[string]string{"T": "secret:missing"}, nil)
+	_, err := c.buildExecParams(testOperation(c, "dev"), []string{"env"}, "", map[string]string{"T": "secret:missing"}, nil)
 	if err == nil {
 		t.Error("an unknown secret reference should error")
 	}
@@ -196,7 +227,7 @@ func TestSyncRejectsBadDirection(t *testing.T) {
 
 func TestRedactErrScrubsSecrets(t *testing.T) {
 	c := newTestClient()
-	c.Secrets.Set("tok", "82d9b49359b262b40bdbbfa844891b5e")
+	c.Secrets.Set(secrets.OutputKey("tok"), "82d9b49359b262b40bdbbfa844891b5e")
 
 	err := c.redactErr(errFromString("failed with token 82d9b49359b262b40bdbbfa844891b5e"))
 	if strings.Contains(err.Error(), "82d9b493") {
@@ -252,7 +283,7 @@ func TestLoadHostSecretsRegistersFromPath(t *testing.T) {
 
 	// Read locally: SetSecretFromRemoteFile needs a live agent, so exercise the
 	// store's own path-reading here and check redaction end to end.
-	if err := c.Secrets.SetFromFile("tok", keyPath); err != nil {
+	if err := c.Secrets.SetFromFile(testHostSecretKey(c, "dev", "tok"), keyPath); err != nil {
 		t.Fatal(err)
 	}
 	got := c.Secrets.Redact("output containing " + token + " inline")
@@ -272,27 +303,23 @@ func TestLoadHostSecretsRegistersFromPath(t *testing.T) {
 // identical. Confirmed by mutation: with the guard deleted this test still passed.
 // The warning is the observable, so both are checked.
 func TestLoadHostSecretsKeepsExplicitValue(t *testing.T) {
-	var warnings []string
 	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
-	c.warn = func(format string, args ...any) {
-		warnings = append(warnings, fmt.Sprintf(format, args...))
-	}
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
 	c.Hosts.Update("dev", func(s *session.State) {
 		s.Secrets = map[string]string{"tok": "/nonexistent/path"}
 	})
-	if err := c.Secrets.Set("tok", "explicitly-set-value"); err != nil {
+	if err := c.Secrets.Set(testHostSecretKey(c, "dev", "tok"), "explicitly-set-value"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Would try to read the bogus path if it did not skip already-registered names.
-	c.loadHostSecrets(context.Background(), "dev", nil)
-
-	if v, _ := c.Secrets.Get("tok"); v != "explicitly-set-value" {
-		t.Errorf("value = %q, want the explicit registration preserved", v)
+	resolved, _ := c.Hosts.Resolve("dev")
+	if _, _, err := c.loadHostSecrets(context.Background(), resolved, c.Hosts.State("dev"), nil); err != nil {
+		t.Fatal(err)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("warnings = %v, want none: the configured path must not be read at all", warnings)
+
+	if v, _ := c.Secrets.Get(testHostSecretKey(c, "dev", "tok")); v != "explicitly-set-value" {
+		t.Errorf("value = %q, want the explicit registration preserved", v)
 	}
 }
 
@@ -307,7 +334,7 @@ func TestLoadHostSecretsKeepsExplicitValue(t *testing.T) {
 func TestSyncResultRedactsEveryStringField(t *testing.T) {
 	c := newTestClient()
 	const tok = "s3cret-passphrase-value-123456"
-	if err := c.Secrets.Set("tok", tok); err != nil {
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), tok); err != nil {
 		t.Fatal(err)
 	}
 
@@ -338,7 +365,7 @@ func TestSyncResultRedactsEveryStringField(t *testing.T) {
 func TestExecResultRedactsCwd(t *testing.T) {
 	c := newTestClient()
 	const tok = "credential-dir-name-abcdefgh"
-	if err := c.Secrets.Set("tok", tok); err != nil {
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), tok); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.Secrets.Redact("/home/u/" + tok + "/work"); strings.Contains(got, tok) {
@@ -357,7 +384,7 @@ func TestExecResultRedactsCwd(t *testing.T) {
 func TestRedactJobScrubsEveryStringField(t *testing.T) {
 	c := newTestClient()
 	const tok = "job-field-credential-value-99"
-	if err := c.Secrets.Set("tok", tok); err != nil {
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), tok); err != nil {
 		t.Fatal(err)
 	}
 
@@ -401,7 +428,10 @@ func TestRedactJobNil(t *testing.T) {
 func TestLoadHostSecretsNoopWithoutConfig(t *testing.T) {
 	c := New(func(a, b string) (*transport.AgentBinary, error) { return nil, nil })
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
-	c.loadHostSecrets(context.Background(), "dev", nil)
+	resolved, _ := c.Hosts.Resolve("dev")
+	if _, _, err := c.loadHostSecrets(context.Background(), resolved, c.Hosts.State("dev"), nil); err != nil {
+		t.Fatal(err)
+	}
 	if n := len(c.Secrets.Names()); n != 0 {
 		t.Errorf("registered %d secrets from an empty config", n)
 	}
@@ -420,7 +450,7 @@ func TestSecretsSurviveConnectionLoss(t *testing.T) {
 	c := newTestClient()
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
 	const token = "token-that-must-stay-hidden"
-	if err := c.Secrets.Set("tok", token); err != nil {
+	if err := c.Secrets.Set(testHostSecretKey(c, "dev", "tok"), token); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,30 +481,26 @@ func TestLoadHostSecretsSkipsAlreadyRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var warnings []string
 	c := newTestClient()
-	c.warn = func(format string, args ...any) {
-		warnings = append(warnings, fmt.Sprintf(format, args...))
-	}
 	c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
 	c.Hosts.Update("dev", func(s *session.State) {
 		s.Secrets = map[string]string{"tok": keyPath}
 	})
-	if err := c.Secrets.SetFromFile("tok", keyPath); err != nil {
+	if err := c.Secrets.SetFromFile(testHostSecretKey(c, "dev", "tok"), keyPath); err != nil {
 		t.Fatal(err)
 	}
 
 	// Second pass, as a reconnect would trigger. Reaching the fetch would need a
 	// live agent, so it would fail and warn -- silence is the proof it was skipped.
-	c.loadHostSecrets(context.Background(), "dev", nil)
-
-	if len(warnings) != 0 {
-		t.Errorf("warnings = %v, want none: an already-registered name must not be refetched", warnings)
+	resolved, _ := c.Hosts.Resolve("dev")
+	if _, _, err := c.loadHostSecrets(context.Background(), resolved, c.Hosts.State("dev"), nil); err != nil {
+		t.Fatal(err)
 	}
+
 	if names := c.Secrets.Names(); len(names) != 1 {
 		t.Errorf("names = %v, want exactly one registration", names)
 	}
-	if v, _ := c.Secrets.Get("tok"); v != token {
+	if v, _ := c.Secrets.Get(testHostSecretKey(c, "dev", "tok")); v != token {
 		t.Errorf("value = %q, want the original token preserved", v)
 	}
 }
@@ -555,7 +581,7 @@ func TestAliasIdentityUpdateEvictsEverySink(t *testing.T) {
 	}
 }
 
-func TestConcurrentLookupCannotPublishSupersededDial(t *testing.T) {
+func TestIdentityUpdateWaitsForSecurityInitializationLease(t *testing.T) {
 	c := newTestClient()
 	started, release := make(chan struct{}), make(chan struct{})
 	var mu sync.Mutex
@@ -579,11 +605,21 @@ func TestConcurrentLookupCannotPublishSupersededDial(t *testing.T) {
 		done <- err
 	}()
 	<-started
-	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}); err != nil {
-		t.Fatal(err)
+	updateDone := make(chan error, 1)
+	go func() { updateDone <- c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}) }()
+	select {
+	case err := <-updateDone:
+		t.Fatalf("identity update bypassed initialization lease: %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
 	close(release)
 	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updateDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -786,5 +822,701 @@ func TestHostALeaseDoesNotBlockHostBIdentityUpdate(t *testing.T) {
 	}
 	if redials != 1 {
 		t.Fatalf("post-update executions dialed %d times, want one new identity", redials)
+	}
+}
+
+func TestSameNameSecretsAreResolvedOnlyForExactHost(t *testing.T) {
+	c := newTestClient()
+	for _, host := range []transport.Host{{Name: "a", Addr: "u@a"}, {Name: "b", Addr: "u@b"}} {
+		if err := c.Hosts.Add(host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.SetSecret("a", "tok", "host-a-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetSecret("b", "tok", "host-b-secret"); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]string)
+	var mu sync.Mutex
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op == proto.OpExec {
+				mu.Lock()
+				seen[h.Name] = req.Exec.Env["TOKEN"]
+				mu.Unlock()
+				return &proto.Response{OK: true, Exec: &proto.ExecResult{}}, nil
+			}
+			return &proto.Response{OK: true}, nil
+		}}, nil
+	}
+	for _, host := range []string{"a", "b"} {
+		if _, err := c.Exec(t.Context(), ExecOptions{Host: host, Argv: []string{"env"}, Env: map[string]string{"TOKEN": "secret:tok"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seen["a"] != "host-a-secret" || seen["b"] != "host-b-secret" {
+		t.Fatalf("cross-host resolution: %+v", seen)
+	}
+}
+
+func TestConcurrentFirstRequestsWaitForSecureInitialization(t *testing.T) {
+	c := newTestClient()
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+		t.Fatal(err)
+	}
+	c.Hosts.Update("dev", func(st *session.State) { st.Secrets = map[string]string{"tok": "~/token"} })
+	const token = "initialization-secret-value"
+	started, releaseRead := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	var execs int
+	var mu sync.Mutex
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			switch req.Op {
+			case proto.OpReadFile:
+				once.Do(func() { close(started) })
+				<-releaseRead
+				return &proto.Response{OK: true, Read: &proto.ReadResult{Content: token, Size: int64(len(token)), EOF: true}}, nil
+			case proto.OpExec:
+				mu.Lock()
+				execs++
+				mu.Unlock()
+				return &proto.Response{OK: true, Exec: &proto.ExecResult{Stdout: token}}, nil
+			default:
+				return &proto.Response{OK: true}, nil
+			}
+		}}, nil
+	}
+
+	results := make(chan *ExecResult, 2)
+	errs := make(chan error, 2)
+	call := func() {
+		res, err := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		results <- res
+		errs <- err
+	}
+	go call()
+	<-started
+	go call()
+	time.Sleep(30 * time.Millisecond)
+	if c.IsConnected("dev") {
+		t.Fatal("connection published before declared secrets finished loading")
+	}
+	if state := c.ConnectionSecurity("dev").State; state != observe.SecurityInitializing {
+		t.Fatalf("state = %s, want initializing", state)
+	}
+	mu.Lock()
+	before := execs
+	mu.Unlock()
+	if before != 0 {
+		t.Fatalf("%d exec requests ran before initialization commit", before)
+	}
+	close(releaseRead)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		res := <-results
+		if strings.Contains(res.Stdout, token) {
+			t.Fatalf("secret escaped after initialization: %q", res.Stdout)
+		}
+	}
+	if state := c.ConnectionSecurity("dev"); state.State != observe.SecurityReady || state.Loaded != 1 {
+		t.Fatalf("security state = %+v", state)
+	}
+}
+
+func TestInitializationFailureIsVisibleAndNeverPublished(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	c.Hosts.Update("dev", func(st *session.State) { st.Secrets = map[string]string{"tok": "~/oversized"} })
+	dials := 0
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		dials++
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			return &proto.Response{OK: true, Read: &proto.ReadResult{Content: strings.Repeat("x", maxSecretFileBytes), Size: maxSecretFileBytes + 1, EOF: false}}, nil
+		}}, nil
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("initialization error = %v", err)
+	}
+	if c.IsConnected("dev") {
+		t.Fatal("failed initialization published a connection")
+	}
+	status := c.ConnectionSecurity("dev")
+	if status.State != observe.SecurityFailed || status.Reason != observe.ReasonSecretTruncated {
+		t.Fatalf("status = %+v", status)
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err == nil {
+		t.Fatal("cached failure was presented as ready")
+	}
+	if dials != 1 {
+		t.Fatalf("unchanged failed identity redialed %d times", dials)
+	}
+}
+
+func TestRemoteSecretTruncationKeepsStoreUnchanged(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	if err := c.SetSecret("dev", "tok", "original-secret-value"); err != nil {
+		t.Fatal(err)
+	}
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op == proto.OpReadFile {
+				if req.Read.Limit != maxSecretFileBytes+1 {
+					t.Fatalf("secret read limit = %d, want cap+1", req.Read.Limit)
+				}
+				return &proto.Response{OK: true, Read: &proto.ReadResult{Content: strings.Repeat("z", maxSecretFileBytes), Size: maxSecretFileBytes + 1, EOF: false}}, nil
+			}
+			return &proto.Response{OK: true}, nil
+		}}, nil
+	}
+	if err := c.SetSecretFromRemoteFile(t.Context(), "dev", "tok", "~/too-large"); err == nil {
+		t.Fatal("truncated secret was accepted")
+	}
+	value, ok := c.Secrets.Get(testHostSecretKey(c, "dev", "tok"))
+	if !ok || value != "original-secret-value" {
+		t.Fatalf("store changed to %q after truncation", value)
+	}
+}
+
+func TestSecretReadBoundaryAndOneByteOver(t *testing.T) {
+	exact := strings.Repeat("a", maxSecretFileBytes)
+	if got, _, err := validateSecretRead(&proto.ReadResult{Content: exact, Size: maxSecretFileBytes, EOF: true}); err != nil || got != exact {
+		t.Fatalf("exact boundary rejected: len=%d err=%v", len(got), err)
+	}
+	if _, reason, err := validateSecretRead(&proto.ReadResult{Content: exact, Size: maxSecretFileBytes + 1, EOF: false}); err == nil || reason != observe.ReasonSecretTruncated {
+		t.Fatalf("one byte over accepted: reason=%s err=%v", reason, err)
+	}
+	// Enforce the cap from observed bytes even if stale or malicious metadata
+	// claims the cap+1 read reached EOF at exactly the old size.
+	if _, reason, err := validateSecretRead(&proto.ReadResult{Content: exact + "b", Size: maxSecretFileBytes, EOF: true}); err == nil || reason != observe.ReasonSecretTruncated {
+		t.Fatalf("observed extra byte accepted with lying metadata: reason=%s err=%v", reason, err)
+	}
+	exactBinary := base64.StdEncoding.EncodeToString(make([]byte, maxSecretFileBytes))
+	if len(exactBinary) <= maxSecretFileBytes {
+		t.Fatalf("test probe does not exceed encoded boundary: %d", len(exactBinary))
+	}
+	if _, reason, err := validateSecretRead(&proto.ReadResult{
+		Content: exactBinary, ContentB64: true, Size: maxSecretFileBytes, EOF: true,
+	}); err == nil || reason != observe.ReasonSecretBinary {
+		t.Fatalf("exact 64 KiB binary misclassified: reason=%s err=%v", reason, err)
+	}
+	if _, reason, err := validateSecretRead(&proto.ReadResult{
+		Content: exactBinary, ContentB64: true, Size: maxSecretFileBytes + 1, EOF: true,
+	}); err == nil || reason != observe.ReasonSecretTruncated {
+		t.Fatalf("64 KiB+1 binary misclassified: reason=%s err=%v", reason, err)
+	}
+}
+
+func TestSlowOldCloseCannotOverwriteNewReadyPublication(t *testing.T) {
+	c := newTestClient()
+	for _, host := range []transport.Host{{Name: "dev", Addr: "u@dev"}, {Name: "other", Addr: "u@other"}} {
+		if err := c.Hosts.Add(host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeEntered, releaseClose := make(chan struct{}), make(chan struct{})
+	devDials := 0
+	c.dial = func(_ context.Context, host transport.Host, _ AgentLookup) (remoteConnection, error) {
+		if host.Name != "dev" {
+			return &fakeRemoteConn{host: host}, nil
+		}
+		devDials++
+		conn := &fakeRemoteConn{host: host}
+		if devDials == 1 {
+			conn.closeFn = func() {
+				close(closeEntered)
+				<-releaseClose
+			}
+		}
+		return conn, nil
+	}
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.conn(t.Context(), "other"); err != nil {
+		t.Fatal(err)
+	}
+	disconnected := make(chan bool, 1)
+	go func() { disconnected <- c.Disconnect("dev") }()
+	<-closeEntered
+
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("new publication is not ready: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+	otherDone := make(chan error, 1)
+	go func() { _, err := c.conn(context.Background(), "other"); otherDone <- err }()
+	select {
+	case err := <-otherDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow Close on dev blocked unrelated pooled connection")
+	}
+
+	close(releaseClose)
+	if ok := <-disconnected; !ok {
+		t.Fatal("old connection was not detached")
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("old Close overwrote new publication: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+}
+
+func TestSlowDetachedCloseCannotRestoreGenerationBeforeHostInvalidation(t *testing.T) {
+	c := newTestClient()
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@old"}); err != nil {
+		t.Fatal(err)
+	}
+	closeEntered, releaseClose := make(chan struct{}), make(chan struct{})
+	c.dial = func(_ context.Context, host transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: host, closeFn: func() {
+			close(closeEntered)
+			<-releaseClose
+		}}, nil
+	}
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	disconnected := make(chan bool, 1)
+	go func() { disconnected <- c.Disconnect("dev") }()
+	<-closeEntered
+
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := c.Hosts.Resolve("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := c.ConnectionSecurity("dev")
+	if status.State != observe.SecurityCold || status.Generation != resolved.Generation {
+		t.Fatalf("host invalidation state = %+v, generation=%d", status, resolved.Generation)
+	}
+
+	close(releaseClose)
+	if ok := <-disconnected; !ok {
+		t.Fatal("old connection was not detached")
+	}
+	status = c.ConnectionSecurity("dev")
+	if status.State != observe.SecurityCold || status.Generation != resolved.Generation {
+		t.Fatalf("old Close restored stale generation: status=%+v generation=%d", status, resolved.Generation)
+	}
+}
+
+func TestRetrySlowCloseCannotOverwriteReplacementReadyPublication(t *testing.T) {
+	c := newTestClient()
+	for _, host := range []transport.Host{{Name: "dev", Addr: "u@dev"}, {Name: "other", Addr: "u@other"}} {
+		if err := c.Hosts.Add(host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseline := c.Hosts.SecuritySnapshot().ConnectionSecurityTransitions
+	closeEntered, releaseClose := make(chan struct{}), make(chan struct{})
+	devDials := 0
+	c.dial = func(_ context.Context, host transport.Host, _ AgentLookup) (remoteConnection, error) {
+		conn := &fakeRemoteConn{host: host}
+		if host.Name == "dev" {
+			devDials++
+			if devDials == 1 {
+				conn.handler = func(*proto.Request) (*proto.Response, error) {
+					return nil, errors.New("injected broken transport")
+				}
+				conn.closeFn = func() {
+					close(closeEntered)
+					<-releaseClose
+				}
+			}
+		}
+		return conn, nil
+	}
+
+	retryDone := make(chan error, 1)
+	go func() {
+		_, err := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		retryDone <- err
+	}()
+	<-closeEntered
+
+	// A second caller can publish a replacement while the retry path is blocked
+	// closing the detached transport.
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("replacement is not ready: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+	if got := c.Hosts.SecuritySnapshot().ConnectionSecurityTransitions[string(observe.SecurityCold)]; got != baseline[string(observe.SecurityCold)] {
+		t.Fatalf("stale retry teardown published cold before Close returned: before=%d after=%d", baseline[string(observe.SecurityCold)], got)
+	}
+
+	otherDone := make(chan error, 1)
+	go func() { _, err := c.conn(context.Background(), "other"); otherDone <- err }()
+	select {
+	case err := <-otherDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retry Close on dev blocked unrelated host")
+	}
+
+	close(releaseClose)
+	if err := <-retryDone; err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("stale retry Close overwrote replacement: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+	metrics := c.Hosts.SecuritySnapshot().ConnectionSecurityTransitions
+	if metrics[string(observe.SecurityCold)] != baseline[string(observe.SecurityCold)] ||
+		metrics[string(observe.SecurityInitializing)]-baseline[string(observe.SecurityInitializing)] != 3 ||
+		metrics[string(observe.SecurityReady)]-baseline[string(observe.SecurityReady)] != 3 ||
+		metrics[string(observe.SecurityFailed)] != baseline[string(observe.SecurityFailed)] {
+		t.Fatalf("connection security transition metrics are inconsistent: %v", metrics)
+	}
+}
+
+func TestUntrustedBase64FlagCannotBypassResponseRedaction(t *testing.T) {
+	c := newTestClient()
+	const token = "coincidental-base64-text"
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), token); err != nil {
+		t.Fatal(err)
+	}
+	resp := &proto.Response{Read: &proto.ReadResult{Content: token, ContentB64: true, EOF: true}}
+	got := c.redactResponse(resp)
+	if got.Read.Content != "<redacted:tok>" || got.Read.ContentB64 {
+		t.Fatalf("content_b64 bypassed redaction: %+v", got.Read)
+	}
+}
+
+func TestFixedRequestRetryRefusesRedefinedAlias(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@a"})
+	requestsOnB := 0
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		if h.Addr == "u@a" {
+			return &fakeRemoteConn{
+				host: h,
+				handler: func(*proto.Request) (*proto.Response, error) {
+					return nil, errors.New("broken transport")
+				},
+				closeFn: func() {
+					if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@b"}); err != nil {
+						t.Errorf("redefine host: %v", err)
+					}
+				},
+			}, nil
+		}
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op == proto.OpWriteFile {
+				requestsOnB++
+			}
+			return &proto.Response{OK: true, Cat: &proto.WriteResult{}}, nil
+		}}, nil
+	}
+	_, err := c.WriteFile(t.Context(), WriteFileOptions{Host: "dev", Path: "/tmp/x", Content: "host-a-only-data"})
+	if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("cross-identity retry error = %v", err)
+	}
+	if requestsOnB != 0 {
+		t.Fatalf("host A request was replayed to host B %d times", requestsOnB)
+	}
+}
+
+func TestForceAgentUploadReconnectsWithoutPurgingScopedSecret(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	if err := c.SetSecret("dev", "tok", "scoped-secret-value"); err != nil {
+		t.Fatal(err)
+	}
+	dials := 0
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		dials++
+		return &fakeRemoteConn{host: h}, nil
+	}
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h", ForceAgentUpload: true}); err != nil {
+		t.Fatal(err)
+	}
+	if c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityCold {
+		t.Fatalf("force-upload change left stale connection/status: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+	if n, ok, err := c.SecretLength("dev", "tok"); err != nil || !ok || n != len("scoped-secret-value") {
+		t.Fatalf("force-upload change purged scoped secret: n=%d ok=%v err=%v", n, ok, err)
+	}
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if dials != 2 {
+		t.Fatalf("force-upload change dial count = %d, want 2", dials)
+	}
+}
+
+func TestDeclarativeSecretRefreshesOnReconnect(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	c.Hosts.Update("dev", func(st *session.State) {
+		st.Secrets = map[string]string{"tok": "~/token"}
+	})
+	dials := 0
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		dials++
+		value := fmt.Sprintf("declared-value-%d", dials)
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			switch req.Op {
+			case proto.OpReadFile:
+				return &proto.Response{OK: true, Read: &proto.ReadResult{Content: value, Size: int64(len(value)), EOF: true}}, nil
+			case proto.OpExec:
+				return &proto.Response{OK: true, Exec: &proto.ExecResult{}}, nil
+			default:
+				return &proto.Response{OK: true}, nil
+			}
+		}}, nil
+	}
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	c.Disconnect("dev")
+	if _, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	value, ok := c.Secrets.Get(testHostSecretKey(c, "dev", "tok"))
+	if !ok || value != "declared-value-2" {
+		t.Fatalf("declarative value was not refreshed: %q", value)
+	}
+}
+
+func TestOutputOnlyDeleteCannotDefeatInFlightRedactionSnapshot(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	const token = "output-only-inflight-token"
+	if err := c.SetSecret("", "tok", token); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op == proto.OpExec {
+				close(entered)
+				<-release
+				return &proto.Response{OK: true, Exec: &proto.ExecResult{Stdout: token}}, nil
+			}
+			return &proto.Response{OK: true}, nil
+		}}, nil
+	}
+	type execResult struct {
+		res *ExecResult
+		err error
+	}
+	execDone := make(chan execResult, 1)
+	go func() {
+		res, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		execDone <- execResult{res: res, err: err}
+	}()
+	<-entered
+	deleteDone := make(chan struct{})
+	go func() {
+		_, _ = c.DeleteSecret("", "tok")
+		close(deleteDone)
+	}()
+	select {
+	case <-deleteDone:
+	case <-time.After(time.Second):
+		t.Fatal("output-only delete was globally blocked by an unrelated host operation")
+	}
+	close(release)
+	got := <-execDone
+	if got.err != nil || got.res == nil || strings.Contains(got.res.Stdout, token) {
+		t.Fatalf("in-flight response was not redacted: res=%+v err=%v", got.res, got.err)
+	}
+}
+
+func TestOutputOnlyDeleteDuringColdDialCannotDefeatErrorSnapshot(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	const token = "output-only-cold-dial-token"
+	if err := c.SetSecret("", "tok", token); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		close(entered)
+		<-release
+		return nil, errors.New("dial failed with " + token)
+	}
+	errDone := make(chan error, 1)
+	go func() {
+		_, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		errDone <- err
+	}()
+	<-entered
+	if changed, err := c.DeleteSecret("", "tok"); err != nil || !changed {
+		t.Fatalf("delete output secret: changed=%v err=%v", changed, err)
+	}
+	close(release)
+	err := <-errDone
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "redacted:tok") {
+		t.Fatalf("cold dial error escaped snapshot redaction: %v", err)
+	}
+}
+
+func TestDeclaredSecretDialFailureDoesNotExposeUnknownValue(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	const token = "declared\"secret\\line\n雪界"
+	c.Hosts.Update("dev", func(st *session.State) {
+		st.Secrets = map[string]string{"tok": "~/token"}
+	})
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		return nil, fmt.Errorf("bootstrap stderr=%q", token)
+	}
+	_, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+	if err == nil || strings.Contains(err.Error(), "bootstrap stderr") || strings.Contains(err.Error(), "雪界") || strings.Contains(err.Error(), `secret\\line`) {
+		t.Fatalf("unsafe dial failure = %v", err)
+	}
+	status := c.ConnectionSecurity("dev")
+	if status.State != observe.SecurityFailed || status.Reason != observe.ReasonSecretReadFailed {
+		t.Fatalf("dial failure security state = %+v", status)
+	}
+}
+
+func TestInvalidSecretDeclarationFailsBeforeDial(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	c.Hosts.Update("dev", func(st *session.State) {
+		st.Secrets = map[string]string{"tok": ""}
+	})
+	dials := 0
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		dials++
+		return nil, errors.New("must not dial")
+	}
+	_, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+	if err == nil || !strings.Contains(err.Error(), "invalid secret declaration") {
+		t.Fatalf("invalid declaration error = %v", err)
+	}
+	if dials != 0 {
+		t.Fatalf("invalid declaration performed %d remote dials", dials)
+	}
+}
+
+func TestRemoteSecretReadErrorDoesNotExposeProspectiveValue(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	const token = "prospective\"secret\\line\n雪界"
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op == proto.OpReadFile {
+				return nil, fmt.Errorf("remote stderr=%q", token)
+			}
+			return &proto.Response{OK: true}, nil
+		}}, nil
+	}
+	err := c.SetSecretFromRemoteFile(t.Context(), "dev", "tok", "~/token")
+	if err == nil || strings.Contains(err.Error(), "prospective") || strings.Contains(err.Error(), "雪界") {
+		t.Fatalf("unsafe remote secret read error = %v", err)
+	}
+}
+
+func TestResponseIsRedactedBeforeIdentityUpdatePurgesOldSecret(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@old"})
+	const token = "old-host-response-secret"
+	if err := c.SetSecret("dev", "tok", token); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op == proto.OpExec {
+				close(entered)
+				<-release
+				return &proto.Response{OK: true, Exec: &proto.ExecResult{Stdout: token, Stderr: "err " + token}}, nil
+			}
+			return &proto.Response{OK: true}, nil
+		}}, nil
+	}
+	result := make(chan *ExecResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		res, err := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		result <- res
+		errCh <- err
+	}()
+	<-entered
+	updated := make(chan error, 1)
+	go func() { updated <- c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}) }()
+	select {
+	case err := <-updated:
+		t.Fatalf("identity changed before response redaction: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	res := <-result
+	if strings.Contains(res.Stdout+res.Stderr, token) {
+		t.Fatalf("old response escaped redaction: %+v", res)
+	}
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	for _, descriptor := range c.Secrets.Descriptors() {
+		if descriptor.Host.Alias == "dev" {
+			t.Fatalf("old host secret survived identity update: %+v", descriptor)
+		}
+	}
+}
+
+func TestSecretRotationWaitsForInflightResponseRedaction(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"})
+	const oldValue = "old-rotation-secret"
+	if err := c.SetSecret("dev", "tok", oldValue); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op == proto.OpExec {
+				once.Do(func() { close(entered) })
+				<-release
+				return &proto.Response{OK: true, Exec: &proto.ExecResult{Stdout: oldValue}}, nil
+			}
+			return &proto.Response{OK: true}, nil
+		}}, nil
+	}
+	result := make(chan *ExecResult, 1)
+	go func() {
+		res, _ := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		result <- res
+	}()
+	<-entered
+	rotated := make(chan error, 1)
+	go func() { rotated <- c.SetSecret("dev", "tok", "new-rotation-secret") }()
+	select {
+	case err := <-rotated:
+		t.Fatalf("rotation bypassed operation lease: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if res := <-result; strings.Contains(res.Stdout, oldValue) {
+		t.Fatalf("old value escaped during rotation: %q", res.Stdout)
+	}
+	if err := <-rotated; err != nil {
+		t.Fatal(err)
 	}
 }

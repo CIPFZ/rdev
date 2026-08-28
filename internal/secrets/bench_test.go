@@ -9,7 +9,7 @@ import (
 // (secret-free) text is what matters most.
 func BenchmarkRedactCleanOutput(b *testing.B) {
 	s := New()
-	s.Set("tok", "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+	s.Set(OutputKey("tok"), "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
 	// 64 KB of typical build output.
 	text := strings.Repeat("compiling package foo/bar/baz ... ok 0.12s\n", 1500)
 	b.ResetTimer()
@@ -24,7 +24,7 @@ func BenchmarkRedactCleanOutput(b *testing.B) {
 // byte, so the cheap gate fails to reject.
 func BenchmarkRedactAdversarialFirstByte(b *testing.B) {
 	s := New()
-	s.Set("tok", "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+	s.Set(OutputKey("tok"), "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
 	text := strings.Repeat("g", 64<<10)
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -47,7 +47,7 @@ func BenchmarkRedactNoSecrets(b *testing.B) {
 // Single-line output skips the whitespace-tolerant scan entirely.
 func BenchmarkRedactSingleLine(b *testing.B) {
 	s := New()
-	s.Set("tok", "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+	s.Set(OutputKey("tok"), "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
 	text := strings.Repeat("abcdefghij", 6500) // 65 KB, no whitespace
 	b.ResetTimer()
 	b.ReportAllocs()

@@ -404,7 +404,7 @@ func parseProbe(out string) (*remoteProbe, error) {
 	}
 
 	if p.home == "" {
-		return nil, fmt.Errorf("remote $HOME is empty (probe output %q)", truncate(out, 200))
+		return nil, errors.New("remote platform probe did not report $HOME")
 	}
 	goos, goarch, err := mapPlatform(rawOS + " " + rawArch)
 	if err != nil {
@@ -944,17 +944,14 @@ func agentInstallError(runErr error, stderr string) error {
 	message := strings.TrimSpace(stderr)
 	for _, line := range strings.Split(message, "\n") {
 		line = strings.TrimSpace(line)
-		if detail, ok := strings.CutPrefix(line, agentInstallAmbiguousMarker); ok {
-			return &AgentInstallAmbiguousError{Detail: detail, Cause: runErr}
+		if _, ok := strings.CutPrefix(line, agentInstallAmbiguousMarker); ok {
+			return &AgentInstallAmbiguousError{Detail: "remote reported an ambiguous publication outcome", Cause: runErr}
 		}
-		if detail, ok := strings.CutPrefix(line, agentInstallCommittedMarker); ok {
-			return &AgentInstallCommittedError{Detail: detail, Cause: runErr}
+		if _, ok := strings.CutPrefix(line, agentInstallCommittedMarker); ok {
+			return &AgentInstallCommittedError{Detail: "remote reported a committed publication with cleanup warning", Cause: runErr}
 		}
 	}
-	if message == "" {
-		message = runErr.Error()
-	}
-	return fmt.Errorf("secure agent install: %s", message)
+	return fmt.Errorf("secure agent install failed: %w", runErr)
 }
 
 // installAgent binds the upload to a cryptographically unpredictable,
@@ -1055,7 +1052,7 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	c.writeMu.Unlock()
 	if writeErr != nil {
 		c.abandon(req.ID)
-		return nil, fmt.Errorf("write request (agent gone? stderr=%q): %w", c.stderrTail(), writeErr)
+		return nil, fmt.Errorf("write request to agent: %w", writeErr)
 	}
 
 	select {
@@ -1074,7 +1071,7 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 			if err == nil {
 				err = errors.New("connection closed")
 			}
-			return nil, fmt.Errorf("read response (stderr=%q): %w", c.stderrTail(), err)
+			return nil, fmt.Errorf("read response from agent: %w", err)
 		}
 		if !resp.OK {
 			return resp, fmt.Errorf("remote: %s", resp.Err)
@@ -1105,7 +1102,10 @@ func (c *Conn) readLoop() {
 		if err := json.Unmarshal(raw, &resp); err != nil {
 			// A corrupt line means the stream framing is no longer trustworthy;
 			// failing every waiter beats handing back mismatched replies.
-			c.failAllPending(fmt.Errorf("decode response %q: %w", truncate(string(raw), 200), err))
+			// Raw frames are remote-controlled and may contain a credential in a
+			// noncanonical escaped spelling. Do not embed them in an error that can
+			// reach CLI/MCP output before a matching redactor exists.
+			c.failAllPending(fmt.Errorf("decode agent response: %w", err))
 			return
 		}
 

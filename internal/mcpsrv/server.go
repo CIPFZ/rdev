@@ -7,16 +7,19 @@
 package mcpsrv
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -62,10 +65,9 @@ func newServer(c *client.Client, approveProject func(string) (session.ProjectTru
 
 // redactResults scrubs registered secrets from tool results on their way out.
 //
-// It works on the marshalled JSON rather than walking struct fields: by the time a
-// result reaches middleware the SDK has already turned the typed Out value into
-// StructuredContent, so one pass covers every field of every tool, including ones
-// that do not exist yet.
+// By the time a result reaches middleware the SDK has turned the typed Out value
+// into JSON. The middleware decodes it, recursively redacts original string values,
+// and serializes again so JSON escaping cannot hide a secret.
 //
 // Only tools/call is touched. Other methods carry no remote output, and running the
 // scan over list responses would cost bytes for nothing.
@@ -98,23 +100,52 @@ func redactResults(c *client.Client) mcp.Middleware {
 // depend on which field the client happens to prefer.
 func redactCallToolResult(c *client.Client, ctr *mcp.CallToolResult) {
 	if raw, ok := ctr.StructuredContent.(json.RawMessage); ok {
-		// Redact the JSON text directly. A secret is scrubbed the same whether it
-		// sits in a value, a key, or spans an escape -- and reserializing to apply it
-		// per-string would risk changing the shape of a validated payload.
-		if scrubbed := c.Secrets.Redact(string(raw)); scrubbed != string(raw) {
-			ctr.StructuredContent = json.RawMessage(scrubbed)
+		// Decode first so redaction sees the original string values rather than
+		// their JSON-escaped representation. Quotes, backslashes, newlines and
+		// Unicode escapes otherwise evade a literal scan of serialized bytes.
+		if decoded, ok := decodeJSONValue(raw); ok {
+			if scrubbed, err := json.Marshal(c.Secrets.RedactValue(decoded)); err == nil {
+				ctr.StructuredContent = json.RawMessage(scrubbed)
+			} else {
+				ctr.StructuredContent = json.RawMessage(`{"error":"structured output redaction failed"}`)
+			}
+		} else {
+			ctr.StructuredContent = json.RawMessage(`{"error":"structured output redaction failed"}`)
 		}
+	} else if ctr.StructuredContent != nil {
+		ctr.StructuredContent = c.Secrets.RedactValue(ctr.StructuredContent)
 	}
 	for i, content := range ctr.Content {
 		tc, ok := content.(*mcp.TextContent)
 		if !ok {
 			continue
 		}
-		if scrubbed := c.Secrets.Redact(tc.Text); scrubbed != tc.Text {
-			// Copy rather than mutate: the same Content value may be shared.
+		scrubbed := ""
+		if decoded, ok := decodeJSONValue([]byte(tc.Text)); ok {
+			if raw, err := json.Marshal(c.Secrets.RedactValue(decoded)); err == nil {
+				scrubbed = string(raw)
+			}
+		} else {
+			scrubbed = c.Secrets.Redact(tc.Text)
+		}
+		if scrubbed != "" && scrubbed != tc.Text {
 			ctr.Content[i] = &mcp.TextContent{Meta: tc.Meta, Annotations: tc.Annotations, Text: scrubbed}
 		}
 	}
+}
+
+func decodeJSONValue(raw []byte) (any, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
+	return decoded, true
 }
 
 // ---------- exec ----------
@@ -619,9 +650,10 @@ type HostOut struct {
 	Env        map[string]string `json:"env,omitempty"`
 	LoginShell bool              `json:"login_shell"`
 	// Secrets reports the configured credential paths, never their values.
-	Secrets   map[string]string `json:"secrets,omitempty"`
-	Scope     string            `json:"scope"`
-	Connected bool              `json:"connected" jsonschema:"True when a pooled ssh connection to this host is already open, so the next call skips setup."`
+	Secrets            map[string]string               `json:"secrets,omitempty"`
+	Scope              string                          `json:"scope"`
+	Connected          bool                            `json:"connected" jsonschema:"True when a pooled ssh connection to this host is already open, so the next call skips setup."`
+	ConnectionSecurity client.ConnectionSecurityStatus `json:"connection_security"`
 }
 
 type SessionOut struct {
@@ -644,7 +676,16 @@ func registerSession(s *mcp.Server, c *client.Client, approveProject func(string
 			"Use 'secrets' to declare credential files that should be registered for redaction automatically on " +
 			"every connect, so a token is masked without having to remember rdev_secrets each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionIn) (*mcp.CallToolResult, SessionOut, error) {
+		boundarySnapshot := c.Secrets.Snapshot()
 		approvalWarning := ""
+		hasHostFields := in.Addr != "" || in.Port != 0 || in.RemoteDir != "" || in.Cwd != "" ||
+			len(in.Env) > 0 || in.LoginShell != nil || len(in.Secrets) > 0 || in.Scope != "" || in.Persist
+		if in.Host == "" && hasHostFields {
+			return nil, SessionOut{}, errors.New("host is required for session updates")
+		}
+		if in.ApproveProjectDigest != "" && (in.Host != "" || hasHostFields) {
+			return nil, SessionOut{}, errors.New("approve_project_digest must be submitted separately from host updates")
+		}
 		if in.ApproveProjectDigest != "" {
 			if _, err := approveProject(in.ApproveProjectDigest); err != nil {
 				warning, committed := session.ConfigWriteCommittedWarning(err)
@@ -654,77 +695,45 @@ func registerSession(s *mcp.Server, c *client.Client, approveProject func(string
 				approvalWarning = warning
 			}
 		}
-		isNew := false
-		if in.Host != "" {
-			if _, err := c.Hosts.Host(in.Host); err != nil {
-				isNew = true
-			}
-		}
-
-		if in.Host != "" && in.Addr != "" {
-			if err := c.Hosts.Add(transport.Host{
-				Name: in.Host, Addr: in.Addr, Port: in.Port, RemoteDir: in.RemoteDir,
-			}); err != nil {
-				return nil, SessionOut{}, fmt.Errorf("invalid host: %w", err)
-			}
-		} else if in.Host != "" && in.RemoteDir != "" {
-			// Updating only the state directory: keep the existing destination
-			// rather than requiring the caller to repeat it.
-			h, err := c.Hosts.Host(in.Host)
-			if err != nil {
-				return nil, SessionOut{}, err
-			}
-			h.RemoteDir = in.RemoteDir
-			if err := c.Hosts.Add(h); err != nil {
-				return nil, SessionOut{}, fmt.Errorf("invalid host: %w", err)
-			}
-		}
-		// A live connection was started against the previous address and state
-		// directory, so redefining either must retire it rather than let the next
-		// call reuse stale settings.
-		if in.Host != "" && (in.Addr != "" || in.RemoteDir != "") {
-			c.Disconnect(in.Host)
-		}
-
-		// Default a brand-new host to project scope: a machine you register while
-		// working in a repo almost always belongs to that repo, and the safer
-		// mistake is a host that is too narrowly visible rather than one that
-		// leaks into unrelated projects.
-		scope := session.ScopeProject
+		scope := session.Scope("")
+		setScope := in.Scope != ""
 		switch strings.ToLower(in.Scope) {
 		case "global":
 			scope = session.ScopeGlobal
 		case "project":
 			scope = session.ScopeProject
 		case "":
-			if in.Host != "" && !isNew {
-				scope = c.Hosts.ScopeOf(in.Host)
-			}
 		default:
 			return nil, SessionOut{}, fmt.Errorf("scope must be project or global, got %q", in.Scope)
 		}
-		if in.Host != "" && (in.Addr != "" || in.Scope != "") {
-			c.Hosts.SetScope(in.Host, scope)
+		if in.Port != 0 && in.Addr == "" {
+			return nil, SessionOut{}, errors.New("port requires addr")
 		}
 
-		if in.Host != "" && (in.Cwd != "" || len(in.Env) > 0 || in.LoginShell != nil || len(in.Secrets) > 0) {
-			if _, err := c.Hosts.Host(in.Host); err != nil {
-				return nil, SessionOut{}, err
+		var updateResult session.HostUpdateResult
+		if in.Host != "" && hasHostFields {
+			update := session.HostUpdate{
+				Name: in.Host, Scope: scope, SetScope: setScope, DefaultScope: session.ScopeProject,
+				Env: in.Env, LoginShell: in.LoginShell, Secrets: in.Secrets, Persist: in.Persist,
 			}
-			c.Hosts.Update(in.Host, func(st *session.State) {
-				if in.Cwd != "" {
-					st.Cwd = in.Cwd
+			if in.Addr != "" {
+				h := transport.Host{Name: in.Host, Addr: in.Addr, Port: in.Port, RemoteDir: in.RemoteDir}
+				update.Host = &h
+			} else if in.RemoteDir != "" {
+				update.RemoteDir = &in.RemoteDir
+			}
+			if in.Cwd != "" {
+				update.Cwd = &in.Cwd
+			}
+			var err error
+			updateResult, err = c.Hosts.ApplyHostUpdate(update)
+			if err != nil {
+				warning, committed := session.ConfigWriteCommittedWarning(err)
+				if !committed {
+					return nil, SessionOut{}, err
 				}
-				if len(in.Env) > 0 {
-					st.Env = session.MergeEnv(st.Env, in.Env)
-				}
-				if in.LoginShell != nil {
-					st.LoginShell = *in.LoginShell
-				}
-				if len(in.Secrets) > 0 {
-					st.Secrets = session.MergeEnv(st.Secrets, in.Secrets)
-				}
-			})
+				approvalWarning = warning
+			}
 		}
 
 		out := SessionOut{
@@ -732,42 +741,85 @@ func registerSession(s *mcp.Server, c *client.Client, approveProject func(string
 			Security:     c.Hosts.SecuritySnapshot(),
 			Warning:      approvalWarning,
 		}
-		if in.Persist {
-			if err := c.Hosts.Save(scope); err != nil {
-				return nil, SessionOut{}, fmt.Errorf("save host registry: %w", err)
-			}
+		if updateResult.SavedTo != "" {
 			out.Saved = true
-			if scope == session.ScopeProject {
-				p, _ := session.ProjectConfigPath()
-				out.SavedTo = p
+			out.SavedTo = updateResult.SavedTo
+			if updateResult.Scope == session.ScopeProject {
 				out.SavedNote = "visible only when working in this directory"
 			} else {
-				p, _ := session.ConfigPath()
-				out.SavedTo = p
 				out.SavedNote = "visible in every project"
 			}
 		}
 
+		out = secureSessionSnapshot(c, out, in.Host, boundarySnapshot)
+		return nil, out, nil
+	})
+}
+
+// secureSessionSnapshot holds every reported host identity until the complete
+// typed result has been recursively redacted. Middleware runs later, after a
+// handler returns; relying on it alone lets a concurrent host redefinition purge
+// the old value between snapshot construction and redaction.
+func secureSessionSnapshot(c *client.Client, out SessionOut, selected string, boundarySnapshot *secrets.Store) SessionOut {
+	if boundarySnapshot == nil {
+		boundarySnapshot = c.Secrets.Snapshot()
+	}
+	for {
 		names := c.Hosts.Names()
-		if in.Host != "" {
-			names = []string{in.Host}
+		if selected != "" {
+			names = []string{selected}
 		}
-		for _, n := range names {
-			h, err := c.Hosts.Host(n)
+		type pinned struct {
+			resolved session.ResolvedHost
+			release  func()
+		}
+		pins := make([]pinned, 0, len(names))
+		valid := true
+		for _, name := range names {
+			resolved, err := c.Hosts.Resolve(name)
 			if err != nil {
-				continue
+				if selected != "" {
+					safe := boundarySnapshot.RedactValue(out)
+					return c.Secrets.RedactValue(safe).(SessionOut)
+				}
+				valid = false
+				break
 			}
-			st := c.Hosts.State(n)
+			release, ok := c.Hosts.AcquireIdentity(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
+			if !ok {
+				valid = false
+				break
+			}
+			pins = append(pins, pinned{resolved: resolved, release: release})
+		}
+		if !valid {
+			for i := len(pins) - 1; i >= 0; i-- {
+				pins[i].release()
+			}
+			continue
+		}
+		redactionSnapshot := c.Secrets.Snapshot()
+		out.Hosts = out.Hosts[:0]
+		for _, pin := range pins {
+			h := pin.resolved.Host
+			st := c.Hosts.State(h.Name)
 			out.Hosts = append(out.Hosts, HostOut{
 				Name: h.Name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
 				Cwd: st.Cwd, Env: st.Env, LoginShell: st.LoginShell,
-				Secrets:   st.Secrets,
-				Scope:     string(c.Hosts.ScopeOf(n)),
-				Connected: c.IsConnected(n),
+				Secrets:            st.Secrets,
+				Scope:              string(pin.resolved.Scope),
+				Connected:          c.IsConnected(h.Name),
+				ConnectionSecurity: c.ConnectionSecurity(h.Name),
 			})
 		}
-		return nil, out, nil
-	})
+		safe := boundarySnapshot.RedactValue(out)
+		safe = redactionSnapshot.RedactValue(safe)
+		safe = c.Secrets.RedactValue(safe)
+		for i := len(pins) - 1; i >= 0; i-- {
+			pins[i].release()
+		}
+		return safe.(SessionOut)
+	}
 }
 
 // ---------- secrets ----------
@@ -777,21 +829,27 @@ type SecretsIn struct {
 	Name   string `json:"name,omitempty"`
 	Value  string `json:"value,omitempty" jsonschema:"Plaintext value for action=set. Avoid when possible: it puts the secret in the tool call."`
 	Path   string `json:"path,omitempty" jsonschema:"File to read for action=set_from_file, e.g. ~/.nexus/auth/gongfeng/key."`
-	Host   string `json:"host,omitempty" jsonschema:"For action=set_from_file: read the file on this remote host instead of locally. Use this when the credential lives on the remote machine, which is the common case."`
+	Host   string `json:"host,omitempty" jsonschema:"Host scope for set, set_from_file, or delete. Hostless values are redaction-only and can never be injected into a remote environment."`
 }
 
 type SecretsOut struct {
-	Names   []string `json:"names"`
-	Changed bool     `json:"changed,omitempty"`
-	Source  string   `json:"source,omitempty" jsonschema:"Where the value was read from."`
+	Names   []string             `json:"names" jsonschema:"Compatibility list of unique names; use secrets for unambiguous scope and host identity."`
+	Secrets []secrets.Descriptor `json:"secrets"`
+	Changed bool                 `json:"changed,omitempty"`
+	Source  string               `json:"source,omitempty" jsonschema:"Value provenance without credential contents or paths."`
+}
+
+func currentSecrets(c *client.Client) SecretsOut {
+	return SecretsOut{Names: c.Secrets.Names(), Secrets: c.Secrets.Descriptors()}
 }
 
 func registerSecrets(s *mcp.Server, c *client.Client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "rdev_secrets",
 		Description: "Register credentials so they are masked in all tool output. " +
-			"A registered value is replaced with <redacted:name> everywhere, and can be injected into a remote " +
+			"A host-scoped value is replaced with <redacted:name> everywhere, and can be injected only into that exact host identity's " +
 			"environment by passing env {\"VAR\":\"secret:name\"} without ever revealing the plaintext. " +
+			"Set host explicitly for injectable credentials. Omitting host is compatible redaction-only registration and never falls back during injection. " +
 			"Prefer set_from_file with a host, so the value is read over the connection and never enters " +
 			"a tool call, a transcript, or the local disk. Note that a value registered from the local file " +
 			"will not mask remote output if the two machines hold different credentials. " +
@@ -800,32 +858,37 @@ func registerSecrets(s *mcp.Server, c *client.Client) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SecretsIn) (*mcp.CallToolResult, SecretsOut, error) {
 		switch strings.ToLower(in.Action) {
 		case "set":
-			if err := c.Secrets.Set(in.Name, in.Value); err != nil {
+			if err := c.SetSecret(in.Host, in.Name, in.Value); err != nil {
 				return nil, SecretsOut{}, err
 			}
-			return nil, SecretsOut{Names: c.Secrets.Names(), Changed: true, Source: "inline value"}, nil
+			out := currentSecrets(c)
+			out.Changed, out.Source = true, "inline value"
+			return nil, out, nil
 		case "set_from_file":
 			if in.Host != "" {
 				if err := c.SetSecretFromRemoteFile(ctx, in.Host, in.Name, in.Path); err != nil {
 					return nil, SecretsOut{}, err
 				}
-				return nil, SecretsOut{
-					Names: c.Secrets.Names(), Changed: true,
-					Source: fmt.Sprintf("%s:%s", in.Host, in.Path),
-				}, nil
+				out := currentSecrets(c)
+				out.Changed, out.Source = true, "remote host file"
+				return nil, out, nil
 			}
-			if err := c.Secrets.SetFromFile(in.Name, in.Path); err != nil {
+			if err := c.SetOutputSecretFromFile(in.Name, in.Path); err != nil {
 				return nil, SecretsOut{}, err
 			}
-			return nil, SecretsOut{
-				Names: c.Secrets.Names(), Changed: true,
-				Source: "local:" + in.Path,
-			}, nil
+			out := currentSecrets(c)
+			out.Changed, out.Source = true, "local file"
+			return nil, out, nil
 		case "delete":
-			changed := c.Secrets.Delete(in.Name)
-			return nil, SecretsOut{Names: c.Secrets.Names(), Changed: changed}, nil
+			changed, err := c.DeleteSecret(in.Host, in.Name)
+			if err != nil {
+				return nil, SecretsOut{}, err
+			}
+			out := currentSecrets(c)
+			out.Changed = changed
+			return nil, out, nil
 		case "list", "":
-			return nil, SecretsOut{Names: c.Secrets.Names()}, nil
+			return nil, currentSecrets(c), nil
 		default:
 			return nil, SecretsOut{}, fmt.Errorf("unknown action %q", in.Action)
 		}

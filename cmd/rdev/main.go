@@ -122,7 +122,7 @@ func main() {
 	case "version", "-version", "--version":
 		printVersion()
 	case "support":
-		err = printJSON(support.Snapshot())
+		err = printJSON(c, support.Snapshot())
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -132,7 +132,7 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rdev: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rdev: %s\n", c.Secrets.Redact(err.Error()))
 		os.Exit(1)
 	}
 }
@@ -327,7 +327,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(info)
+		return printJSON(c, info)
 
 	case "list":
 		fs, err := parseFlags(rest, nil, nil)
@@ -341,7 +341,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(res)
+		return printJSON(c, res)
 
 	case "status":
 		if len(rest) < 2 {
@@ -351,7 +351,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(info)
+		return printJSON(c, info)
 
 	case "logs":
 		fs, err := parseFlags(rest, nil, nil)
@@ -383,7 +383,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(info)
+		return printJSON(c, info)
 
 	case "wait":
 		fs, err := parseFlags(rest, map[string]bool{"any": true}, nil)
@@ -413,7 +413,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		}
 
 		if len(res.Waited) > 0 {
-			if err := printJSON(res); err != nil {
+			if err := printJSON(c, res); err != nil {
 				return err
 			}
 			if res.TimedOut {
@@ -434,7 +434,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		if res.Logs != "" {
 			fmt.Fprintln(os.Stderr, res.Logs)
 		}
-		if err := printJSON(res.Info); err != nil {
+		if err := printJSON(c, res.Info); err != nil {
 			return err
 		}
 		if res.TimedOut {
@@ -466,7 +466,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(res)
+		return printJSON(c, res)
 	}
 	return fmt.Errorf("unknown job subcommand %q", sub)
 }
@@ -489,7 +489,7 @@ func cmdList(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	return printJSON(res)
+	return printJSON(c, res)
 }
 
 func cmdRead(ctx context.Context, c *client.Client, args []string) error {
@@ -538,7 +538,7 @@ func cmdWrite(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	return printJSON(res)
+	return printJSON(c, res)
 }
 
 func readAllStdin() (string, error) {
@@ -589,7 +589,7 @@ func cmdSync(ctx context.Context, c *client.Client, args []string) error {
 
 func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) > 0 && args[0] == "trust" {
-		return printJSON(c.Hosts.ProjectTrustStatus())
+		return printJSON(c, c.Hosts.ProjectTrustStatus())
 	}
 	if len(args) > 0 && args[0] == "approve-project" {
 		if len(args) != 2 {
@@ -600,7 +600,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(out)
+		return printJSON(c, out)
 	}
 	if len(args) == 0 || args[0] == "list" {
 		type row struct {
@@ -619,18 +619,18 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
-			h, err := c.Hosts.Host(n)
+			snapshot, err := c.Hosts.Inspect(n)
 			if err != nil {
 				continue
 			}
-			st := c.Hosts.State(n)
+			h, st := snapshot.Host, snapshot.State
 			rows = append(rows, row{
 				h.Name, h.Addr, h.Port, h.RemoteDir,
 				st.Cwd, st.Env, st.LoginShell, st.Secrets,
-				h.ForceAgentUpload, string(c.Hosts.ScopeOf(n)),
+				h.ForceAgentUpload, string(snapshot.Scope),
 			})
 		}
-		return printJSON(rows)
+		return printJSON(c, rows)
 	}
 
 	if args[0] == "add" {
@@ -659,15 +659,6 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			port = parsed
 		}
 
-		if err := c.Hosts.Add(transport.Host{
-			Name: fs.pos[0], Addr: fs.pos[1], Port: port,
-			RemoteDir:        fs.str("remote-dir"),
-			ForceAgentUpload: fs.bools["force-agent-upload"],
-		}); err != nil {
-			return fmt.Errorf("invalid host: %w", err)
-		}
-		c.Hosts.SetScope(fs.pos[0], scope)
-
 		env := map[string]string{}
 		for _, kv := range fs.repeat["env"] {
 			k, v, ok := strings.Cut(kv, "=")
@@ -688,34 +679,38 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		}
 
 		cwd := fs.str("cwd")
-		if cwd != "" || len(env) > 0 || len(secretPaths) > 0 || fs.bools["no-login"] {
-			c.Hosts.Update(fs.pos[0], func(st *session.State) {
-				if cwd != "" {
-					st.Cwd = cwd
-				}
-				if len(env) > 0 {
-					st.Env = session.MergeEnv(st.Env, env)
-				}
-				if len(secretPaths) > 0 {
-					st.Secrets = session.MergeEnv(st.Secrets, secretPaths)
-				}
-				if fs.bools["no-login"] {
-					st.LoginShell = false
-				}
-			})
+		var cwdPatch *string
+		if cwd != "" {
+			cwdPatch = &cwd
 		}
-		if fs.bools["save"] {
-			if err := c.Hosts.Save(scope); err != nil {
+		var loginShell *bool
+		if fs.bools["no-login"] {
+			no := false
+			loginShell = &no
+		}
+		host := transport.Host{
+			Name: fs.pos[0], Addr: fs.pos[1], Port: port,
+			RemoteDir:        fs.str("remote-dir"),
+			ForceAgentUpload: fs.bools["force-agent-upload"],
+		}
+		result, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{
+			Name: fs.pos[0], Host: &host, Scope: scope, SetScope: true,
+			Cwd: cwdPatch, Env: env, LoginShell: loginShell, Secrets: secretPaths,
+			Persist: fs.bools["save"],
+		})
+		if err != nil {
+			warning, committed := session.ConfigWriteCommittedWarning(err)
+			if !committed {
 				return err
 			}
-			var path string
-			if scope == session.ScopeProject {
-				path, _ = session.ProjectConfigPath()
-				fmt.Fprintf(os.Stderr, "saved to %s (visible only in this directory)\n", path)
-			} else {
-				path, _ = session.ConfigPath()
-				fmt.Fprintf(os.Stderr, "saved to %s (visible in every project)\n", path)
+			fmt.Fprintf(os.Stderr, "warning: %s\n", c.Secrets.Redact(warning))
+		}
+		if result.SavedTo != "" {
+			note := "visible in every project"
+			if result.Scope == session.ScopeProject {
+				note = "visible only in this directory"
 			}
+			fmt.Fprintf(os.Stderr, "saved to %s (%s)\n", c.Secrets.Redact(result.SavedTo), note)
 		}
 		return cmdHosts(ctx, c, []string{"list"})
 	}
@@ -747,7 +742,7 @@ func cmdPing(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	return printJSON(res)
+	return printJSON(c, res)
 }
 
 // cmdSecrets manages the redaction store.
@@ -784,19 +779,21 @@ func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
 			if err := c.SetSecretFromRemoteFile(ctx, host, name, path); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "registered %q from %s:%s\n", name, host, path)
+			fmt.Fprintln(os.Stderr, c.Secrets.Redact(fmt.Sprintf("registered %q from %s:%s", name, host, path)))
 		} else {
-			if err := c.Secrets.SetFromFile(name, path); err != nil {
+			if err := c.SetOutputSecretFromFile(name, path); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "registered %q from local:%s\n", name, path)
+			fmt.Fprintln(os.Stderr, c.Secrets.Redact(fmt.Sprintf("registered %q from local:%s", name, path)))
 		}
 		// Never print the value. Length is enough to confirm the right file was
 		// read without putting the credential in a terminal or a CI log.
-		if v, ok := c.Secrets.Get(name); ok {
-			fmt.Fprintf(os.Stderr, "value length %d\n", len(v))
+		if n, ok, err := c.SecretLength(fs.str("host"), name); err != nil {
+			return err
+		} else if ok {
+			fmt.Fprintf(os.Stderr, "value length %d\n", n)
 		}
-		return printJSON(map[string]any{"names": c.Secrets.Names()})
+		return printJSON(c, map[string]any{"names": c.Secrets.Names(), "secrets": c.Secrets.Descriptors()})
 
 	case "check":
 		// Runs a command and reports whether redaction caught the value, which is
@@ -818,7 +815,9 @@ func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
 				return err
 			}
 		}
-		if _, ok := c.Secrets.Get(name); !ok {
+		if _, ok, err := c.SecretLength(host, name); err != nil {
+			return err
+		} else if !ok {
 			return fmt.Errorf("secret %q is not registered; pass -path to read it first", name)
 		}
 		res, err := c.Exec(ctx, client.ExecOptions{Host: host, Argv: argv, TimeoutSec: 60})
@@ -829,10 +828,10 @@ func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
 		masked := strings.Contains(res.Stdout, placeholder) || strings.Contains(res.Stderr, placeholder)
 		fmt.Print(res.Stdout)
 		fmt.Fprint(os.Stderr, res.Stderr)
-		return printJSON(map[string]any{"redacted": masked, "exit_code": res.ExitCode})
+		return printJSON(c, map[string]any{"redacted": masked, "exit_code": res.ExitCode})
 
 	case "list":
-		return printJSON(map[string]any{"names": c.Secrets.Names()})
+		return printJSON(c, map[string]any{"names": c.Secrets.Names(), "secrets": c.Secrets.Descriptors()})
 	}
 	// Name the valid subcommands. "unknown secrets subcommand" alone sends the
 	// reader to the source, and the one people reach for -- `set` -- is absent by
@@ -857,8 +856,8 @@ const secretsUsage = `usage:
   rdev secrets check <host> <name> [-path P] -- <argv...>   run a command and report whether redaction caught the value
   rdev secrets list                                    names currently registered in this process`
 
-func printJSON(v any) error {
-	b, err := json.MarshalIndent(v, "", "  ")
+func printJSON(c *client.Client, v any) error {
+	b, err := json.MarshalIndent(c.Secrets.RedactValue(v), "", "  ")
 	if err != nil {
 		return err
 	}

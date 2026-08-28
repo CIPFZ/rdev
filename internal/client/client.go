@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"unicode"
 
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/session"
@@ -32,9 +34,23 @@ type remoteConnection interface {
 }
 
 type pooledConnection struct {
-	conn        remoteConnection
-	fingerprint string
-	generation  uint64
+	conn                  remoteConnection
+	fingerprint           string
+	connectionFingerprint string
+	generation            uint64
+	scope                 secrets.Scope
+	host                  secrets.HostIdentity
+	publication           uint64
+}
+
+// ConnectionSecurityStatus is the externally visible security initialization
+// state for one alias. A connection is reusable only in the ready state.
+type ConnectionSecurityStatus struct {
+	State      observe.ConnectionSecurityState `json:"state"`
+	Generation uint64                          `json:"generation,omitempty"`
+	Declared   int                             `json:"declared_secrets"`
+	Loaded     int                             `json:"loaded_secrets"`
+	Reason     observe.SecretReason            `json:"reason,omitempty"`
 }
 
 type dialFunc func(context.Context, transport.Host, AgentLookup) (remoteConnection, error)
@@ -49,17 +65,17 @@ type Client struct {
 	dial   dialFunc
 	rsync  rsyncRunner
 
-	// warn reports a non-fatal problem. It exists so the quiet paths -- notably a
-	// credential file that could not be read -- are observable in a test rather
-	// than only on a terminal. Nil means os.Stderr.
-	warn func(format string, args ...any)
-
-	mu    sync.Mutex
-	conns map[string]pooledConnection
+	mu       sync.Mutex
+	conns    map[string]pooledConnection
+	security map[string]ConnectionSecurityStatus
 	// dialing serializes connection setup per host. MCP dispatches tool calls
 	// concurrently, and without this several goroutines would bootstrap the same
 	// host at once, racing on the agent upload's temp file.
 	dialing map[string]*sync.Mutex
+	// A monotonically increasing publication token prevents teardown of an old
+	// connection from overwriting the security state of a newer one.
+	nextPublication   uint64
+	latestPublication map[string]uint64
 }
 
 func New(lookup AgentLookup) *Client {
@@ -70,25 +86,112 @@ func New(lookup AgentLookup) *Client {
 		dial: func(ctx context.Context, host transport.Host, lookup AgentLookup) (remoteConnection, error) {
 			return transport.Dial(ctx, host, lookup)
 		},
-		conns:   make(map[string]pooledConnection),
-		dialing: make(map[string]*sync.Mutex),
+		conns:             make(map[string]pooledConnection),
+		security:          make(map[string]ConnectionSecurityStatus),
+		dialing:           make(map[string]*sync.Mutex),
+		latestPublication: make(map[string]uint64),
 	}
 	c.Hosts.SetHostChangeHook(c.invalidateHost)
+	c.Secrets.SetRedactionHook(c.Hosts.RecordRedactionHit)
 	return c
 }
 
-func (c *Client) invalidateHost(name string, _ uint64) { c.Disconnect(name) }
-
-// warnf reports a non-fatal problem, defaulting to stderr.
-//
-// Stderr rather than the response: an unreadable credential must not fail the
-// call, but it must not vanish either, and stdout carries the MCP stream.
-func (c *Client) warnf(format string, args ...any) {
-	if c.warn != nil {
-		c.warn(format, args...)
+func (c *Client) invalidateHost(name string, generation uint64) {
+	detached := c.disconnectWithStatus(name, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: generation})
+	if resolved, err := c.Hosts.Resolve(name); err == nil {
+		c.Secrets.DeleteStaleHost(secrets.Scope(resolved.Scope), secretHostIdentity(resolved))
+	} else {
+		c.Secrets.DeleteHost(name)
+	}
+	if detached {
 		return
 	}
-	fmt.Fprintf(os.Stderr, format, args...)
+	// The registry publishes before invoking this hook. A request may already
+	// have started initialization for the new generation, so do not replace its
+	// initializing/failed state (or a new ready connection) with cold.
+	c.mu.Lock()
+	previous := c.security[name]
+	_, connected := c.conns[name]
+	if connected || previous.Generation == generation {
+		c.mu.Unlock()
+		return
+	}
+	// Supersede any already-detached teardown that may still be blocked in
+	// Close. Without a new token it could return later and restore its old
+	// generation even though the registry invalidation already published.
+	c.nextPublication++
+	c.latestPublication[name] = c.nextPublication
+	status := ConnectionSecurityStatus{State: observe.SecurityCold, Generation: generation}
+	c.security[name] = status
+	c.mu.Unlock()
+	c.recordConnectionSecurityTransition(name, previous, status)
+}
+
+func (c *Client) setConnectionSecurity(name string, status ConnectionSecurityStatus) {
+	c.mu.Lock()
+	previous := c.security[name]
+	c.security[name] = status
+	c.mu.Unlock()
+	c.recordConnectionSecurityTransition(name, previous, status)
+}
+
+// publishConnectionSecurityIfCurrent is the only post-Close publication
+// boundary. Close may block while another goroutine reserves or publishes a
+// replacement. The closing owner may update status only while its publication
+// token is still current and the alias has no replacement connection.
+func (c *Client) publishConnectionSecurityIfCurrent(name string, publication uint64, status ConnectionSecurityStatus) bool {
+	c.mu.Lock()
+	if _, connected := c.conns[name]; connected || c.latestPublication[name] != publication {
+		c.mu.Unlock()
+		return false
+	}
+	previous := c.security[name]
+	c.security[name] = status
+	c.mu.Unlock()
+	c.recordConnectionSecurityTransition(name, previous, status)
+	return true
+}
+
+// detachConnection removes exactly the expected published connection. An
+// instance check at detach plus a token check after Close prevents both ABA
+// replacement and stale status publication.
+func (c *Client) detachConnection(name string, expected pooledConnection) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, ok := c.conns[name]
+	if !ok || current.conn != expected.conn || current.publication != expected.publication {
+		return false
+	}
+	delete(c.conns, name)
+	return true
+}
+
+func (c *Client) closeDetachedConnection(name string, detached pooledConnection, status ConnectionSecurityStatus) {
+	_ = detached.conn.Close()
+	c.publishConnectionSecurityIfCurrent(name, detached.publication, status)
+}
+
+func (c *Client) detachAndCloseConnection(name string, expected pooledConnection, status ConnectionSecurityStatus) bool {
+	if !c.detachConnection(name, expected) {
+		return false
+	}
+	c.closeDetachedConnection(name, expected, status)
+	return true
+}
+
+func (c *Client) recordConnectionSecurityTransition(name string, previous, status ConnectionSecurityStatus) {
+	if previous.State != status.State || previous.Generation != status.Generation {
+		c.Hosts.RecordConnectionSecurityState(status.State, name)
+	}
+}
+
+func (c *Client) ConnectionSecurity(host string) ConnectionSecurityStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if status, ok := c.security[host]; ok {
+		return status
+	}
+	return ConnectionSecurityStatus{State: observe.SecurityCold}
 }
 
 // dialLock returns the per-host setup mutex, creating it on first use.
@@ -123,66 +226,117 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 		}
 		c.mu.Lock()
 		existing, ok := c.conns[resolved.Host.Name]
-		if ok && existing.generation == resolved.Generation && existing.fingerprint == resolved.Fingerprint {
+		if ok && existing.generation == resolved.Generation && existing.fingerprint == resolved.Fingerprint && existing.connectionFingerprint == resolved.ConnectionFingerprint {
 			c.mu.Unlock()
 			return existing.conn, nil
 		}
-		if ok {
-			delete(c.conns, resolved.Host.Name)
-		}
 		c.mu.Unlock()
 		if ok {
-			_ = existing.conn.Close()
+			c.detachAndCloseConnection(resolved.Host.Name, existing, ConnectionSecurityStatus{
+				State: observe.SecurityCold, Generation: existing.generation,
+			})
 		}
+
+		c.mu.Lock()
+		failed := c.security[resolved.Host.Name]
+		c.mu.Unlock()
+		if failed.State == observe.SecurityFailed && failed.Generation == resolved.Generation {
+			return nil, fmt.Errorf("connection security initialization failed (%s); update the host secret declaration or explicitly register the scoped value", failed.Reason)
+		}
+
+		releaseIdentity, acquired := c.Hosts.AcquireIdentity(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
+		if !acquired {
+			continue
+		}
+		// Reserve the next publication token before validation or dialing. A
+		// detached predecessor may still be blocked in Close; from this point its
+		// teardown is stale even if this setup ultimately fails closed.
+		c.mu.Lock()
+		c.nextPublication++
+		setupPublication := c.nextPublication
+		c.latestPublication[resolved.Host.Name] = setupPublication
+		c.mu.Unlock()
+		st := c.Hosts.State(resolved.Host.Name)
+		if err := secrets.ValidateDeclarations(st.Secrets); err != nil {
+			c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretInvalid, resolved.Host.Name)
+			c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{
+				State: observe.SecurityFailed, Generation: resolved.Generation,
+				Declared: len(st.Secrets), Reason: observe.ReasonSecretInvalid,
+			})
+			releaseIdentity()
+			return nil, errors.New("connection security initialization failed (invalid secret declaration)")
+		}
+		status := ConnectionSecurityStatus{
+			State: observe.SecurityInitializing, Generation: resolved.Generation,
+			Declared: len(st.Secrets),
+		}
+		c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, status)
 
 		conn, dialErr := c.dial(ctx, resolved.Host, c.lookup)
 		if dialErr != nil {
+			if len(st.Secrets) > 0 {
+				// Declared values are intentionally not available until the secure
+				// connection can read them. Bootstrap diagnostics may nevertheless
+				// echo one (for example from a remote shell profile), so returning the
+				// raw dial error here would create an unredactable pre-init leak.
+				c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretReadFailed, resolved.Host.Name)
+				c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{
+					State: observe.SecurityFailed, Generation: resolved.Generation,
+					Declared: len(st.Secrets), Reason: observe.ReasonSecretReadFailed,
+				})
+				releaseIdentity()
+				return nil, errors.New("connection setup failed before declared secrets could be protected")
+			}
+			c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: resolved.Generation})
+			releaseIdentity()
 			return nil, dialErr
 		}
-		latest, resolveErr := c.Hosts.Resolve(hostName)
-		if resolveErr != nil {
-			_ = conn.Close()
-			return nil, resolveErr
-		}
-		if latest.Generation != resolved.Generation || latest.Fingerprint != resolved.Fingerprint {
-			_ = conn.Close()
-			continue
+		loaded, reason, loadErr := c.loadHostSecrets(ctx, resolved, st, conn)
+		if loadErr != nil {
+			c.closeDetachedConnection(resolved.Host.Name, pooledConnection{
+				conn: conn, generation: resolved.Generation, publication: setupPublication,
+			}, ConnectionSecurityStatus{
+				State: observe.SecurityFailed, Generation: resolved.Generation,
+				Declared: len(st.Secrets), Loaded: loaded, Reason: reason,
+			})
+			releaseIdentity()
+			c.Hosts.RecordSecretLoadFailure(reason, resolved.Host.Name)
+			return nil, fmt.Errorf("connection security initialization failed (%s)", reason)
 		}
 
-		c.mu.Lock()
-		c.conns[latest.Host.Name] = pooledConnection{conn: conn, fingerprint: latest.Fingerprint, generation: latest.Generation}
-		c.mu.Unlock()
-		// Recheck after publication: an update hook that ran between the prior
-		// Resolve and insertion may have had nothing to evict.
-		current, resolveErr := c.Hosts.Resolve(hostName)
-		if resolveErr != nil || current.Generation != latest.Generation || current.Fingerprint != latest.Fingerprint {
-			c.Disconnect(latest.Host.Name)
-			if resolveErr != nil {
-				return nil, resolveErr
-			}
-			continue
+		hostIdentity := secretHostIdentity(resolved)
+		pooled := pooledConnection{
+			conn: conn, fingerprint: resolved.Fingerprint, connectionFingerprint: resolved.ConnectionFingerprint, generation: resolved.Generation,
+			scope: secrets.Scope(resolved.Scope), host: hostIdentity,
 		}
-		c.loadHostSecrets(ctx, latest.Host.Name, conn)
-		current, resolveErr = c.Hosts.Resolve(hostName)
-		c.mu.Lock()
-		published, stillPublished := c.conns[latest.Host.Name]
-		c.mu.Unlock()
-		if resolveErr != nil || current.Generation != latest.Generation || current.Fingerprint != latest.Fingerprint || !stillPublished || published.conn != conn {
-			c.Disconnect(latest.Host.Name)
-			if resolveErr != nil {
-				return nil, resolveErr
-			}
-			continue
+		// Publication is the commit point: all declared secrets are present and
+		// the identity read lease still prevents a redefinition.
+		ready := ConnectionSecurityStatus{
+			State: observe.SecurityReady, Generation: resolved.Generation,
+			Declared: len(st.Secrets), Loaded: loaded,
 		}
+		c.mu.Lock()
+		pooled.publication = setupPublication
+		previous := c.security[resolved.Host.Name]
+		c.latestPublication[resolved.Host.Name] = pooled.publication
+		c.conns[resolved.Host.Name] = pooled
+		c.security[resolved.Host.Name] = ready
+		c.mu.Unlock()
+		c.recordConnectionSecurityTransition(resolved.Host.Name, previous, ready)
+		releaseIdentity()
 		return conn, nil
 	}
 }
 
-func (c *Client) leasedConn(ctx context.Context, hostName string) (remoteConnection, func(), error) {
+func secretHostIdentity(resolved session.ResolvedHost) secrets.HostIdentity {
+	return secrets.HostIdentity{Alias: resolved.Host.Name, Fingerprint: resolved.Fingerprint, Generation: resolved.Generation}
+}
+
+func (c *Client) leasedConn(ctx context.Context, hostName string) (pooledConnection, session.State, func(), error) {
 	for {
 		conn, err := c.conn(ctx, hostName)
 		if err != nil {
-			return nil, nil, err
+			return pooledConnection{}, session.State{}, nil, err
 		}
 		name := conn.Host().Name
 		c.mu.Lock()
@@ -202,7 +356,7 @@ func (c *Client) leasedConn(ctx context.Context, hostName string) (remoteConnect
 			release()
 			continue
 		}
-		return conn, release, nil
+		return pooled, c.Hosts.State(name), release, nil
 	}
 }
 
@@ -213,49 +367,84 @@ func (c *Client) leasedConn(ctx context.Context, hostName string) (remoteConnect
 // and never touches local disk -- that is what makes an in-memory store workable
 // across sessions instead of requiring a manual re-register every time.
 //
-// Failures are deliberately quiet: a missing or unreadable credential file must not
-// stop the host from being usable, and the caller learns about it from the
-// unredacted output rather than from a failed dial. Already-registered names are
-// left alone so an explicit rdev_secrets call wins over the config.
-func (c *Client) loadHostSecrets(ctx context.Context, hostName string, conn remoteConnection) {
-	st := c.Hosts.State(hostName)
+// Initialization is fail-closed: every declared value must be present before the
+// connection can be published. Already-registered values for this exact immutable
+// identity are left alone so an explicit rdev_secrets call wins over config.
+func (c *Client) loadHostSecrets(ctx context.Context, resolved session.ResolvedHost, st session.State, conn remoteConnection) (int, observe.SecretReason, error) {
 	if len(st.Secrets) == 0 {
-		return
+		return 0, "", nil
 	}
-	for name, path := range st.Secrets {
-		if name == "" || path == "" {
+	hostIdentity := secretHostIdentity(resolved)
+	scope := secrets.Scope(resolved.Scope)
+	names := make([]string, 0, len(st.Secrets))
+	for name := range st.Secrets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	pending := make(map[secrets.Key]string)
+	loaded := 0
+	for _, name := range names {
+		path := st.Secrets[name]
+		key := secrets.HostKey(scope, hostIdentity, name)
+		if source, exists := c.Secrets.SourceOf(key); exists && source != secrets.SourceDeclarative {
+			loaded++
 			continue
 		}
-		if _, exists := c.Secrets.Get(name); exists {
-			continue
-		}
-		var loadErr error
 		if conn == nil {
-			loadErr = errors.New("no active connection")
-		} else {
-			resp, err := conn.Do(ctx, &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes}})
-			if err != nil {
-				loadErr = err
-			} else if resp.Read == nil {
-				loadErr = errors.New("agent returned no content")
-			} else if resp.Read.ContentB64 {
-				loadErr = fmt.Errorf("%s looks binary; a credential file should be text", path)
-			} else {
-				value := strings.TrimSpace(resp.Read.Content)
-				if value == "" {
-					loadErr = fmt.Errorf("%s on %s is empty", path, hostName)
-				} else {
-					loadErr = c.Secrets.Set(name, value)
-				}
-			}
+			return loaded, observe.ReasonSecretReadFailed, errors.New("no active connection")
 		}
-		if loadErr != nil {
-			// Surfaced rather than swallowed: an unredacted credential is worth a
-			// warning, and stderr does not corrupt the MCP stdout stream.
-			c.warnf("rdev: warning: secret %q from %s:%s not registered: %v\n",
-				name, hostName, path, c.redactErr(loadErr))
+		// Read one byte beyond the accepted cap. EOF/Size are advisory remote
+		// metadata and can be stale if the file grows between stat and read;
+		// observing the extra byte makes the boundary independently enforceable.
+		resp, err := conn.Do(ctx, &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes + 1}})
+		if err != nil || resp == nil || resp.Read == nil {
+			return loaded, observe.ReasonSecretReadFailed, errors.New("secret read failed")
 		}
+		value, reason, err := validateSecretRead(resp.Read)
+		if err != nil {
+			return loaded, reason, err
+		}
+		pending[key] = value
+		loaded++
 	}
+	if err := c.Secrets.SetDeclarativeBatch(pending); err != nil {
+		return 0, observe.ReasonSecretTooShort, err
+	}
+	return loaded, "", nil
+}
+
+func validateSecretRead(read *proto.ReadResult) (string, observe.SecretReason, error) {
+	if read == nil {
+		return "", observe.ReasonSecretReadFailed, errors.New("agent returned no content")
+	}
+	if !read.EOF || read.Size > maxSecretFileBytes {
+		return "", observe.ReasonSecretTruncated, errors.New("secret file exceeds the maximum size")
+	}
+	if read.ContentB64 {
+		return "", observe.ReasonSecretBinary, errors.New("secret file must be text")
+	}
+	if len(read.Content) > maxSecretFileBytes {
+		return "", observe.ReasonSecretTruncated, errors.New("secret file exceeds the maximum size")
+	}
+	value := strings.TrimSpace(read.Content)
+	if value == "" {
+		return "", observe.ReasonSecretEmpty, errors.New("secret file is empty")
+	}
+	if len(value) < secrets.MinValueBytes {
+		return "", observe.ReasonSecretTooShort, fmt.Errorf("secret value must be at least %d bytes", secrets.MinValueBytes)
+	}
+	return value, "", nil
+}
+
+type operationIdentity struct {
+	Scope secrets.Scope
+	Host  secrets.HostIdentity
+	State session.State
+}
+
+type builtRequest struct {
+	Request *proto.Request
+	Echo    map[string]string
 }
 
 // do sends a request, retrying once on transport failure.
@@ -264,37 +453,92 @@ func (c *Client) loadHostSecrets(ctx context.Context, hostName string, conn remo
 // the network blipped, the remote rebooted. Retrying once turns that into a
 // hiccup instead of an error the caller has to interpret.
 func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*proto.Response, error) {
-	conn, release, err := c.leasedConn(ctx, hostName)
-	if err != nil {
-		return nil, err
-	}
+	resp, _, err := c.doBuilt(ctx, hostName, func(identity operationIdentity) (*builtRequest, error) {
+		return &builtRequest{Request: req}, nil
+	})
+	return resp, err
+}
 
-	resp, err := conn.Do(ctx, req)
-	release()
-	if err == nil {
-		return resp, nil
-	}
-	// A remote-reported error is a real answer, not a broken pipe: return it.
-	if resp != nil {
-		return resp, err
-	}
-	if ctx.Err() != nil {
-		return nil, err
-	}
+// doBuilt holds one immutable identity lease across state capture, secret
+// resolution, request construction, transport I/O, recursive response/error
+// redaction, and any echoed request fields. A retry rebuilds the request only
+// for the same immutable identity; an alias redefinition aborts rather than
+// replaying argv, stdin, labels, paths, or content from host A to host B.
+func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operationIdentity) (*builtRequest, error)) (*proto.Response, map[string]string, error) {
+	var firstErr error
+	var firstIdentity secrets.HostIdentity
+	for attempt := 0; attempt < 2; attempt++ {
+		redactionSnapshot := c.Secrets.Snapshot()
+		pooled, st, release, err := c.leasedConn(ctx, hostName)
+		if err != nil {
+			if firstErr != nil {
+				return nil, nil, fmt.Errorf("%w (reconnect failed: %v)", firstErr, c.redactErrWith(redactionSnapshot, err))
+			}
+			return nil, nil, c.redactErrWith(redactionSnapshot, err)
+		}
+		identity := operationIdentity{Scope: pooled.scope, Host: pooled.host, State: st}
+		if firstIdentity == (secrets.HostIdentity{}) {
+			firstIdentity = identity.Host
+		} else if firstIdentity != identity.Host {
+			release()
+			return nil, nil, errors.New("host identity changed while retrying request")
+		}
+		built, buildErr := build(identity)
+		if buildErr != nil {
+			redacted := c.redactErrWith(redactionSnapshot, buildErr)
+			release()
+			return nil, nil, redacted
+		}
+		resp, doErr := pooled.conn.Do(ctx, built.Request)
+		var safeResp *proto.Response
+		if resp != nil {
+			safeResp = c.redactResponseWith(redactionSnapshot, resp)
+		}
+		safeEcho := make(map[string]string, len(built.Echo))
+		for key, value := range built.Echo {
+			safeEcho[key] = c.redactTextWith(redactionSnapshot, value)
+		}
+		safeErr := c.redactErrWith(redactionSnapshot, doErr)
+		release()
+		if doErr == nil {
+			return safeResp, safeEcho, nil
+		}
+		// A remote-reported error is a real answer, not a broken pipe.
+		if resp != nil || ctx.Err() != nil || attempt == 1 {
+			return safeResp, safeEcho, safeErr
+		}
+		firstErr = safeErr
 
-	c.mu.Lock()
-	if pooled, ok := c.conns[conn.Host().Name]; ok && pooled.conn == conn {
-		delete(c.conns, conn.Host().Name)
+		c.detachAndCloseConnection(pooled.host.Alias, pooled, ConnectionSecurityStatus{
+			State: observe.SecurityCold, Generation: pooled.generation,
+		})
 	}
-	c.mu.Unlock()
-	conn.Close()
+	return nil, nil, firstErr
+}
 
-	fresh, releaseFresh, dialErr := c.leasedConn(ctx, hostName)
-	if dialErr != nil {
-		return nil, fmt.Errorf("%w (reconnect failed: %v)", err, dialErr)
+func (c *Client) redactResponse(resp *proto.Response) *proto.Response {
+	return c.redactResponseWith(nil, resp)
+}
+
+func (c *Client) redactResponseWith(snapshot *secrets.Store, resp *proto.Response) *proto.Response {
+	if resp == nil {
+		return nil
 	}
-	defer releaseFresh()
-	return fresh.Do(ctx, req)
+	// ContentB64 is untrusted remote metadata, not permission to bypass the
+	// output boundary. A buggy or malicious agent could otherwise label literal
+	// plaintext as base64 and make the client return it unchanged.
+	var value any = resp
+	if snapshot != nil {
+		value = snapshot.RedactValue(value)
+	}
+	out := c.Secrets.RedactValue(value).(*proto.Response)
+	if resp.Read != nil && resp.Read.ContentB64 && out.Read != nil && out.Read.Content != resp.Read.Content {
+		// Do not leave a redaction placeholder mislabeled as valid base64. This
+		// rare collision sacrifices the payload rather than disclosing an exact
+		// registered value or returning silently corrupted encoded data.
+		out.Read.ContentB64 = false
+	}
+	return out
 }
 
 // ExecOptions describes a foreground command.
@@ -321,33 +565,30 @@ func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error
 		return nil, errors.New("argv must not be empty")
 	}
 
-	params, err := c.buildExecParams(opts.Host, opts.Argv, opts.Cwd, opts.Env, opts.LoginShell)
+	resp, echo, err := c.doBuilt(ctx, opts.Host, func(identity operationIdentity) (*builtRequest, error) {
+		params, err := c.buildExecParams(identity, opts.Argv, opts.Cwd, opts.Env, opts.LoginShell)
+		if err != nil {
+			return nil, err
+		}
+		params.Stdin = opts.Stdin
+		params.TimeoutSec = opts.TimeoutSec
+		params.MaxOutputBytes = opts.MaxOutputBytes
+		return &builtRequest{Request: &proto.Request{Op: proto.OpExec, Exec: params}, Echo: map[string]string{"cwd": params.Cwd}}, nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	params.Stdin = opts.Stdin
-	params.TimeoutSec = opts.TimeoutSec
-	params.MaxOutputBytes = opts.MaxOutputBytes
-
-	resp, err := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpExec, Exec: params})
-	if err != nil {
-		return nil, c.redactErr(err)
 	}
 	if resp.Exec == nil {
 		return nil, errors.New("agent returned no exec result")
 	}
 
-	resp.Exec.Stdout = c.Secrets.Redact(resp.Exec.Stdout)
-	resp.Exec.Stderr = c.Secrets.Redact(resp.Exec.Stderr)
-	// Cwd too: it is echoed back from the request, and a path under a credential
-	// directory is a plausible way for a registered value to appear here.
-	return &ExecResult{ExecResult: resp.Exec, Cwd: c.Secrets.Redact(params.Cwd)}, nil
+	return &ExecResult{ExecResult: resp.Exec, Cwd: echo["cwd"]}, nil
 }
 
 // buildExecParams layers session state under per-call values and resolves any
 // "secret:NAME" env references.
-func (c *Client) buildExecParams(host string, argv []string, cwd string, env map[string]string, login *bool) (*proto.ExecParams, error) {
-	st := c.Hosts.State(host)
+func (c *Client) buildExecParams(identity operationIdentity, argv []string, cwd string, env map[string]string, login *bool) (*proto.ExecParams, error) {
+	st := identity.State
 
 	effCwd := cwd
 	if effCwd == "" {
@@ -359,7 +600,7 @@ func (c *Client) buildExecParams(host string, argv []string, cwd string, env map
 	}
 
 	merged := session.MergeEnv(st.Env, env)
-	resolved, err := c.Secrets.ResolveEnv(merged)
+	resolved, err := c.Secrets.ResolveEnv(identity.Scope, identity.Host, merged)
 	if err != nil {
 		return nil, err
 	}
@@ -375,10 +616,21 @@ func (c *Client) buildExecParams(host string, argv []string, cwd string, env map
 // redactErr scrubs secrets from an error message. Remote errors can quote the
 // failing request, which may include a resolved credential.
 func (c *Client) redactErr(err error) error {
+	return c.redactErrWith(nil, err)
+}
+
+func (c *Client) redactTextWith(snapshot *secrets.Store, text string) string {
+	if snapshot != nil {
+		text = snapshot.Redact(text)
+	}
+	return c.Secrets.Redact(text)
+}
+
+func (c *Client) redactErrWith(snapshot *secrets.Store, err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := c.Secrets.Redact(err.Error())
+	msg := c.redactTextWith(snapshot, err.Error())
 	if msg == err.Error() {
 		return err
 	}
@@ -400,17 +652,18 @@ func (c *Client) JobStart(ctx context.Context, opts JobStartOptions) (*proto.Job
 	if len(opts.Argv) == 0 {
 		return nil, errors.New("argv must not be empty")
 	}
-	params, err := c.buildExecParams(opts.Host, opts.Argv, opts.Cwd, opts.Env, opts.LoginShell)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.do(ctx, opts.Host, &proto.Request{
-		Op:  proto.OpJobStart,
-		Job: &proto.JobParams{Spec: params, Label: opts.Label},
+	resp, _, err := c.doBuilt(ctx, opts.Host, func(identity operationIdentity) (*builtRequest, error) {
+		params, err := c.buildExecParams(identity, opts.Argv, opts.Cwd, opts.Env, opts.LoginShell)
+		if err != nil {
+			return nil, err
+		}
+		return &builtRequest{Request: &proto.Request{
+			Op:  proto.OpJobStart,
+			Job: &proto.JobParams{Spec: params, Label: opts.Label},
+		}}, nil
 	})
 	if err != nil {
-		return nil, c.redactErr(err)
+		return nil, err
 	}
 	if resp.Job == nil || resp.Job.Info == nil {
 		return nil, errors.New("agent returned no job info")
@@ -624,29 +877,163 @@ func (c *Client) SetSecretFromRemoteFile(ctx context.Context, host, name, path s
 		return errors.New("path required")
 	}
 
-	// Read directly rather than via c.ReadFile: that method redacts its result,
-	// which would corrupt a value that happens to contain an existing secret.
-	resp, err := c.do(ctx, host, &proto.Request{
-		Op:   proto.OpReadFile,
-		Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes},
-	})
+	// Read directly rather than via c.ReadFile: the raw value must be validated
+	// and registered under the same identity lease before any redefinition can
+	// publish. Passing through the normal response redactor would corrupt a value
+	// that happens to contain an existing secret.
+	pooled, release, err := c.mutationConn(ctx, host)
 	if err != nil {
-		return c.redactErr(err)
+		// The prospective value is not in Store yet, so setup diagnostics cannot
+		// be proven redactable. Keep this boundary fixed-text and expose detail
+		// only through low-cardinality security telemetry.
+		c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretReadFailed, host)
+		return errors.New("connection setup failed before secret registration")
 	}
-	if resp.Read == nil {
+	resp, readErr := pooled.conn.Do(ctx, &proto.Request{
+		Op:   proto.OpReadFile,
+		Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes + 1},
+	})
+	if readErr != nil {
+		release()
+		c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretReadFailed, pooled.host.Alias)
+		return errors.New("remote secret read failed before the value could be protected")
+	}
+	if resp == nil || resp.Read == nil {
+		release()
+		c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretReadFailed, pooled.host.Alias)
 		return errors.New("agent returned no content")
 	}
-	if resp.Read.ContentB64 {
-		return fmt.Errorf("%s looks binary; a credential file should be text", path)
+	value, reason, validateErr := validateSecretRead(resp.Read)
+	if validateErr != nil {
+		release()
+		c.Hosts.RecordSecretRejection(reason, pooled.host.Alias)
+		return validateErr
 	}
+	setErr := c.Secrets.Set(secrets.HostKey(pooled.scope, pooled.host, name), value)
+	if setErr != nil {
+		c.Hosts.RecordSecretRejection(observe.ReasonSecretTooShort, pooled.host.Alias)
+	}
+	release()
+	return setErr
+}
 
-	// Credential files usually end with a newline, and sending it along breaks
-	// HTTP headers in confusing ways.
-	value := strings.TrimSpace(resp.Read.Content)
-	if value == "" {
-		return fmt.Errorf("%s on %s is empty", path, host)
+func (c *Client) mutationConn(ctx context.Context, host string) (pooledConnection, func(), error) {
+	for {
+		if _, err := c.conn(ctx, host); err != nil {
+			return pooledConnection{}, nil, err
+		}
+		resolved, err := c.Hosts.Resolve(host)
+		if err != nil {
+			return pooledConnection{}, nil, err
+		}
+		release, ok := c.Hosts.AcquireIdentityWrite(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
+		if !ok {
+			continue
+		}
+		c.mu.Lock()
+		pooled, published := c.conns[resolved.Host.Name]
+		c.mu.Unlock()
+		if !published || pooled.generation != resolved.Generation || pooled.fingerprint != resolved.Fingerprint {
+			release()
+			continue
+		}
+		return pooled, release, nil
 	}
-	return c.Secrets.Set(name, value)
+}
+
+// SetSecret registers an inline value. Hostless registrations remain available
+// for output redaction compatibility, but are deliberately non-injectable.
+func (c *Client) SetSecret(host, name, value string) error {
+	if host == "" {
+		if err := c.Secrets.Set(secrets.OutputKey(name), value); err != nil {
+			c.Hosts.RecordSecretRejection(secretReasonForSetError(err), "output")
+			return err
+		}
+		return nil
+	}
+	for {
+		resolved, err := c.Hosts.Resolve(host)
+		if err != nil {
+			return err
+		}
+		release, ok := c.Hosts.AcquireIdentityWrite(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
+		if !ok {
+			continue
+		}
+		key := secrets.HostKey(secrets.Scope(resolved.Scope), secretHostIdentity(resolved), name)
+		err = c.Secrets.Set(key, value)
+		if err != nil {
+			c.Hosts.RecordSecretRejection(secretReasonForSetError(err), resolved.Host.Name)
+			release()
+			return err
+		}
+		if c.ConnectionSecurity(resolved.Host.Name).State == observe.SecurityFailed {
+			c.setConnectionSecurity(resolved.Host.Name, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: resolved.Generation})
+		}
+		release()
+		return nil
+	}
+}
+
+func secretReasonForSetError(err error) observe.SecretReason {
+	if err != nil && strings.Contains(err.Error(), "at least") {
+		return observe.ReasonSecretTooShort
+	}
+	return observe.ReasonSecretInvalid
+}
+
+func (c *Client) SetOutputSecretFromFile(name, path string) error {
+	err := c.Secrets.SetFromFile(secrets.OutputKey(name), path)
+	if err != nil {
+		c.Hosts.RecordSecretRejection(secretReasonForSetError(err), "output")
+	}
+	return err
+}
+
+func (c *Client) DeleteSecret(host, name string) (bool, error) {
+	if host == "" {
+		return c.Secrets.Delete(secrets.OutputKey(name)), nil
+	}
+	for {
+		resolved, err := c.Hosts.Resolve(host)
+		if err != nil {
+			return false, err
+		}
+		release, ok := c.Hosts.AcquireIdentityWrite(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
+		if !ok {
+			continue
+		}
+		key := secrets.HostKey(secrets.Scope(resolved.Scope), secretHostIdentity(resolved), name)
+		changed := c.Secrets.Delete(key)
+		if changed {
+			// Keep the identity write lease until the old connection is gone. If
+			// the lease were released first, a new request could briefly reuse a
+			// connection after its redaction value had been deleted.
+			c.Disconnect(resolved.Host.Name)
+		}
+		release()
+		return changed, nil
+	}
+}
+
+func (c *Client) SecretLength(host, name string) (int, bool, error) {
+	if host == "" {
+		value, ok := c.Secrets.Get(secrets.OutputKey(name))
+		return len(value), ok, nil
+	}
+	for {
+		resolved, err := c.Hosts.Resolve(host)
+		if err != nil {
+			return 0, false, err
+		}
+		release, ok := c.Hosts.AcquireIdentity(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
+		if !ok {
+			continue
+		}
+		value, found := c.Secrets.Get(secrets.HostKey(secrets.Scope(resolved.Scope), secretHostIdentity(resolved), name))
+		release()
+		return len(value), found, nil
+	}
 }
 
 // maxSecretFileBytes bounds a credential read. Tokens and keys are small; a
@@ -664,11 +1051,8 @@ func (c *Client) ReadFile(ctx context.Context, host, path string, offset, limit 
 	if resp.Read == nil {
 		return nil, errors.New("agent returned no content")
 	}
-	// Only redact text: base64 payloads would be corrupted by substitution, and
-	// a secret is not recognizable inside them anyway.
-	if !resp.Read.ContentB64 {
-		resp.Read.Content = c.Secrets.Redact(resp.Read.Content)
-	}
+	// redactResponse already applies the mandatory boundary even when the remote
+	// marks Content as base64; that flag is not trusted as a disclosure bypass.
 	return resp.Read, nil
 }
 
@@ -744,13 +1128,14 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	// Dial first so the ControlMaster exists and the remote host is validated
 	// before rsync tries to use the socket.
-	conn, release, err := c.leasedConn(ctx, opts.Host)
+	redactionSnapshot := c.Secrets.Snapshot()
+	pooled, _, release, err := c.leasedConn(ctx, opts.Host)
 	if err != nil {
-		return nil, err
+		return nil, c.redactErrWith(redactionSnapshot, err)
 	}
 	defer release()
 
-	args := buildSyncArgs(conn.Host(), conn.SSHArgs(), opts)
+	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
 
 	var stdout, stderr string
 	var runErr error
@@ -766,21 +1151,21 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	}
 
 	res := &SyncResult{
-		Stdout: c.Secrets.Redact(stdout),
-		Stderr: c.Secrets.Redact(stderr),
+		Stdout: c.redactTextWith(redactionSnapshot, stdout),
+		Stderr: c.redactTextWith(redactionSnapshot, stderr),
 		DryRun: opts.DryRun,
 		// Redacted like the streams above. This echoes the assembled argv, and argv
 		// is caller-supplied: an --exclude pattern or a path can carry a credential.
 		// Leaving one field of the same struct unscrubbed is exactly the accident
 		// decision 6 exists to prevent -- redaction has to be at the boundary, not
 		// per field, or the next field added inherits the gap.
-		Command: c.Secrets.Redact("rsync " + strings.Join(args, " ")),
+		Command: c.redactTextWith(redactionSnapshot, "rsync "+strings.Join(args, " ")),
 	}
 	var ee *exec.ExitError
 	if errors.As(runErr, &ee) {
 		res.ExitCode = ee.ExitCode()
 	} else if runErr != nil {
-		return nil, fmt.Errorf("run rsync: %w", runErr)
+		return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("run rsync: %w", runErr))
 	}
 	return res, nil
 }
@@ -958,32 +1343,37 @@ func (c *Client) IsConnected(hostName string) bool {
 // through Hosts.Host, which would auto-register an unknown ssh-style name.
 // Both are only called with names that are already registered.
 func (c *Client) Disconnect(hostName string) bool {
+	return c.disconnectWithStatus(hostName, ConnectionSecurityStatus{})
+}
+
+func (c *Client) disconnectWithStatus(hostName string, status ConnectionSecurityStatus) bool {
 	c.mu.Lock()
 	conn, ok := c.conns[hostName]
-	if ok {
-		delete(c.conns, hostName)
-	}
 	c.mu.Unlock()
 
 	if !ok {
 		return false
 	}
-	conn.conn.Close()
-	return true
+	if status.State == "" {
+		status = ConnectionSecurityStatus{State: observe.SecurityCold, Generation: conn.generation}
+	}
+	return c.detachAndCloseConnection(hostName, conn, status)
 }
 
 // Close tears down all pooled connections.
 func (c *Client) Close() {
 	c.mu.Lock()
-	conns := make([]remoteConnection, 0, len(c.conns))
-	for _, conn := range c.conns {
-		conns = append(conns, conn.conn)
+	conns := make(map[string]pooledConnection, len(c.conns))
+	for name, conn := range c.conns {
+		conns[name] = conn
 	}
 	c.conns = make(map[string]pooledConnection)
 	c.mu.Unlock()
 
-	for _, conn := range conns {
-		conn.Close()
+	for name, conn := range conns {
+		c.closeDetachedConnection(name, conn, ConnectionSecurityStatus{
+			State: observe.SecurityCold, Generation: conn.generation,
+		})
 	}
 }
 
