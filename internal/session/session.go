@@ -37,6 +37,43 @@ type State struct {
 	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
+// HostUpdate is one atomic patch to a registry host. Front ends populate the
+// fields they received and call ApplyHostUpdate once; validation, optional
+// persistence, live publication, generation advancement, and invalidation all
+// happen at this boundary.
+type HostUpdate struct {
+	Name string
+	// Host replaces the complete transport definition when non-nil. Its Name
+	// must either be empty or match Name.
+	Host *transport.Host
+	// RemoteDir patches only the state directory while retaining the existing
+	// destination. It is ignored when Host is supplied.
+	RemoteDir *string
+
+	Scope        Scope
+	SetScope     bool
+	DefaultScope Scope
+
+	Cwd        *string
+	Env        map[string]string
+	LoginShell *bool
+	Secrets    map[string]string
+	Persist    bool
+}
+
+// HostUpdateResult describes the single committed registry publication.
+type HostUpdateResult struct {
+	Scope      Scope
+	Generation uint64
+	SavedTo    string
+}
+
+// HostSnapshot is an atomic host/scope/state observation.
+type HostSnapshot struct {
+	ResolvedHost
+	State State
+}
+
 // Scope identifies which config file a host is defined in.
 type Scope string
 
@@ -339,6 +376,10 @@ func cloneState(st *State) *State {
 	}
 }
 
+func cloneStateValue(st *State) State {
+	return *cloneState(st)
+}
+
 func (r *Registry) snapshotLocked() registrySnapshot {
 	s := registrySnapshot{
 		hosts:       make(map[string]transport.Host, len(r.hosts)),
@@ -537,30 +578,51 @@ func (r *Registry) Save(scope Scope) error {
 	if err := r.fatalError(); err != nil {
 		return err
 	}
+	if !validScope(scope) {
+		return fmt.Errorf("scope must be project or global, got %q", scope)
+	}
 	r.tx.Lock()
 	defer r.tx.Unlock()
-	var path string
-	var err error
-	switch scope {
-	case ScopeProject:
-		path, err = ProjectConfigPath()
-	default:
-		path, err = ConfigPath()
-	}
+	r.mu.RLock()
+	s := r.snapshotLocked()
+	r.mu.RUnlock()
+	path, b, err := r.marshalScopeSnapshot(s, scope)
 	if err != nil {
 		return err
 	}
-	r.mu.RLock()
+	// Written 0600: it records hostnames and usernames, not secrets, but there
+	// is no reason to make it world-readable.
+	err = r.io.write(path, b)
+	r.stopOnAmbiguousWrite(err)
+	return err
+}
+
+func validScope(scope Scope) bool {
+	return scope == ScopeGlobal || scope == ScopeProject
+}
+
+func configPathForScope(scope Scope) (string, error) {
+	if scope == ScopeProject {
+		return ProjectConfigPath()
+	}
+	return ConfigPath()
+}
+
+func (r *Registry) marshalScopeSnapshot(s registrySnapshot, scope Scope) (string, []byte, error) {
+	path, err := configPathForScope(scope)
+	if err != nil {
+		return "", nil, err
+	}
 	hf := hostFile{}
-	for name, h := range r.hosts {
-		if r.scopes[name] != scope {
+	for name, h := range s.hosts {
+		if s.scopes[name] != scope {
 			continue
 		}
 		e := hostEntry{
 			Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
 			ForceAgentUpload: h.ForceAgentUpload,
 		}
-		if st, ok := r.state[name]; ok {
+		if st, ok := s.state[name]; ok {
 			e.Cwd = st.Cwd
 			if len(st.Env) > 0 {
 				e.Env = make(map[string]string, len(st.Env))
@@ -583,18 +645,157 @@ func (r *Registry) Save(scope Scope) error {
 		}
 		hf.Hosts = append(hf.Hosts, e)
 	}
-	r.mu.RUnlock()
-
 	sort.Slice(hf.Hosts, func(i, j int) bool { return hf.Hosts[i].Name < hf.Hosts[j].Name })
 	b, err := r.io.marshal(hf, "", "  ")
 	if err != nil {
-		return err
+		return "", nil, err
 	}
-	// Written 0600: it records hostnames and usernames, not secrets, but there
-	// is no reason to make it world-readable.
-	err = r.io.write(path, append(b, '\n'))
-	r.stopOnAmbiguousWrite(err)
-	return err
+	return path, append(b, '\n'), nil
+}
+
+// ApplyHostUpdate validates and stages a complete host patch, optionally writes
+// that staged snapshot durably, and only then publishes it to readers. No live
+// registry state or invalidation hook changes on a pre-commit failure.
+func (r *Registry) ApplyHostUpdate(update HostUpdate) (HostUpdateResult, error) {
+	if err := r.fatalError(); err != nil {
+		return HostUpdateResult{}, err
+	}
+	if strings.TrimSpace(update.Name) == "" {
+		return HostUpdateResult{}, errors.New("host name required")
+	}
+	if update.SetScope && !validScope(update.Scope) {
+		return HostUpdateResult{}, fmt.Errorf("scope must be project or global, got %q", update.Scope)
+	}
+	if update.DefaultScope != "" && !validScope(update.DefaultScope) {
+		return HostUpdateResult{}, fmt.Errorf("default scope must be project or global, got %q", update.DefaultScope)
+	}
+	if err := secrets.ValidateDeclarations(update.Secrets); err != nil {
+		return HostUpdateResult{}, err
+	}
+	var replacement *transport.Host
+	if update.Host != nil {
+		h := *update.Host
+		if h.Name == "" {
+			h.Name = update.Name
+		}
+		if h.Name != update.Name {
+			return HostUpdateResult{}, fmt.Errorf("host update name %q does not match transport name %q", update.Name, h.Name)
+		}
+		if err := transport.ValidateHost(h); err != nil {
+			return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
+		}
+		replacement = &h
+	} else if update.RemoteDir != nil {
+		if _, err := transport.ValidateRemoteDir(*update.RemoteDir); err != nil {
+			return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
+		}
+	}
+
+	releaseIdentity := r.lockIdentityWrites([]string{update.Name})
+	defer releaseIdentity()
+	r.tx.Lock()
+	txLocked := true
+	defer func() {
+		if txLocked {
+			r.tx.Unlock()
+		}
+	}()
+	if err := r.fatalError(); err != nil {
+		return HostUpdateResult{}, err
+	}
+
+	r.mu.RLock()
+	staged := r.snapshotLocked()
+	r.mu.RUnlock()
+	oldHost, exists := staged.hosts[update.Name]
+	oldScope := staged.scopes[update.Name]
+	oldState := staged.state[update.Name]
+	if !exists && replacement == nil {
+		return HostUpdateResult{}, fmt.Errorf("unknown host %q", update.Name)
+	}
+
+	newHost := oldHost
+	if replacement != nil {
+		newHost = *replacement
+	} else if update.RemoteDir != nil {
+		newHost.RemoteDir = *update.RemoteDir
+	}
+	if err := transport.ValidateHost(newHost); err != nil {
+		return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
+	}
+
+	newScope := oldScope
+	if !exists {
+		newScope = update.DefaultScope
+		if newScope == "" {
+			newScope = ScopeGlobal
+		}
+	}
+	if update.SetScope {
+		newScope = update.Scope
+	}
+	if !validScope(newScope) {
+		return HostUpdateResult{}, fmt.Errorf("scope must be project or global, got %q", newScope)
+	}
+
+	identityChanged := !exists || hostFingerprint(oldHost, oldScope) != hostFingerprint(newHost, newScope)
+	newState := cloneState(oldState)
+	if identityChanged {
+		newState = &State{LoginShell: true}
+	}
+	if update.Cwd != nil {
+		newState.Cwd = *update.Cwd
+	}
+	if len(update.Env) > 0 {
+		newState.Env = MergeEnv(newState.Env, update.Env)
+	}
+	if update.LoginShell != nil {
+		newState.LoginShell = *update.LoginShell
+	}
+	if len(update.Secrets) > 0 {
+		newState.Secrets = MergeEnv(newState.Secrets, update.Secrets)
+	}
+	if err := secrets.ValidateDeclarations(newState.Secrets); err != nil {
+		return HostUpdateResult{}, err
+	}
+
+	declarationsChanged := !equalStringMap(cloneState(oldState).Secrets, newState.Secrets)
+	securityChanged := identityChanged || declarationsChanged
+	connectionChanged := !exists || connectionFingerprint(oldHost, oldScope) != connectionFingerprint(newHost, newScope)
+	staged.hosts[update.Name] = newHost
+	staged.scopes[update.Name] = newScope
+	staged.state[update.Name] = newState
+	generation := staged.generations[update.Name]
+	if securityChanged {
+		staged.nextGen++
+		generation = staged.nextGen
+		staged.generations[update.Name] = generation
+	}
+
+	result := HostUpdateResult{Scope: newScope, Generation: generation}
+	var writeErr error
+	if update.Persist {
+		path, data, err := r.marshalScopeSnapshot(staged, newScope)
+		if err != nil {
+			return HostUpdateResult{}, err
+		}
+		writeErr = r.io.write(path, data)
+		if writeErr != nil && !configWriteCommitted(writeErr) {
+			r.stopOnAmbiguousWrite(writeErr)
+			return HostUpdateResult{}, writeErr
+		}
+		result.SavedTo = path
+	}
+
+	r.mu.Lock()
+	hook, _ := r.publishLocked(staged)
+	r.mu.Unlock()
+	r.tx.Unlock()
+	txLocked = false
+	if (securityChanged || connectionChanged) && hook != nil {
+		hook(update.Name, generation)
+	}
+	return result, writeErr
 }
 
 func digestBytes(b []byte) string {
@@ -859,6 +1060,29 @@ func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 		return ResolvedHost{Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope), ConnectionFingerprint: connectionFingerprint(h, scope), Generation: generation}, nil
 	}
 	return ResolvedHost{}, fmt.Errorf("unknown host %q (known: %s)", name, strings.Join(r.Names(), ", "))
+}
+
+// Inspect returns host identity, scope, generation, and sticky state from one
+// read lock, so status/list callers cannot combine fields from two publications.
+// Unlike Resolve it never auto-registers ssh-shaped names.
+func (r *Registry) Inspect(name string) (HostSnapshot, error) {
+	if err := r.fatalError(); err != nil {
+		return HostSnapshot{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	h, ok := r.hosts[name]
+	if !ok {
+		return HostSnapshot{}, fmt.Errorf("unknown host %q", name)
+	}
+	scope := r.scopes[name]
+	return HostSnapshot{
+		ResolvedHost: ResolvedHost{
+			Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope),
+			ConnectionFingerprint: connectionFingerprint(h, scope), Generation: r.generations[name],
+		},
+		State: cloneStateValue(r.state[name]),
+	}, nil
 }
 
 // AcquireIdentity pins one resolved identity until release. An update to this

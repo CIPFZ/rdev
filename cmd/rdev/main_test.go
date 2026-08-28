@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -74,5 +75,46 @@ func TestPrintJSONRecursivelyRedactsSpecialCharacterSecret(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "雪界") || strings.Contains(string(raw), "quote") || !strings.Contains(string(raw), "redacted:tok") {
 		t.Fatalf("CLI JSON boundary leaked or lost placeholder: %s", raw)
+	}
+}
+
+func TestHostsAddRejectsInvalidDeclarationBeforeAnyMutation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	c := client.New(func(string, string) (*transport.AgentBinary, error) { return nil, nil })
+	oldHost := transport.Host{Name: "dev", Addr: "u@old"}
+	oldCwd := "~/old"
+	if _, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{
+		Name: "dev", Host: &oldHost, Scope: session.ScopeGlobal, SetScope: true,
+		Cwd: &oldCwd, Secrets: map[string]string{"old": "~/old-token"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := c.Hosts.Inspect("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidations := 0
+	c.Hosts.SetHostChangeHook(func(string, uint64) { invalidations++ })
+
+	err = cmdHosts(t.Context(), c, []string{
+		"add", "dev", "u@new", "-cwd", "~/new", "-secret", "tok=", "-global", "-save",
+	})
+	if err == nil || !strings.Contains(err.Error(), "nonempty name and path") {
+		t.Fatalf("invalid declaration error = %v", err)
+	}
+	after, err := c.Hosts.Inspect("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Host != before.Host || after.Scope != before.Scope || after.Generation != before.Generation ||
+		after.State.Cwd != before.State.Cwd || after.State.Secrets["old"] != "~/old-token" {
+		t.Fatalf("invalid CLI update changed registry: before=%+v after=%+v", before, after)
+	}
+	if invalidations != 0 {
+		t.Fatalf("invalid CLI update invalidations=%d, want 0", invalidations)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".rdev", "hosts.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid CLI update touched persistence: %v", err)
 	}
 }

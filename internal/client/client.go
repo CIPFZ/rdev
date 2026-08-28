@@ -40,6 +40,7 @@ type pooledConnection struct {
 	generation            uint64
 	scope                 secrets.Scope
 	host                  secrets.HostIdentity
+	publication           uint64
 }
 
 // ConnectionSecurityStatus is the externally visible security initialization
@@ -71,6 +72,10 @@ type Client struct {
 	// concurrently, and without this several goroutines would bootstrap the same
 	// host at once, racing on the agent upload's temp file.
 	dialing map[string]*sync.Mutex
+	// A monotonically increasing publication token prevents teardown of an old
+	// connection from overwriting the security state of a newer one.
+	nextPublication   uint64
+	latestPublication map[string]uint64
 }
 
 func New(lookup AgentLookup) *Client {
@@ -81,9 +86,10 @@ func New(lookup AgentLookup) *Client {
 		dial: func(ctx context.Context, host transport.Host, lookup AgentLookup) (remoteConnection, error) {
 			return transport.Dial(ctx, host, lookup)
 		},
-		conns:    make(map[string]pooledConnection),
-		security: make(map[string]ConnectionSecurityStatus),
-		dialing:  make(map[string]*sync.Mutex),
+		conns:             make(map[string]pooledConnection),
+		security:          make(map[string]ConnectionSecurityStatus),
+		dialing:           make(map[string]*sync.Mutex),
+		latestPublication: make(map[string]uint64),
 	}
 	c.Hosts.SetHostChangeHook(c.invalidateHost)
 	c.Secrets.SetRedactionHook(c.Hosts.RecordRedactionHit)
@@ -105,6 +111,10 @@ func (c *Client) setConnectionSecurity(name string, status ConnectionSecuritySta
 	previous := c.security[name]
 	c.security[name] = status
 	c.mu.Unlock()
+	c.recordConnectionSecurityTransition(name, previous, status)
+}
+
+func (c *Client) recordConnectionSecurityTransition(name string, previous, status ConnectionSecurityStatus) {
 	if previous.State != status.State || previous.Generation != status.Generation {
 		c.Hosts.RecordConnectionSecurityState(status.State, name)
 	}
@@ -174,6 +184,14 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 		if !acquired {
 			continue
 		}
+		// Reserve the next publication token before validation or dialing. A
+		// detached predecessor may still be blocked in Close; from this point its
+		// teardown is stale even if this setup ultimately fails closed.
+		c.mu.Lock()
+		c.nextPublication++
+		setupPublication := c.nextPublication
+		c.latestPublication[resolved.Host.Name] = setupPublication
+		c.mu.Unlock()
 		st := c.Hosts.State(resolved.Host.Name)
 		if err := secrets.ValidateDeclarations(st.Secrets); err != nil {
 			releaseIdentity()
@@ -227,13 +245,18 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 		}
 		// Publication is the commit point: all declared secrets are present and
 		// the identity read lease still prevents a redefinition.
-		c.mu.Lock()
-		c.conns[resolved.Host.Name] = pooled
-		c.mu.Unlock()
-		c.setConnectionSecurity(resolved.Host.Name, ConnectionSecurityStatus{
+		ready := ConnectionSecurityStatus{
 			State: observe.SecurityReady, Generation: resolved.Generation,
 			Declared: len(st.Secrets), Loaded: loaded,
-		})
+		}
+		c.mu.Lock()
+		pooled.publication = setupPublication
+		previous := c.security[resolved.Host.Name]
+		c.latestPublication[resolved.Host.Name] = pooled.publication
+		c.conns[resolved.Host.Name] = pooled
+		c.security[resolved.Host.Name] = ready
+		c.mu.Unlock()
+		c.recordConnectionSecurityTransition(resolved.Host.Name, previous, ready)
 		releaseIdentity()
 		return conn, nil
 	}
@@ -328,11 +351,14 @@ func validateSecretRead(read *proto.ReadResult) (string, observe.SecretReason, e
 	if read == nil {
 		return "", observe.ReasonSecretReadFailed, errors.New("agent returned no content")
 	}
-	if !read.EOF || read.Size > maxSecretFileBytes || len(read.Content) > maxSecretFileBytes {
+	if !read.EOF || read.Size > maxSecretFileBytes {
 		return "", observe.ReasonSecretTruncated, errors.New("secret file exceeds the maximum size")
 	}
 	if read.ContentB64 {
 		return "", observe.ReasonSecretBinary, errors.New("secret file must be text")
+	}
+	if len(read.Content) > maxSecretFileBytes {
+		return "", observe.ReasonSecretTruncated, errors.New("secret file exceeds the maximum size")
 	}
 	value := strings.TrimSpace(read.Content)
 	if value == "" {
@@ -1266,7 +1292,18 @@ func (c *Client) Disconnect(hostName string) bool {
 		return false
 	}
 	conn.conn.Close()
-	c.setConnectionSecurity(hostName, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: conn.generation})
+	c.mu.Lock()
+	// Close may block. A reconnect can publish while it is in progress, so only
+	// the teardown that still owns the latest publication may write cold.
+	if _, connected := c.conns[hostName]; connected || c.latestPublication[hostName] != conn.publication {
+		c.mu.Unlock()
+		return true
+	}
+	status := ConnectionSecurityStatus{State: observe.SecurityCold, Generation: conn.generation}
+	previous := c.security[hostName]
+	c.security[hostName] = status
+	c.mu.Unlock()
+	c.recordConnectionSecurityTransition(hostName, previous, status)
 	return true
 }
 

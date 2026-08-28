@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -994,6 +995,79 @@ func TestSecretReadBoundaryAndOneByteOver(t *testing.T) {
 	// claims the cap+1 read reached EOF at exactly the old size.
 	if _, reason, err := validateSecretRead(&proto.ReadResult{Content: exact + "b", Size: maxSecretFileBytes, EOF: true}); err == nil || reason != observe.ReasonSecretTruncated {
 		t.Fatalf("observed extra byte accepted with lying metadata: reason=%s err=%v", reason, err)
+	}
+	exactBinary := base64.StdEncoding.EncodeToString(make([]byte, maxSecretFileBytes))
+	if len(exactBinary) <= maxSecretFileBytes {
+		t.Fatalf("test probe does not exceed encoded boundary: %d", len(exactBinary))
+	}
+	if _, reason, err := validateSecretRead(&proto.ReadResult{
+		Content: exactBinary, ContentB64: true, Size: maxSecretFileBytes, EOF: true,
+	}); err == nil || reason != observe.ReasonSecretBinary {
+		t.Fatalf("exact 64 KiB binary misclassified: reason=%s err=%v", reason, err)
+	}
+	if _, reason, err := validateSecretRead(&proto.ReadResult{
+		Content: exactBinary, ContentB64: true, Size: maxSecretFileBytes + 1, EOF: true,
+	}); err == nil || reason != observe.ReasonSecretTruncated {
+		t.Fatalf("64 KiB+1 binary misclassified: reason=%s err=%v", reason, err)
+	}
+}
+
+func TestSlowOldCloseCannotOverwriteNewReadyPublication(t *testing.T) {
+	c := newTestClient()
+	for _, host := range []transport.Host{{Name: "dev", Addr: "u@dev"}, {Name: "other", Addr: "u@other"}} {
+		if err := c.Hosts.Add(host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeEntered, releaseClose := make(chan struct{}), make(chan struct{})
+	devDials := 0
+	c.dial = func(_ context.Context, host transport.Host, _ AgentLookup) (remoteConnection, error) {
+		if host.Name != "dev" {
+			return &fakeRemoteConn{host: host}, nil
+		}
+		devDials++
+		conn := &fakeRemoteConn{host: host}
+		if devDials == 1 {
+			conn.closeFn = func() {
+				close(closeEntered)
+				<-releaseClose
+			}
+		}
+		return conn, nil
+	}
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.conn(t.Context(), "other"); err != nil {
+		t.Fatal(err)
+	}
+	disconnected := make(chan bool, 1)
+	go func() { disconnected <- c.Disconnect("dev") }()
+	<-closeEntered
+
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("new publication is not ready: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+	otherDone := make(chan error, 1)
+	go func() { _, err := c.conn(context.Background(), "other"); otherDone <- err }()
+	select {
+	case err := <-otherDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow Close on dev blocked unrelated pooled connection")
+	}
+
+	close(releaseClose)
+	if ok := <-disconnected; !ok {
+		t.Fatal("old connection was not detached")
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("old Close overwrote new publication: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
 	}
 }
 

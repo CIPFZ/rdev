@@ -619,15 +619,15 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
-			h, err := c.Hosts.Host(n)
+			snapshot, err := c.Hosts.Inspect(n)
 			if err != nil {
 				continue
 			}
-			st := c.Hosts.State(n)
+			h, st := snapshot.Host, snapshot.State
 			rows = append(rows, row{
 				h.Name, h.Addr, h.Port, h.RemoteDir,
 				st.Cwd, st.Env, st.LoginShell, st.Secrets,
-				h.ForceAgentUpload, string(c.Hosts.ScopeOf(n)),
+				h.ForceAgentUpload, string(snapshot.Scope),
 			})
 		}
 		return printJSON(c, rows)
@@ -659,15 +659,6 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			port = parsed
 		}
 
-		if err := c.Hosts.Add(transport.Host{
-			Name: fs.pos[0], Addr: fs.pos[1], Port: port,
-			RemoteDir:        fs.str("remote-dir"),
-			ForceAgentUpload: fs.bools["force-agent-upload"],
-		}); err != nil {
-			return fmt.Errorf("invalid host: %w", err)
-		}
-		c.Hosts.SetScope(fs.pos[0], scope)
-
 		env := map[string]string{}
 		for _, kv := range fs.repeat["env"] {
 			k, v, ok := strings.Cut(kv, "=")
@@ -688,34 +679,38 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		}
 
 		cwd := fs.str("cwd")
-		if cwd != "" || len(env) > 0 || len(secretPaths) > 0 || fs.bools["no-login"] {
-			c.Hosts.Update(fs.pos[0], func(st *session.State) {
-				if cwd != "" {
-					st.Cwd = cwd
-				}
-				if len(env) > 0 {
-					st.Env = session.MergeEnv(st.Env, env)
-				}
-				if len(secretPaths) > 0 {
-					st.Secrets = session.MergeEnv(st.Secrets, secretPaths)
-				}
-				if fs.bools["no-login"] {
-					st.LoginShell = false
-				}
-			})
+		var cwdPatch *string
+		if cwd != "" {
+			cwdPatch = &cwd
 		}
-		if fs.bools["save"] {
-			if err := c.Hosts.Save(scope); err != nil {
+		var loginShell *bool
+		if fs.bools["no-login"] {
+			no := false
+			loginShell = &no
+		}
+		host := transport.Host{
+			Name: fs.pos[0], Addr: fs.pos[1], Port: port,
+			RemoteDir:        fs.str("remote-dir"),
+			ForceAgentUpload: fs.bools["force-agent-upload"],
+		}
+		result, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{
+			Name: fs.pos[0], Host: &host, Scope: scope, SetScope: true,
+			Cwd: cwdPatch, Env: env, LoginShell: loginShell, Secrets: secretPaths,
+			Persist: fs.bools["save"],
+		})
+		if err != nil {
+			warning, committed := session.ConfigWriteCommittedWarning(err)
+			if !committed {
 				return err
 			}
-			var path string
-			if scope == session.ScopeProject {
-				path, _ = session.ProjectConfigPath()
-				fmt.Fprintf(os.Stderr, "saved to %s (visible only in this directory)\n", c.Secrets.Redact(path))
-			} else {
-				path, _ = session.ConfigPath()
-				fmt.Fprintf(os.Stderr, "saved to %s (visible in every project)\n", c.Secrets.Redact(path))
+			fmt.Fprintf(os.Stderr, "warning: %s\n", c.Secrets.Redact(warning))
+		}
+		if result.SavedTo != "" {
+			note := "visible in every project"
+			if result.Scope == session.ScopeProject {
+				note = "visible only in this directory"
 			}
+			fmt.Fprintf(os.Stderr, "saved to %s (%s)\n", c.Secrets.Redact(result.SavedTo), note)
 		}
 		return cmdHosts(ctx, c, []string{"list"})
 	}

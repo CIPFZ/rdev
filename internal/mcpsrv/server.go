@@ -7,10 +7,12 @@
 package mcpsrv
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
@@ -101,8 +103,7 @@ func redactCallToolResult(c *client.Client, ctr *mcp.CallToolResult) {
 		// Decode first so redaction sees the original string values rather than
 		// their JSON-escaped representation. Quotes, backslashes, newlines and
 		// Unicode escapes otherwise evade a literal scan of serialized bytes.
-		var decoded any
-		if json.Unmarshal(raw, &decoded) == nil {
+		if decoded, ok := decodeJSONValue(raw); ok {
 			if scrubbed, err := json.Marshal(c.Secrets.RedactValue(decoded)); err == nil {
 				ctr.StructuredContent = json.RawMessage(scrubbed)
 			} else {
@@ -120,8 +121,7 @@ func redactCallToolResult(c *client.Client, ctr *mcp.CallToolResult) {
 			continue
 		}
 		scrubbed := ""
-		var decoded any
-		if json.Unmarshal([]byte(tc.Text), &decoded) == nil {
+		if decoded, ok := decodeJSONValue([]byte(tc.Text)); ok {
 			if raw, err := json.Marshal(c.Secrets.RedactValue(decoded)); err == nil {
 				scrubbed = string(raw)
 			}
@@ -132,6 +132,20 @@ func redactCallToolResult(c *client.Client, ctr *mcp.CallToolResult) {
 			ctr.Content[i] = &mcp.TextContent{Meta: tc.Meta, Annotations: tc.Annotations, Text: scrubbed}
 		}
 	}
+}
+
+func decodeJSONValue(raw []byte) (any, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
+	return decoded, true
 }
 
 // ---------- exec ----------
@@ -662,11 +676,16 @@ func registerSession(s *mcp.Server, c *client.Client, approveProject func(string
 			"Use 'secrets' to declare credential files that should be registered for redaction automatically on " +
 			"every connect, so a token is masked without having to remember rdev_secrets each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionIn) (*mcp.CallToolResult, SessionOut, error) {
-		if err := secrets.ValidateDeclarations(in.Secrets); err != nil {
-			return nil, SessionOut{}, err
-		}
 		boundarySnapshot := c.Secrets.Snapshot()
 		approvalWarning := ""
+		hasHostFields := in.Addr != "" || in.Port != 0 || in.RemoteDir != "" || in.Cwd != "" ||
+			len(in.Env) > 0 || in.LoginShell != nil || len(in.Secrets) > 0 || in.Scope != "" || in.Persist
+		if in.Host == "" && hasHostFields {
+			return nil, SessionOut{}, errors.New("host is required for session updates")
+		}
+		if in.ApproveProjectDigest != "" && (in.Host != "" || hasHostFields) {
+			return nil, SessionOut{}, errors.New("approve_project_digest must be submitted separately from host updates")
+		}
 		if in.ApproveProjectDigest != "" {
 			if _, err := approveProject(in.ApproveProjectDigest); err != nil {
 				warning, committed := session.ConfigWriteCommittedWarning(err)
@@ -676,77 +695,45 @@ func registerSession(s *mcp.Server, c *client.Client, approveProject func(string
 				approvalWarning = warning
 			}
 		}
-		isNew := false
-		if in.Host != "" {
-			if _, err := c.Hosts.Host(in.Host); err != nil {
-				isNew = true
-			}
-		}
-
-		if in.Host != "" && in.Addr != "" {
-			if err := c.Hosts.Add(transport.Host{
-				Name: in.Host, Addr: in.Addr, Port: in.Port, RemoteDir: in.RemoteDir,
-			}); err != nil {
-				return nil, SessionOut{}, fmt.Errorf("invalid host: %w", err)
-			}
-		} else if in.Host != "" && in.RemoteDir != "" {
-			// Updating only the state directory: keep the existing destination
-			// rather than requiring the caller to repeat it.
-			h, err := c.Hosts.Host(in.Host)
-			if err != nil {
-				return nil, SessionOut{}, err
-			}
-			h.RemoteDir = in.RemoteDir
-			if err := c.Hosts.Add(h); err != nil {
-				return nil, SessionOut{}, fmt.Errorf("invalid host: %w", err)
-			}
-		}
-		// A live connection was started against the previous address and state
-		// directory, so redefining either must retire it rather than let the next
-		// call reuse stale settings.
-		if in.Host != "" && (in.Addr != "" || in.RemoteDir != "") {
-			c.Disconnect(in.Host)
-		}
-
-		// Default a brand-new host to project scope: a machine you register while
-		// working in a repo almost always belongs to that repo, and the safer
-		// mistake is a host that is too narrowly visible rather than one that
-		// leaks into unrelated projects.
-		scope := session.ScopeProject
+		scope := session.Scope("")
+		setScope := in.Scope != ""
 		switch strings.ToLower(in.Scope) {
 		case "global":
 			scope = session.ScopeGlobal
 		case "project":
 			scope = session.ScopeProject
 		case "":
-			if in.Host != "" && !isNew {
-				scope = c.Hosts.ScopeOf(in.Host)
-			}
 		default:
 			return nil, SessionOut{}, fmt.Errorf("scope must be project or global, got %q", in.Scope)
 		}
-		if in.Host != "" && (in.Addr != "" || in.Scope != "") {
-			c.Hosts.SetScope(in.Host, scope)
+		if in.Port != 0 && in.Addr == "" {
+			return nil, SessionOut{}, errors.New("port requires addr")
 		}
 
-		if in.Host != "" && (in.Cwd != "" || len(in.Env) > 0 || in.LoginShell != nil || len(in.Secrets) > 0) {
-			if _, err := c.Hosts.Host(in.Host); err != nil {
-				return nil, SessionOut{}, err
+		var updateResult session.HostUpdateResult
+		if in.Host != "" && hasHostFields {
+			update := session.HostUpdate{
+				Name: in.Host, Scope: scope, SetScope: setScope, DefaultScope: session.ScopeProject,
+				Env: in.Env, LoginShell: in.LoginShell, Secrets: in.Secrets, Persist: in.Persist,
 			}
-			c.Hosts.Update(in.Host, func(st *session.State) {
-				if in.Cwd != "" {
-					st.Cwd = in.Cwd
+			if in.Addr != "" {
+				h := transport.Host{Name: in.Host, Addr: in.Addr, Port: in.Port, RemoteDir: in.RemoteDir}
+				update.Host = &h
+			} else if in.RemoteDir != "" {
+				update.RemoteDir = &in.RemoteDir
+			}
+			if in.Cwd != "" {
+				update.Cwd = &in.Cwd
+			}
+			var err error
+			updateResult, err = c.Hosts.ApplyHostUpdate(update)
+			if err != nil {
+				warning, committed := session.ConfigWriteCommittedWarning(err)
+				if !committed {
+					return nil, SessionOut{}, err
 				}
-				if len(in.Env) > 0 {
-					st.Env = session.MergeEnv(st.Env, in.Env)
-				}
-				if in.LoginShell != nil {
-					st.LoginShell = *in.LoginShell
-				}
-				if len(in.Secrets) > 0 {
-					st.Secrets = session.MergeEnv(st.Secrets, in.Secrets)
-				}
-			})
+				approvalWarning = warning
+			}
 		}
 
 		out := SessionOut{
@@ -754,18 +741,12 @@ func registerSession(s *mcp.Server, c *client.Client, approveProject func(string
 			Security:     c.Hosts.SecuritySnapshot(),
 			Warning:      approvalWarning,
 		}
-		if in.Persist {
-			if err := c.Hosts.Save(scope); err != nil {
-				return nil, SessionOut{}, fmt.Errorf("save host registry: %w", err)
-			}
+		if updateResult.SavedTo != "" {
 			out.Saved = true
-			if scope == session.ScopeProject {
-				p, _ := session.ProjectConfigPath()
-				out.SavedTo = p
+			out.SavedTo = updateResult.SavedTo
+			if updateResult.Scope == session.ScopeProject {
 				out.SavedNote = "visible only when working in this directory"
 			} else {
-				p, _ := session.ConfigPath()
-				out.SavedTo = p
 				out.SavedNote = "visible in every project"
 			}
 		}

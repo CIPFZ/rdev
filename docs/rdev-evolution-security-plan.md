@@ -925,6 +925,12 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 - [x] P2-06：所有 Store set/batch/file/remote/inline 入口统一拒绝 `<6 bytes`；验证失败保持旧值不变，不再存在“注入成功但不会脱敏”的状态。
 - [x] Phase 2 观测：security snapshot schema 升为 v2，增加固定 reason 的 secret load/reject 计数、连接安全状态 transition 计数和无标签 redaction hit 计数；事件只带固定 vocabulary 和 host target hash，不携带 secret name/value、路径、argv、远端输出或错误原文。
 
+独立复审验收补充：
+
+- CLI `hosts add` 与 MCP `rdev_session` 现统一调用 Registry 原生 staged transaction；host、scope、sticky state 和完整 secret declarations 先验证，`persist` 先安全写入 staged snapshot，随后在一个临界区发布 host/scope/state/generation，并且每个 alias 最多触发一次失效。普通持久化失败不会改变 live snapshot；并发 status/list 通过原子 `Inspect` 只观察提交前或提交后的完整组合。
+- 连接池 publication 绑定单调 token，旧连接的阻塞 `Close` 返回后只有仍拥有最新 publication 才能写 `cold`；新连接和 `ready` 在同一锁区发布，旧收尾不能再制造 `connected=true/security=cold`，且关闭过程不持有全局 client 锁。
+- MCP JSON backstop 使用 `UseNumber` 保持大整数原文/语义，同时继续递归脱敏字符串及 map key；secret 文件分类先依据 `EOF/Size` 判定截断，再判 binary，最后只对 text 检查 `Content` 长度，因此恰好 64 KiB 的 base64 payload 不再被编码长度误分类。
+
 兼容与迁移：
 
 - 现有 hosts.json schema 不变，声明式 `secrets: {name:path}` 继续可用；行为从“读取失败只 warning、连接仍可用”收紧为 fail-closed。修复错误路径或用带 `host` 的显式注册提供同一 exact identity 的值后可重新初始化。
@@ -937,7 +943,7 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 - 尚未引入 Phase 4 的完整连接池、LRU/TTL、`IdentityFile`/`IdentitiesOnly` execution profile 或历史 secret rotation archive；Phase 2 只实现每 alias 的安全初始化与 operation/mutation lease。
 - 多 principal capability 和共享 broker secret authority 仍属于 Phase 5；当前 scope 是单进程 registry 的 global/project scope，并以 alias-local identity 隔离。
 
-验证覆盖包括：跨 host 同名 secret、output-only 禁止注入、Host/Scope/config override 清理、并发首请求、初始化失败与状态可见、初始化期间 alias redefinition、请求构造/响应脱敏/secret rotation lease、特殊字符的 structured/text/error/CLI 路径、64 KiB 边界与超一字节、短值、Store 不变性、低基数 metrics/event 以及 race。完整门禁结果记录在本次提交说明中。
+验证覆盖包括：跨 host 同名 secret、output-only 禁止注入、Host/Scope/config override 清理、组合更新持久化失败无 live mutation、并发不可见半状态、CLI/MCP 共享声明验证、并发首请求、初始化失败与状态可见、旧连接慢 `Close`/新 `ready` 确定性时序、初始化期间 alias redefinition、请求构造/响应脱敏/secret rotation lease、特殊字符及大整数的 structured/text/error/CLI 路径、64 KiB text/binary 与超一字节边界、短值、Store 不变性、低基数 metrics/event 以及 race。完整门禁结果记录在本次提交说明中。
 
 ### Phase 3：请求语义、取消和资源硬限制
 

@@ -1008,3 +1008,127 @@ func TestConfigRejectsInvalidSecretDeclarationBeforePublication(t *testing.T) {
 		t.Fatalf("invalid config published hosts: %v", names)
 	}
 }
+
+func TestApplyHostUpdatePersistenceFailureLeavesLiveSnapshotUntouched(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	r := NewRegistry()
+	oldHost := transport.Host{Name: "dev", Addr: "u@old"}
+	oldCwd := "~/old"
+	if _, err := r.ApplyHostUpdate(HostUpdate{
+		Name: "dev", Host: &oldHost, Scope: ScopeGlobal, SetScope: true,
+		Cwd: &oldCwd, Env: map[string]string{"MODE": "old"}, Secrets: map[string]string{"tok": "~/old-token"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := r.Inspect("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidations := 0
+	r.SetHostChangeHook(func(string, uint64) { invalidations++ })
+	r.io.write = func(string, []byte) error { return errors.New("injected persistence failure") }
+
+	newHost := transport.Host{Name: "dev", Addr: "u@new", RemoteDir: ".cache/new"}
+	newCwd, no := "~/new", false
+	if _, err := r.ApplyHostUpdate(HostUpdate{
+		Name: "dev", Host: &newHost, Scope: ScopeProject, SetScope: true,
+		Cwd: &newCwd, Env: map[string]string{"MODE": "new"}, LoginShell: &no,
+		Secrets: map[string]string{"tok": "~/new-token"}, Persist: true,
+	}); err == nil || !strings.Contains(err.Error(), "injected persistence failure") {
+		t.Fatalf("persistence error = %v", err)
+	}
+	after, err := r.Inspect("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Host != before.Host || after.Scope != before.Scope || after.Generation != before.Generation ||
+		after.State.Cwd != before.State.Cwd || after.State.Env["MODE"] != "old" ||
+		after.State.Secrets["tok"] != "~/old-token" || after.State.LoginShell != before.State.LoginShell {
+		t.Fatalf("failed transaction changed live snapshot: before=%+v after=%+v", before, after)
+	}
+	if invalidations != 0 {
+		t.Fatalf("failed transaction invalidations=%d, want 0", invalidations)
+	}
+	projectPath, _ := ProjectConfigPath()
+	if _, err := os.Stat(projectPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed transaction touched persistence: %v", err)
+	}
+}
+
+func TestApplyHostUpdatePublishesCombinedSnapshotAtomically(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	r := NewRegistry()
+	oldHost := transport.Host{Name: "dev", Addr: "u@old"}
+	oldCwd := "~/old"
+	if _, err := r.ApplyHostUpdate(HostUpdate{
+		Name: "dev", Host: &oldHost, Scope: ScopeGlobal, SetScope: true,
+		Cwd: &oldCwd, Env: map[string]string{"MODE": "old"}, Secrets: map[string]string{"old": "~/old"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := r.Inspect("dev")
+	entered, release := make(chan struct{}), make(chan struct{})
+	originalWrite := r.io.write
+	r.io.write = func(path string, data []byte) error {
+		close(entered)
+		<-release
+		return originalWrite(path, data)
+	}
+	invalidations := 0
+	r.SetHostChangeHook(func(name string, generation uint64) {
+		if name != "dev" || generation == before.Generation {
+			t.Errorf("invalidation=(%q,%d), before=%d", name, generation, before.Generation)
+		}
+		invalidations++
+	})
+
+	newHost := transport.Host{Name: "dev", Addr: "u@new", RemoteDir: ".cache/new"}
+	newCwd, no := "~/new", false
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.ApplyHostUpdate(HostUpdate{
+			Name: "dev", Host: &newHost, Scope: ScopeProject, SetScope: true,
+			Cwd: &newCwd, Env: map[string]string{"MODE": "new"}, LoginShell: &no,
+			Secrets: map[string]string{"new": "~/new"}, Persist: true,
+		})
+		done <- err
+	}()
+	<-entered
+	for i := 0; i < 1000; i++ {
+		got, err := r.Inspect("dev")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Host.Addr != "u@old" || got.Scope != ScopeGlobal || got.State.Cwd != "~/old" ||
+			got.State.Env["MODE"] != "old" || got.State.Secrets["old"] != "~/old" || got.Generation != before.Generation {
+			t.Fatalf("staged fields became visible before commit: %+v", got)
+		}
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	after, err := r.Inspect("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Host.Addr != "u@new" || after.Host.RemoteDir != ".cache/new" || after.Scope != ScopeProject ||
+		after.State.Cwd != "~/new" || after.State.Env["MODE"] != "new" || after.State.Secrets["new"] != "~/new" ||
+		after.State.LoginShell || after.Generation == before.Generation {
+		t.Fatalf("committed snapshot is incomplete: %+v", after)
+	}
+	if invalidations != 1 {
+		t.Fatalf("combined transaction invalidations=%d, want 1", invalidations)
+	}
+	projectPath, _ := ProjectConfigPath()
+	persisted, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(persisted), "u@new") || !strings.Contains(string(persisted), "~/new") ||
+		strings.Contains(string(persisted), "u@old") {
+		t.Fatalf("persisted snapshot is not the committed combination: %s", persisted)
+	}
+}

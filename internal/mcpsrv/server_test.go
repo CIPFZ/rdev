@@ -231,10 +231,14 @@ func TestSessionExplicitScopeWins(t *testing.T) {
 }
 
 func TestSessionRejectsUnknownScope(t *testing.T) {
-	cs := connect(t, newTestClient())
+	c := newTestClient()
+	cs := connect(t, c)
 	isErr, _ := callTool(t, cs, "rdev_session", SessionIn{Host: "dev", Addr: "u@h", Scope: "bogus"}, nil)
 	if !isErr {
 		t.Error("an unknown scope should be rejected rather than silently defaulted")
+	}
+	if names := c.Hosts.Names(); len(names) != 0 {
+		t.Fatalf("invalid scope published host before validation: %v", names)
 	}
 }
 
@@ -676,6 +680,38 @@ func TestMiddlewareRedactsUnscrubbedResultField(t *testing.T) {
 	}
 }
 
+func TestMiddlewarePreservesLargeJSONIntegersInStructuredAndTextContent(t *testing.T) {
+	c := newTestClient()
+	const token = "synthetic-redaction-token-1234"
+	const largeInteger = "900719925474099312345678901"
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), token); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"large":` + largeInteger + `,"nested":{"` + token + `":"prefix ` + token + `"}}`)
+	result := &mcp.CallToolResult{
+		StructuredContent: json.RawMessage(raw),
+		Content:           []mcp.Content{&mcp.TextContent{Text: string(raw)}},
+	}
+	redactCallToolResult(c, result)
+
+	structured, ok := result.StructuredContent.(json.RawMessage)
+	if !ok {
+		t.Fatalf("structured content type = %T", result.StructuredContent)
+	}
+	if !strings.Contains(string(structured), largeInteger) || strings.Contains(string(structured), token) ||
+		!strings.Contains(string(structured), "redacted:tok") {
+		t.Fatalf("structured content lost integer fidelity or redaction: %s", structured)
+	}
+	textContent, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("text content type = %T", result.Content[0])
+	}
+	if !strings.Contains(textContent.Text, largeInteger) || strings.Contains(textContent.Text, token) ||
+		!strings.Contains(textContent.Text, "redacted:tok") {
+		t.Fatalf("text fallback lost integer fidelity or redaction: %s", textContent.Text)
+	}
+}
+
 func TestSessionSnapshotRedactsBeforeIdentityPurge(t *testing.T) {
 	c := newTestClient()
 	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@old"})
@@ -701,7 +737,10 @@ func TestSessionSnapshotRedactsBeforeIdentityPurge(t *testing.T) {
 }
 
 func TestSessionRejectsInvalidSecretDeclarationBeforeHostPublication(t *testing.T) {
+	t.Chdir(t.TempDir())
 	c := newTestClient()
+	invalidations := 0
+	c.Hosts.SetHostChangeHook(func(string, uint64) { invalidations++ })
 	cs := connect(t, c)
 	isErr, message := callTool(t, cs, "rdev_session", SessionIn{
 		Host: "dev", Addr: "u@h", Secrets: map[string]string{"tok": ""}, Persist: true,
@@ -711,6 +750,13 @@ func TestSessionRejectsInvalidSecretDeclarationBeforeHostPublication(t *testing.
 	}
 	if names := c.Hosts.Names(); len(names) != 0 {
 		t.Fatalf("invalid declaration published host state: %v", names)
+	}
+	if invalidations != 0 {
+		t.Fatalf("invalid declaration invalidations=%d, want 0", invalidations)
+	}
+	path, _ := session.ProjectConfigPath()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid declaration touched persistence: %v", err)
 	}
 }
 
