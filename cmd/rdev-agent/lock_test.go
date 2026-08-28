@@ -301,8 +301,10 @@ func TestConcurrentJobRmHasOneWinner(t *testing.T) {
 	}
 }
 
-// A sweep and a targeted removal race on the same records. Neither may report a
-// job the other one deleted, and no filesystem error may escape.
+// A sweep and a targeted removal race on the same records. The lock seam proves
+// the targeted call is blocked on the exact flock already held by the sweep;
+// neither may report a job the other one deleted, and no filesystem error may
+// escape.
 func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 	for round := 0; round < 10; round++ {
 		state := newJobState(t)
@@ -323,21 +325,34 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 			t.Fatal(err)
 		}
 		// keep_last=1 is a valid sweep filter. The oldest listed job is certain to
-		// be a sweep candidate, so blocking its measurement proves the sweep has
-		// entered the delete-side critical section before targeted removals start.
+		// be a sweep candidate.
 		target := ordered.List[len(ordered.List)-1].ID
 		targetDir := jobDir(state, target)
-		entered := make(chan struct{})
+		targetLock := lockPath(targetDir)
+		sweepHeld := make(chan struct{})
+		targetedContended := make(chan struct{})
 		release := make(chan struct{})
-		var barrierOnce sync.Once
-		dirSizeVisitHook = func(root, path string) {
-			if root == targetDir && path == filepath.Join(targetDir, "meta.json") {
-				barrierOnce.Do(func() {
-					close(entered)
-					<-release
-				})
-			}
+		var heldOnce, contendedOnce, releaseOnce sync.Once
+		releaseSweep := func() { releaseOnce.Do(func() { close(release) }) }
+		jobLockTestSeam = &jobLockTestHooks{
+			acquired: func(path string) {
+				if path == targetLock {
+					heldOnce.Do(func() {
+						close(sweepHeld)
+						<-release
+					})
+				}
+			},
+			contended: func(path string) {
+				if path == targetLock {
+					contendedOnce.Do(func() { close(targetedContended) })
+				}
+			},
 		}
+		t.Cleanup(func() {
+			releaseSweep()
+			jobLockTestSeam = nil
+		})
 
 		results := make([]*proto.Response, jobs+1)
 		sweepDone := make(chan struct{})
@@ -348,33 +363,60 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 			close(sweepDone)
 		}()
 		select {
-		case <-entered:
+		case <-sweepHeld:
 		case <-time.After(10 * time.Second):
-			close(release)
+			releaseSweep()
 			<-sweepDone
-			dirSizeVisitHook = nil
-			t.Fatalf("round %d: sweep did not enter deletion for target %s", round, target)
+			jobLockTestSeam = nil
+			t.Fatalf("round %d: sweep did not acquire the target lock for %s", round, target)
 		}
 
 		var wg sync.WaitGroup
-		started := make(chan struct{}, jobs)
+		targetIndex := -1
 		for i, id := range ids {
+			if id == target {
+				targetIndex = i
+				break
+			}
+		}
+		if targetIndex < 0 {
+			t.Fatalf("round %d: target %s absent from fixture", round, target)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[targetIndex+1] = handleSafely(&proto.Request{
+				Op: proto.OpJobRm, Job: &proto.JobParams{ID: target},
+			}, state)
+		}()
+		select {
+		case <-targetedContended:
+			// The non-blocking flock probe returned EWOULDBLOCK. The targeted
+			// call is now about to wait in blocking LOCK_EX on the sweep's lock.
+		case <-time.After(10 * time.Second):
+			releaseSweep()
+			wg.Wait()
+			<-sweepDone
+			jobLockTestSeam = nil
+			t.Fatalf("round %d: targeted rm did not contend on the target lock for %s", round, target)
+		}
+
+		for i, id := range ids {
+			if i == targetIndex {
+				continue
+			}
 			wg.Add(1)
 			go func(i int, id string) {
 				defer wg.Done()
-				started <- struct{}{}
 				results[i+1] = handleSafely(&proto.Request{
 					Op: proto.OpJobRm, Job: &proto.JobParams{ID: id},
 				}, state)
 			}(i, id)
 		}
-		for range ids {
-			<-started
-		}
-		close(release)
+		releaseSweep()
 		wg.Wait()
 		<-sweepDone
-		dirSizeVisitHook = nil
+		jobLockTestSeam = nil
 
 		seen := map[string]int{}
 		var freed int64
@@ -397,6 +439,15 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 		}
 		if freed != want {
 			t.Fatalf("round %d: freed_bytes = %d, want %d", round, freed, want)
+		}
+		sweepWins := 0
+		for _, id := range results[0].Job.Removed {
+			if id == target {
+				sweepWins++
+			}
+		}
+		if sweepWins != 1 {
+			t.Fatalf("round %d: sweep removed target %s %d times, want exactly once", round, target, sweepWins)
 		}
 		for i, id := range ids {
 			if id != target {

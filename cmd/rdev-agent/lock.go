@@ -21,6 +21,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -37,6 +38,18 @@ import (
 //     is a plain count of directory entries. Off-by-one in a reported total is
 //     the kind of thing that gets debugged twice.
 const lockDirName = ".job-locks"
+
+// jobLockTestHooks is a package-only seam for proving lock interleavings. It is
+// nil in production. When enabled, acquisition first uses a non-blocking probe
+// so a test can distinguish a genuinely contended flock from a goroutine that
+// has merely reached the call site; it then falls back to the same blocking
+// LOCK_EX used normally.
+type jobLockTestHooks struct {
+	acquired  func(path string)
+	contended func(path string)
+}
+
+var jobLockTestSeam *jobLockTestHooks
 
 // lockPath returns the lock file guarding a job directory.
 //
@@ -70,12 +83,36 @@ func withJobLock(jobDir string, fn func() error) error {
 	}
 	defer f.Close()
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := acquireJobLock(f, path); err != nil {
 		return err
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 
 	return fn()
+}
+
+func acquireJobLock(f *os.File, path string) error {
+	seam := jobLockTestSeam
+	if seam == nil {
+		return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	}
+
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != nil {
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return err
+		}
+		if seam.contended != nil {
+			seam.contended(path)
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+			return err
+		}
+	}
+	if seam.acquired != nil {
+		seam.acquired(path)
+	}
+	return nil
 }
 
 // jobExists reports whether a job's directory survived, and is how a locked

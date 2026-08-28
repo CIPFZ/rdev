@@ -232,6 +232,14 @@ func newJobID() string {
 // records; the full scan pays one metadata read per directory without retaining
 // every record in memory.
 func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	limit := p.Limit
+	if limit < 0 || limit > 1000 {
+		return nil, limitExceededError("job list limit is outside the hard limit")
+	}
+	if limit == 0 {
+		limit = defaultJobListLimit
+	}
+
 	root := filepath.Join(state, "jobs")
 	dir, err := os.Open(root)
 	if err != nil {
@@ -241,14 +249,6 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, err
 	}
 	defer dir.Close()
-
-	limit := p.Limit
-	if limit < 0 || limit > 1000 {
-		return nil, limitExceededError("job list limit is outside the hard limit")
-	}
-	if limit == 0 {
-		limit = defaultJobListLimit
-	}
 	selected := &oldestJobHeap{}
 	heap.Init(selected)
 	total := 0

@@ -1602,6 +1602,69 @@ func TestJobListLimitAndTotals(t *testing.T) {
 	}
 }
 
+// Limit validation is an operation invariant, not a property of the current
+// filesystem state. Drive the real handler across the jobs directory's full
+// lifecycle so a missing directory cannot turn an invalid limit into success.
+func TestJobListLimitValidatedBeforeJobsDirectoryAccess(t *testing.T) {
+	state := t.TempDir()
+	jobsRoot := filepath.Join(state, "jobs")
+	type stateStep struct {
+		name  string
+		apply func() error
+	}
+	steps := []stateStep{
+		{name: "empty_state", apply: func() error { return nil }},
+		{name: "jobs_directory_exists", apply: func() error {
+			return os.MkdirAll(jobsRoot, 0o755)
+		}},
+		{name: "jobs_directory_removed_again", apply: func() error {
+			return os.RemoveAll(jobsRoot)
+		}},
+	}
+
+	var wantLimitEnvelope string
+	for _, step := range steps {
+		if err := step.apply(); err != nil {
+			t.Fatalf("prepare %s: %v", step.name, err)
+		}
+		t.Run(step.name, func(t *testing.T) {
+			for _, limit := range []int{-1, 0, 1, 1000, 1001} {
+				resp := handleSafely(&proto.Request{
+					ID: "job-list-boundary", OperationID: "job-list-boundary-op",
+					Op: proto.OpJobList, Job: &proto.JobParams{Limit: limit},
+				}, state)
+				if limit >= 0 && limit <= 1000 {
+					if !resp.OK || resp.Error != nil || resp.Job == nil {
+						t.Errorf("limit %d response = %+v, want successful empty list", limit, resp)
+						continue
+					}
+					if len(resp.Job.List) != 0 || resp.Job.Total != 0 || resp.Job.Truncated {
+						t.Errorf("limit %d job result = %+v, want empty and untruncated", limit, resp.Job)
+					}
+					continue
+				}
+
+				if resp.OK || resp.Error == nil || resp.Error.Code != proto.CodeLimitExceeded {
+					t.Errorf("limit %d response = %+v, want structured %s", limit, resp, proto.CodeLimitExceeded)
+					continue
+				}
+				if resp.Execution != proto.StateNotSent || resp.Job != nil {
+					t.Errorf("limit %d response execution/job = %s/%+v, want not_sent/nil", limit, resp.Execution, resp.Job)
+				}
+				envelope, err := json.Marshal(resp.Error)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if wantLimitEnvelope == "" {
+					wantLimitEnvelope = string(envelope)
+				} else if string(envelope) != wantLimitEnvelope {
+					t.Errorf("limit %d envelope = %s, want identical %s", limit, envelope, wantLimitEnvelope)
+				}
+			}
+		})
+	}
+}
+
 // Directory names are only an operational convenience; StartedAt plus ID is the
 // shared strict order for listing and keep_last. This fixture has 101 valid jobs
 // in one timestamp-prefixed name bucket, with the lexically smallest ID carrying
