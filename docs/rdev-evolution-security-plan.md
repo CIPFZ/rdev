@@ -929,6 +929,7 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 
 - CLI `hosts add` 与 MCP `rdev_session` 现统一调用 Registry 原生 staged transaction；host、scope、sticky state 和完整 secret declarations 先验证，`persist` 先安全写入 staged snapshot，随后在一个临界区发布 host/scope/state/generation，并且每个 alias 最多触发一次失效。普通持久化失败不会改变 live snapshot；并发 status/list 通过原子 `Inspect` 只观察提交前或提交后的完整组合。
 - Registry 的单文件安全写原语不能为 global/project 两个 `hosts.json` 提供带恢复日志的崩溃一致事务，因此 `persist=true` 默认拒绝仍存在旧 scope 持久化定义的跨 scope 迁移，并在任何文件写入前返回明确的显式分步提示。Registry 额外记录每个 alias 实际存在于哪些配置文件，因而先做 live-only scope 变化、再调用 `Save` 或第二次 `ApplyHostUpdate(persist=true)` 也不能绕过保护。调用方必须先显式保存/移除旧 scope 定义，再单独持久化新 scope；旧 scope 删除失败会保留迁移保护和原文件。`persist=false` 的 scope 变化被明确为仅当前进程有效：它仍推进 identity generation、清空旧 sticky/secret declarations 并失效连接，但不改变任一文件，重启恢复磁盘定义。
+- 最终只读复核发现并修复了显式两步迁移后的反向旁路：每个 alias 的持久化位置与 live-only 源现在合并为 `stable` / `live-moved` 状态机，并在 Load、`ApplyHostUpdate`、`SetScope` 和 scope 权威重写时作为一个值转换、快照和发布。旧源重写一旦提交（包括 committed cleanup warning）即同时移除 durable source 并归一化 move source；目标写入失败保留“源已删除、目标未持久化”的准确状态供安全重试，完成后任何反向 `persist=true` 都重新进入 `live-moved` 并在写入前拒绝。
 - 连接池 publication 绑定单调 token，所有 published connection 的 detach、`Close` 与收尾状态发布统一经过同一边界：detach 必须命中连接实例和 publication，阻塞 `Close` 返回后还必须仍持有最新 token 且 alias 没有替代连接，才能写 `cold`/`failed`。显式 disconnect、host invalidation、陈旧池连接、transport retry、初始化失败和 client-wide close 不再有直接状态回写旁路；新连接和 `ready` 在同一锁区发布，旧收尾不能再制造 `connected=true/security=cold`，且关闭过程不持有全局 client 锁。
 - MCP JSON backstop 使用 `UseNumber` 保持大整数原文/语义，同时继续递归脱敏字符串及 map key；secret 文件分类先依据 `EOF/Size` 判定截断，再判 binary，最后只对 text 检查 `Content` 长度，因此恰好 64 KiB 的 base64 payload 不再被编码长度误分类。
 
@@ -945,7 +946,7 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 - 多 principal capability 和共享 broker secret authority 仍属于 Phase 5；当前 scope 是单进程 registry 的 global/project scope，并以 alias-local identity 隔离。
 - 显式的两步跨 scope 文件操作本身不是跨文件原子事务；进程在两步之间崩溃时需要调用方继续第二步或恢复旧文件。本阶段刻意不伪装成拥有不存在的崩溃一致性，自动 `persist=true` 路径保持 fail-closed。若未来要求单命令原子迁移，需要引入可恢复 journal/transaction manifest，并在每次 Load/写入前完成恢复。
 
-验证覆盖包括：跨 host 同名 secret、output-only 禁止注入、Host/Scope/config override 清理、组合更新持久化失败无 live mutation、global↔project 双向持久化迁移拒绝、重启重载旧定义与旧 secret declaration、live-only scope 语义、`SetScope + Save`/第二次 persist 旁路、源 scope 删除失败和目标 writer 不可达、并发不可见半状态、CLI/MCP 共享声明验证、并发首请求、初始化失败与状态可见、显式 disconnect 及 transport retry 的旧连接慢 `Close`/新 `ready` 确定性时序、跨 host 不阻塞、连接安全状态与 metrics 一致性、初始化期间 alias redefinition、请求构造/响应脱敏/secret rotation lease、特殊字符及大整数的 structured/text/error/CLI 路径、64 KiB text/binary 与超一字节边界、短值、Store 不变性、低基数 metrics/event 以及 race。完整门禁结果记录在本次提交说明中。
+验证覆盖包括：跨 host 同名 secret、output-only 禁止注入、Host/Scope/config override 清理、组合更新持久化失败无 live mutation、global↔project 双向持久化迁移拒绝、两步迁移后反向拒绝与连续往返、账本状态归一化、目标优先/源优先顺序、源/目标未提交失败与 committed warning、重启重载旧定义与旧 secret declaration、live-only scope 语义、`SetScope + Save`/第二次 persist 旁路、源 scope 删除失败和目标 writer 不可达、并发不可见半状态、CLI/MCP 共享声明验证、并发首请求、初始化失败与状态可见、显式 disconnect 及 transport retry 的旧连接慢 `Close`/新 `ready` 确定性时序、跨 host 不阻塞、连接安全状态与 metrics 一致性、初始化期间 alias redefinition、请求构造/响应脱敏/secret rotation lease、特殊字符及大整数的 structured/text/error/CLI 路径、64 KiB text/binary 与超一字节边界、短值、Store 不变性、低基数 metrics/event 以及 race。完整门禁结果记录在本次提交说明中。
 
 ### Phase 3：请求语义、取消和资源硬限制
 

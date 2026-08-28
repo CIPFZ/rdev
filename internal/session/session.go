@@ -100,15 +100,10 @@ type Registry struct {
 	hosts      map[string]transport.Host
 	state      map[string]*State
 	scopes     map[string]Scope
-	// persistedScopes records every config file that currently contains an
-	// alias. It is intentionally separate from scopes: project precedence can
-	// make one definition live while the same alias still exists globally.
-	// Keeping both locations lets persistence reject an implicit two-file move.
-	persistedScopes map[string]uint8
-	// scopeChanges remembers the durable scope a live-only move started from.
-	// It closes SetScope+Save and repeated ApplyHostUpdate bypasses even when the
-	// alias already has a shadowed definition in both files.
-	scopeChanges map[string]Scope
+	// persistence is the per-alias scope migration state machine. It keeps the
+	// durable locations and an in-progress live-only move in one value so every
+	// load, rewrite, and live scope transition is published together.
+	persistence  map[string]scopePersistence
 	generations  map[string]uint64
 	nextGen      uint64
 	projectTrust ProjectTrust
@@ -126,15 +121,14 @@ type registryIO struct {
 
 func NewRegistry() *Registry {
 	return &Registry{
-		hosts:           make(map[string]transport.Host),
-		state:           make(map[string]*State),
-		scopes:          make(map[string]Scope),
-		persistedScopes: make(map[string]uint8),
-		scopeChanges:    make(map[string]Scope),
-		generations:     make(map[string]uint64),
-		identity:        make(map[string]*sync.RWMutex),
-		observe:         observe.New(nil),
-		io:              registryIO{read: readConfigFile, marshal: json.MarshalIndent, write: atomicWriteConfigFile},
+		hosts:       make(map[string]transport.Host),
+		state:       make(map[string]*State),
+		scopes:      make(map[string]Scope),
+		persistence: make(map[string]scopePersistence),
+		generations: make(map[string]uint64),
+		identity:    make(map[string]*sync.RWMutex),
+		observe:     observe.New(nil),
+		io:          registryIO{read: readConfigFile, marshal: json.MarshalIndent, write: atomicWriteConfigFile},
 	}
 }
 
@@ -369,14 +363,66 @@ type hostCandidate struct {
 }
 
 type registrySnapshot struct {
-	hosts           map[string]transport.Host
-	state           map[string]*State
-	scopes          map[string]Scope
-	persistedScopes map[string]uint8
-	scopeChanges    map[string]Scope
-	generations     map[string]uint64
-	nextGen         uint64
-	trust           ProjectTrust
+	hosts       map[string]transport.Host
+	state       map[string]*State
+	scopes      map[string]Scope
+	persistence map[string]scopePersistence
+	generations map[string]uint64
+	nextGen     uint64
+	trust       ProjectTrust
+}
+
+// scopePersistence is an explicit two-state migration ledger:
+//
+//   - stable: movingFrom is empty; persisted is the exact set of files that
+//     contain the alias.
+//   - live-moved: movingFrom names a still-persisted source while scopes holds
+//     the unsaved destination. Persisting that destination is rejected until
+//     an authoritative rewrite removes the source.
+//
+// Rewriting the source transitions live-moved back to stable. A later reverse
+// move therefore starts a new migration instead of being mistaken for a
+// cancellation of stale state from the previous completed migration.
+type scopePersistence struct {
+	persisted  uint8
+	movingFrom Scope
+}
+
+func (p scopePersistence) load(scope Scope) scopePersistence {
+	p.persisted |= scopeBit(scope)
+	p.movingFrom = ""
+	return p
+}
+
+func (p scopePersistence) move(from, to Scope) scopePersistence {
+	if from == to {
+		return p
+	}
+	if p.movingFrom == "" {
+		p.movingFrom = from
+	} else if to == p.movingFrom {
+		p.movingFrom = ""
+	}
+	return p.normalize()
+}
+
+func (p scopePersistence) rewrite(scope, liveScope Scope) scopePersistence {
+	p.persisted &^= scopeBit(scope)
+	if liveScope == scope {
+		p.persisted |= scopeBit(scope)
+	}
+	return p.normalize()
+}
+
+func (p scopePersistence) normalize() scopePersistence {
+	if p.movingFrom != "" && p.persisted&scopeBit(p.movingFrom) == 0 {
+		p.movingFrom = ""
+	}
+	return p
+}
+
+func (p scopePersistence) empty() bool {
+	return p.persisted == 0 && p.movingFrom == ""
 }
 
 func cloneState(st *State) *State {
@@ -395,13 +441,12 @@ func cloneStateValue(st *State) State {
 
 func (r *Registry) snapshotLocked() registrySnapshot {
 	s := registrySnapshot{
-		hosts:           make(map[string]transport.Host, len(r.hosts)),
-		state:           make(map[string]*State, len(r.state)),
-		scopes:          make(map[string]Scope, len(r.scopes)),
-		persistedScopes: make(map[string]uint8, len(r.persistedScopes)),
-		scopeChanges:    make(map[string]Scope, len(r.scopeChanges)),
-		generations:     make(map[string]uint64, len(r.generations)),
-		nextGen:         r.nextGen, trust: r.projectTrust,
+		hosts:       make(map[string]transport.Host, len(r.hosts)),
+		state:       make(map[string]*State, len(r.state)),
+		scopes:      make(map[string]Scope, len(r.scopes)),
+		persistence: make(map[string]scopePersistence, len(r.persistence)),
+		generations: make(map[string]uint64, len(r.generations)),
+		nextGen:     r.nextGen, trust: r.projectTrust,
 	}
 	for k, v := range r.hosts {
 		s.hosts[k] = v
@@ -412,11 +457,8 @@ func (r *Registry) snapshotLocked() registrySnapshot {
 	for k, v := range r.scopes {
 		s.scopes[k] = v
 	}
-	for k, v := range r.persistedScopes {
-		s.persistedScopes[k] = v
-	}
-	for k, v := range r.scopeChanges {
-		s.scopeChanges[k] = v
+	for k, v := range r.persistence {
+		s.persistence[k] = v
 	}
 	for k, v := range r.generations {
 		s.generations[k] = v
@@ -443,8 +485,7 @@ func applyCandidates(s *registrySnapshot, candidates []hostCandidate, scope Scop
 		}
 		s.hosts[h.Name] = h
 		s.scopes[h.Name] = scope
-		s.persistedScopes[h.Name] |= scopeBit(scope)
-		delete(s.scopeChanges, h.Name)
+		s.persistence[h.Name] = s.persistence[h.Name].load(scope)
 		// A config entry is an authoritative snapshot, not a patch. Reusing the
 		// prior map would retain env or secret declarations removed from disk.
 		// Identity changes additionally advance the generation above.
@@ -468,8 +509,7 @@ func applyCandidates(s *registrySnapshot, candidates []hostCandidate, scope Scop
 
 func (r *Registry) publishLocked(s registrySnapshot) (func(string, uint64), map[string]uint64) {
 	r.hosts, r.state, r.scopes = s.hosts, s.state, s.scopes
-	r.persistedScopes = s.persistedScopes
-	r.scopeChanges = s.scopeChanges
+	r.persistence = s.persistence
 	r.generations, r.nextGen, r.projectTrust = s.generations, s.nextGen, s.trust
 	gens := make(map[string]uint64, len(s.generations))
 	for k, v := range s.generations {
@@ -627,7 +667,7 @@ func (r *Registry) Save(scope Scope) error {
 	}
 	r.mu.Lock()
 	recordScopeRewrite(&s, scope)
-	r.persistedScopes = s.persistedScopes
+	r.persistence = s.persistence
 	r.mu.Unlock()
 	return err
 }
@@ -653,8 +693,9 @@ func scopeBit(scope Scope) uint8 {
 // removes the live-moved alias there), then retry the destination write.
 func rejectImplicitScopeMigration(s registrySnapshot, scope Scope) error {
 	for name := range s.hosts {
-		from, moved := s.scopeChanges[name]
-		if s.scopes[name] == scope && moved && s.persistedScopes[name]&scopeBit(from) != 0 {
+		state := s.persistence[name]
+		if s.scopes[name] == scope && state.movingFrom != "" {
+			from := state.movingFrom
 			return fmt.Errorf("cannot persist host %q from %s to %s atomically: registry storage has no crash-consistent cross-file transaction; explicitly save/remove it from the %s scope first, then persist the %s scope", name, from, scope, from, scope)
 		}
 	}
@@ -664,23 +705,18 @@ func rejectImplicitScopeMigration(s registrySnapshot, scope Scope) error {
 // recordScopeRewrite updates durable-location bookkeeping after a committed
 // authoritative rewrite of one config file.
 func recordScopeRewrite(s *registrySnapshot, scope Scope) {
-	bit := scopeBit(scope)
-	for name, mask := range s.persistedScopes {
-		mask &^= bit
-		if mask == 0 {
-			delete(s.persistedScopes, name)
+	for name, state := range s.persistence {
+		state = state.rewrite(scope, s.scopes[name])
+		if state.empty() {
+			delete(s.persistence, name)
 		} else {
-			s.persistedScopes[name] = mask
+			s.persistence[name] = state
 		}
 	}
 	for name := range s.hosts {
 		if s.scopes[name] == scope {
-			s.persistedScopes[name] |= bit
-		}
-	}
-	for name, from := range s.scopeChanges {
-		if s.persistedScopes[name]&scopeBit(from) == 0 {
-			delete(s.scopeChanges, name)
+			state := s.persistence[name].rewrite(scope, scope)
+			s.persistence[name] = state
 		}
 	}
 }
@@ -849,12 +885,11 @@ func (r *Registry) ApplyHostUpdate(update HostUpdate) (HostUpdateResult, error) 
 	staged.hosts[update.Name] = newHost
 	staged.scopes[update.Name] = newScope
 	if exists && oldScope != newScope {
-		if from, alreadyMoved := staged.scopeChanges[update.Name]; alreadyMoved {
-			if newScope == from {
-				delete(staged.scopeChanges, update.Name)
-			}
+		state := staged.persistence[update.Name].move(oldScope, newScope)
+		if state.empty() {
+			delete(staged.persistence, update.Name)
 		} else {
-			staged.scopeChanges[update.Name] = oldScope
+			staged.persistence[update.Name] = state
 		}
 	}
 	staged.state[update.Name] = newState
@@ -1050,12 +1085,11 @@ func (r *Registry) SetScope(name string, scope Scope) {
 		r.tx.Unlock()
 		return
 	}
-	if from, alreadyMoved := r.scopeChanges[name]; alreadyMoved {
-		if scope == from {
-			delete(r.scopeChanges, name)
-		}
+	state := r.persistence[name].move(old, scope)
+	if state.empty() {
+		delete(r.persistence, name)
 	} else {
-		r.scopeChanges[name] = old
+		r.persistence[name] = state
 	}
 	r.state[name] = &State{LoginShell: true}
 	r.nextGen++
