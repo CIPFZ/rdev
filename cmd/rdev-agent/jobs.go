@@ -291,8 +291,9 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 
 	// StartedAt is authoritative for ordering: a hand-created or clock-skewed
 	// directory name could otherwise misplace an entry. Cheap, since this only
-	// sorts what is being returned.
-	sort.Slice(list, func(i, j int) bool { return list[i].StartedAt > list[j].StartedAt })
+	// sorts what is being returned. The shared comparator also gives equal
+	// timestamps the same deterministic order used by keep_last.
+	sort.Slice(list, func(i, j int) bool { return jobInfoNewer(list[i], list[j]) })
 
 	res := &proto.JobResult{List: list}
 	res.Total = total
@@ -316,3 +317,29 @@ func (h *stringMinHeap) Pop() any {
 // defaultJobListLimit bounds an unspecified listing. High enough to cover normal
 // use, low enough that a host with thousands of old jobs stays responsive.
 const defaultJobListLimit = 100
+
+// jobInfoNewer defines the total recency order used by listing and reclamation.
+//
+// New records use RFC3339Nano, but older records only have whole-second
+// timestamps. Parsing rather than comparing strings keeps the two formats in
+// chronological order (a fractional timestamp sorts before "Z" as raw text).
+// Equal timestamps fall back to ID so every agent protects the same keep_last
+// set. An invalid timestamp sorts first, conservatively keeping an uncertain
+// record ahead of a valid deletion candidate; two invalid values still get a
+// deterministic textual order.
+func jobInfoNewer(a, b *proto.JobInfo) bool {
+	at, aErr := time.Parse(time.RFC3339Nano, a.StartedAt)
+	bt, bErr := time.Parse(time.RFC3339Nano, b.StartedAt)
+	switch {
+	case aErr == nil && bErr == nil && !at.Equal(bt):
+		return at.After(bt)
+	case aErr != nil && bErr == nil:
+		return true
+	case aErr == nil && bErr != nil:
+		return false
+	case aErr != nil && bErr != nil && a.StartedAt != b.StartedAt:
+		return a.StartedAt > b.StartedAt
+	default:
+		return a.ID > b.ID
+	}
+}

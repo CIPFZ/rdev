@@ -250,6 +250,8 @@ job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直�
 
 现在每个 job 由 `<state>/.job-locks/<id>.lock` 上的 `flock` 保护，覆盖 `job_rm`（单个和 sweep）、`job_stop` 的状态写入、以及 supervisor 记录退出码的那一步。锁文件放在 `jobs/` **之外**：放在 job 目录里会被它自己序列化的那次 `RemoveAll` 删掉，而放在 `jobs/` 下又会被 `job_list` 的 `Total` 计数进去。
 
+`keep_last` 与 `job_list` 共用同一个严格顺序：新记录保存 RFC3339 纳秒时间；兼容旧的秒级记录时先按解析后的真实时间排序，同一时刻再按 job ID 降序打破平局。这样多个 agent 即使同时扫描，也会保护同一组记录；旧记录的同秒真实先后已经不可恢复，ID 仅是确定性兼容规则。`freed_bytes` 定义为成功删除的 job 目录内全部非目录项的逻辑字节数。它在 job 锁内、确认 supervisor/child 都已结束后采样；若有任何路径无法完整 `stat`，该 job 不会被删除或计账，避免把临时写入、并发变化或未观察到的文件算成“已释放”。
+
 记录已经不存在的 job 现在回到 `missing` 字段，而不是报错——和 `skipped`（还活着，故意保留）是两种不同的原因，不该混在一个字段里。调用方要的是「这个 job 不存在」这个状态,而它确实已经达成了。
 
 （锁**只**加在 agent 侧。锁的是文件，不是连接，所以 `internal/transport` 里没有任何相关代码。Windows 远端本来就不支持——见下面的平台一节，`GOOS=windows` 下 agent 连编译都过不了——所以这里不需要 `flock` 的回退实现。）

@@ -380,7 +380,8 @@ type JobResult struct {
 
 	// Removed lists job IDs deleted by job_rm.
 	Removed []string `json:"removed,omitempty"`
-	// FreedBytes is the disk space reclaimed by job_rm.
+	// FreedBytes is the logical size of non-directory entries reclaimed by
+	// job_rm. A job is only counted after its complete record is removed.
 	FreedBytes int64 `json:"freed_bytes,omitempty"`
 	// Skipped lists jobs that matched the filter but were left alone because they
 	// are still running. Removing a live job's records would orphan the process

@@ -84,13 +84,16 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, processStartError(err)
 	}
 
+	// Preserve sub-second start order. keep_last cannot infer which job is newer
+	// when several starts are truncated to the same whole second.
+	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	meta := &jobMeta{
 		ID:        id,
 		Label:     p.Label,
 		Argv:      p.Spec.Argv,
 		Cwd:       p.Spec.Cwd,
 		PID:       cmd.Process.Pid,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		StartedAt: startedAt,
 	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), meta); err != nil {
 		return nil, err

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
 )
@@ -41,6 +42,38 @@ func newJobState(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return state
+}
+
+func measuredDirSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	size, err := dirSize(dir)
+	if err != nil {
+		t.Fatalf("measure %s: %v", dir, err)
+	}
+	return size
+}
+
+func TestJobRecencyOrderHandlesMixedPrecisionAndTies(t *testing.T) {
+	whole := &proto.JobInfo{ID: "job-z", StartedAt: "2026-08-28T12:00:00Z"}
+	fractional := &proto.JobInfo{ID: "job-a", StartedAt: "2026-08-28T12:00:00.1Z"}
+	if !jobInfoNewer(fractional, whole) {
+		t.Error("fractional timestamp should be newer than the whole-second legacy record")
+	}
+	if jobInfoNewer(whole, fractional) {
+		t.Error("whole-second legacy record should not sort after a later fractional timestamp")
+	}
+
+	tiedA := &proto.JobInfo{ID: "job-a", StartedAt: whole.StartedAt}
+	tiedD := &proto.JobInfo{ID: "job-d", StartedAt: whole.StartedAt}
+	if !jobInfoNewer(tiedD, tiedA) || jobInfoNewer(tiedA, tiedD) {
+		t.Error("equal timestamps should use descending job ID as a deterministic tie-breaker")
+	}
+}
+
+func TestDirSizeFailsClosedWhenRecordCannotBeWalked(t *testing.T) {
+	if _, err := dirSize(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("missing job record was measured as zero bytes instead of returning an error")
+	}
 }
 
 // Removing a job twice must not leak a filesystem error. The second caller asked
@@ -87,7 +120,7 @@ func TestConcurrentJobRmHasOneWinner(t *testing.T) {
 	for round := 0; round < 20; round++ {
 		state := newJobState(t)
 		id := startFinishedJob(t, state)
-		size := dirSize(jobDir(state, id))
+		size := measuredDirSize(t, jobDir(state, id))
 
 		const racers = 6
 		var wg sync.WaitGroup
@@ -145,7 +178,7 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 		sizes := make(map[string]int64, jobs)
 		for i := range ids {
 			ids[i] = startFinishedJob(t, state)
-			sizes[ids[i]] = dirSize(jobDir(state, ids[i]))
+			sizes[ids[i]] = measuredDirSize(t, jobDir(state, ids[i]))
 		}
 		var want int64
 		for _, s := range sizes {
@@ -217,22 +250,44 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 }
 
 // The sweep's own concurrency: several sweepers over the same directory must
-// still remove each job once.
+// still remove each job once. This fixture deliberately gives every job the
+// same whole-second StartedAt, matching records written before sub-second
+// timestamps were introduced. Without the ID tie-breaker, ReadDir order keeps
+// job-a instead of the defined newest job-d. job-d's two-byte payload makes the
+// old failure exact and deterministic: freed_bytes is want+2, the same symptom
+// that made the original process-based fixture flaky near a PID digit boundary.
 func TestConcurrentSweepsHaveOneWinnerPerJob(t *testing.T) {
 	for round := 0; round < 10; round++ {
 		state := newJobState(t)
-		const jobs = 4
-		// keep_last=1 spares the newest and sweeps the rest. An age filter cannot
-		// be used here: these jobs just ended, so nothing has aged out yet.
+		ids := []string{"job-a", "job-b", "job-c", "job-d"}
+		jobs := len(ids)
 		const keep = 1
-		ids := make([]string, 0, jobs)
 		sizes := make(map[string]int64, jobs)
-		for i := 0; i < jobs; i++ {
-			id := startFinishedJob(t, state)
-			ids = append(ids, id)
-			sizes[id] = dirSize(jobDir(state, id))
+		stamp := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		for _, id := range ids {
+			dir := jobDir(state, id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+				ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+				"exit_code": 0, "ended_at": stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if id == "job-d" {
+				if err := os.WriteFile(filepath.Join(dir, "payload"), []byte("xx"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sizes[id] = measuredDirSize(t, dir)
 		}
-		// Newest first is what keep_last retains, and ids were started in order.
+		// Equal timestamps use descending ID as the documented total order, so
+		// job-d is the one keep_last record and a/b/c are the exact reclaim set.
 		var want int64
 		for _, id := range ids[:jobs-keep] {
 			want += sizes[id]
@@ -273,6 +328,9 @@ func TestConcurrentSweepsHaveOneWinnerPerJob(t *testing.T) {
 		}
 		if len(seen) != jobs-keep {
 			t.Fatalf("round %d: %d jobs removed, want %d", round, len(seen), jobs-keep)
+		}
+		if _, err := os.Stat(jobDir(state, "job-d")); err != nil {
+			t.Fatalf("round %d: deterministic keep_last winner job-d was removed: %v", round, err)
 		}
 		if freed != want {
 			t.Fatalf("round %d: freed_bytes = %d, want %d", round, freed, want)
