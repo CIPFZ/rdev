@@ -144,9 +144,10 @@ type Conn struct {
 
 	seq    int
 	closed bool
-	// pending maps a request ID to the channel awaiting its reply. The reader
-	// goroutine owns delivery; Do only registers and waits.
-	pending map[string]chan *proto.Response
+	// pending maps a request ID to the call awaiting its terminal reply. Both
+	// terminal commit and caller cancellation are arbitrated under mu; ready is
+	// only a notification and never defines which side won.
+	pending map[string]*pendingCall
 	// streams tracks event ordering for v3 responses. Non-terminal frames are
 	// validated and consumed by readLoop; only the one terminal frame is handed
 	// to Do, so a slow caller cannot block response dispatch for other streams.
@@ -182,6 +183,12 @@ type streamProgress struct {
 	streaming   bool
 	abandoned   bool
 	canceled    bool
+}
+
+type pendingCall struct {
+	ready    chan struct{}
+	response *proto.Response
+	finished bool
 }
 
 const maxTrackedStreams = 256
@@ -316,7 +323,7 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	c := &Conn{
 		host:      host,
 		stderr:    &lockedBuilder{},
-		pending:   make(map[string]chan *proto.Response),
+		pending:   make(map[string]*pendingCall),
 		streams:   make(map[string]streamProgress),
 		completed: make(map[string]struct{}),
 	}
@@ -1237,8 +1244,8 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	}
 	c.seq++
 	req.ID = fmt.Sprint(c.seq)
-	ch := make(chan *proto.Response, 1)
-	c.pending[req.ID] = ch
+	call := &pendingCall{ready: make(chan struct{})}
+	c.pending[req.ID] = call
 	if c.streams == nil {
 		c.streams = make(map[string]streamProgress)
 	}
@@ -1266,7 +1273,9 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	writeErr := writer.Write(ctx, append(line, '\n'), framewriter.Control)
 	if writeErr != nil {
 		if ctx.Err() != nil {
-			return nil, c.finishContextCancellation(req, ctx.Err())
+			if resp, cancelErr := c.finishContextCancellation(req, call, ctx.Err()); resp != nil || cancelErr != nil {
+				return c.finishResponse(resp, cancelErr)
+			}
 		}
 		c.abandon(req.ID)
 		return nil, fmt.Errorf("write request to agent: %w", writeErr)
@@ -1274,69 +1283,113 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 
 	select {
 	case <-ctx.Done():
-		return nil, c.finishContextCancellation(req, ctx.Err())
-	case resp := <-ch:
-		if resp == nil {
-			c.mu.Lock()
-			err := c.readErr
-			c.mu.Unlock()
-			if err == nil {
-				err = errors.New("connection closed")
-			}
-			return nil, fmt.Errorf("read response from agent: %w", err)
-		}
-		if !resp.OK {
-			if resp.Error != nil && resp.Error.Validate() == nil {
-				return resp, resp.Error
-			}
-			return resp, fmt.Errorf("remote operation failed")
-		}
-		return resp, nil
+		resp, cancelErr := c.finishContextCancellation(req, call, ctx.Err())
+		return c.finishResponse(resp, cancelErr)
+	case <-call.ready:
+		c.mu.Lock()
+		resp := call.response
+		c.mu.Unlock()
+		return c.finishResponse(resp, nil)
 	}
+}
+
+func (c *Conn) finishResponse(resp *proto.Response, err error) (*proto.Response, error) {
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		c.mu.Lock()
+		readErr := c.readErr
+		c.mu.Unlock()
+		if readErr == nil {
+			readErr = errors.New("connection closed")
+		}
+		return nil, fmt.Errorf("read response from agent: %w", readErr)
+	}
+	if !resp.OK {
+		if resp.Error != nil && resp.Error.Validate() == nil {
+			return resp, resp.Error
+		}
+		return resp, fmt.Errorf("remote operation failed")
+	}
+	return resp, nil
 }
 
 // finishContextCancellation applies the operation registry's disconnect
 // contract. Only foreground operations whose contract is cancel may receive a
 // protocol cancel. Losing interest in an already-sent mutation that completes
 // independently is an ambiguous outcome, not proof that it was canceled.
-func (c *Conn) finishContextCancellation(req *proto.Request, cause error) error {
+func (c *Conn) finishContextCancellation(req *proto.Request, call *pendingCall, cause error) (*proto.Response, error) {
 	descriptor, known := proto.LookupOperation(req.Op)
-	if known && descriptor.Disconnect == proto.DisconnectCancel && c.SupportsFeature(proto.FeatureCancel) {
-		c.sendCancel(req)
-		c.cancelAbandon(req.ID)
+	cancelID := ""
+	if known && descriptor.Disconnect == proto.DisconnectCancel {
+		cancelID, _ = proto.NewOperationID()
+	}
+
+	c.mu.Lock()
+	// readLoop publishes the terminal on the pending object before removing it.
+	// Thus even if select chose ctx.Done after ready became runnable, the
+	// committed terminal wins and the completed operation is never reported as
+	// canceled.
+	if call != nil && call.finished {
+		resp := call.response
+		readErr := c.readErr
+		c.mu.Unlock()
+		if resp != nil {
+			return resp, nil
+		}
+		if readErr == nil {
+			readErr = errors.New("connection closed")
+		}
+		return nil, fmt.Errorf("read response from agent: %w", readErr)
+	}
+	if current, ok := c.pending[req.ID]; ok && current == call {
+		delete(c.pending, req.ID)
+	}
+	eligibleForWireCancel := known && descriptor.Disconnect == proto.DisconnectCancel &&
+		c.features[proto.FeatureCancel]
+	prepared := c.prepareCancelLocked(req, cancelID, eligibleForWireCancel)
+	canWireCancel := prepared != nil
+	if progress, ok := c.streams[req.ID]; ok {
+		progress.abandoned = true
+		progress.canceled = canWireCancel
+		c.streams[req.ID] = progress
+	}
+	c.mu.Unlock()
+
+	// The decision and cancel stream reservation above are stable, but the
+	// potentially blocking writer is intentionally used only after releasing mu.
+	c.sendPreparedCancel(prepared)
+	if canWireCancel {
 		code := proto.CodeCanceled
 		if errors.Is(cause, context.DeadlineExceeded) {
 			code = proto.CodeDeadlineExceeded
 		}
-		return fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), cause)
+		return nil, fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), cause)
 	}
-	c.abandon(req.ID)
 	if known && descriptor.Class == proto.ClassMutating {
-		return fmt.Errorf("%w: %w", proto.NewError(proto.CodeAmbiguousOutcome, req.OperationID, proto.StatePossiblyExecuted), cause)
+		return nil, fmt.Errorf("%w: %w", proto.NewError(proto.CodeAmbiguousOutcome, req.OperationID, proto.StatePossiblyExecuted), cause)
 	}
 	code := proto.CodeCanceled
 	if errors.Is(cause, context.DeadlineExceeded) {
 		code = proto.CodeDeadlineExceeded
 	}
-	return fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), cause)
+	return nil, fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), cause)
 }
 
-func (c *Conn) sendCancel(target *proto.Request) {
-	if target == nil || target.OperationID == "" || target.ClientID == "" || !c.SupportsFeature(proto.FeatureCancel) {
-		return
-	}
-	cancelID, err := proto.NewOperationID()
-	if err != nil {
-		return
-	}
-	c.mu.Lock()
-	if c.closed || len(c.streams) >= maxTrackedStreams {
-		c.mu.Unlock()
-		return
+type preparedCancel struct {
+	requestID string
+	request   *proto.Request
+	writer    *framewriter.Writer
+}
+
+func (c *Conn) prepareCancelLocked(target *proto.Request, cancelID string, eligible bool) *preparedCancel {
+	if !eligible || target == nil || target.OperationID == "" || target.ClientID == "" ||
+		cancelID == "" || c.closed || c.writer == nil || len(c.streams) >= maxTrackedStreams {
+		return nil
 	}
 	c.seq++
 	requestID := fmt.Sprint(c.seq)
-	writer := c.writer
 	if c.streams == nil {
 		c.streams = make(map[string]streamProgress)
 	}
@@ -1344,19 +1397,24 @@ func (c *Conn) sendCancel(target *proto.Request) {
 		state: proto.StreamNew, operationID: cancelID, abandoned: true,
 		typed: c.protocolVersion >= 3, streaming: c.features[proto.FeatureStreaming],
 	}
-	c.mu.Unlock()
-	request := &proto.Request{
+	return &preparedCancel{requestID: requestID, writer: c.writer, request: &proto.Request{
 		ID: requestID, OperationID: cancelID, ClientID: target.ClientID,
 		Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: target.OperationID, TargetOp: target.Op},
-	}
-	line, err := json.Marshal(request)
-	if err != nil || len(line) > c.effectiveRequestFrameLimit() {
-		c.discard(requestID)
+	}}
+}
+
+func (c *Conn) sendPreparedCancel(prepared *preparedCancel) {
+	if prepared == nil {
 		return
 	}
-	if writer != nil {
-		if err := writer.Enqueue(append(line, '\n'), framewriter.Critical); err != nil {
-			c.abandon(requestID)
+	line, err := json.Marshal(prepared.request)
+	if err != nil || len(line) > c.effectiveRequestFrameLimit() {
+		c.discard(prepared.requestID)
+		return
+	}
+	if prepared.writer != nil {
+		if err := prepared.writer.Enqueue(append(line, '\n'), framewriter.Critical); err != nil {
+			c.abandon(prepared.requestID)
 		}
 	}
 }
@@ -1368,20 +1426,6 @@ func (c *Conn) abandon(id string) {
 	delete(c.pending, id)
 	if progress, ok := c.streams[id]; ok {
 		progress.abandoned = true
-		c.streams[id] = progress
-	}
-}
-
-// cancelAbandon records the semantic cancellation as well as the caller no
-// longer waiting. A peer must not turn that operation into a successful typed
-// terminal after the cancel boundary.
-func (c *Conn) cancelAbandon(id string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.pending, id)
-	if progress, ok := c.streams[id]; ok {
-		progress.abandoned = true
-		progress.canceled = true
 		c.streams[id] = progress
 	}
 }
@@ -1426,7 +1470,6 @@ func (c *Conn) readLoop() {
 		}
 
 		c.mu.Lock()
-		ch, waiting := c.pending[resp.ID]
 		progress, tracked := c.streams[resp.ID]
 		_, duplicate := c.completed[resp.ID]
 		if duplicate || !tracked {
@@ -1451,18 +1494,28 @@ func (c *Conn) readLoop() {
 			c.streams[resp.ID] = progress
 		}
 		if terminal {
-			delete(c.pending, resp.ID)
-			delete(c.streams, resp.ID)
-			c.rememberCompletedLocked(resp.ID)
+			c.commitTerminalLocked(resp.ID, &resp)
 		}
 		c.mu.Unlock()
-		if waiting && terminal {
-			ch <- &resp
-			continue
-		}
 		// No waiter: the caller timed out and abandoned this ID. Dropping the
 		// reply is correct and, unlike a serial stream, harmless.
 	}
+}
+
+// commitTerminalLocked is the single terminal publication point. The pending
+// object is updated before it is removed, so a caller already holding that
+// object can still observe the committed response after ctx.Done wins select.
+func (c *Conn) commitTerminalLocked(id string, response *proto.Response) bool {
+	call, waiting := c.pending[id]
+	delete(c.pending, id)
+	delete(c.streams, id)
+	c.rememberCompletedLocked(id)
+	if waiting {
+		call.response = response
+		call.finished = true
+		close(call.ready)
+	}
+	return waiting
 }
 
 func validateResponseFrame(resp *proto.Response, progress streamProgress) (bool, error) {
@@ -1642,14 +1695,17 @@ func (c *Conn) failAllPending(err error) {
 		c.readErr = err
 	}
 	pending := c.pending
-	c.pending = make(map[string]chan *proto.Response)
+	c.pending = make(map[string]*pendingCall)
 	c.streams = make(map[string]streamProgress)
 	c.closed = true
+	for _, call := range pending {
+		call.finished = true
+	}
 	c.mu.Unlock()
 
-	// A nil send tells the waiter to consult readErr for the cause.
-	for _, ch := range pending {
-		ch <- nil
+	// A ready notification with no response tells the waiter to consult readErr.
+	for _, call := range pending {
+		close(call.ready)
 	}
 }
 
@@ -1758,17 +1814,17 @@ func (c *Conn) Close() error {
 	// see EOF and do this itself, but a caller blocked on Do must not depend on
 	// that race: an unwoken waiter would hang until its context expired.
 	pending := c.pending
-	c.pending = make(map[string]chan *proto.Response)
+	c.pending = make(map[string]*pendingCall)
 	c.streams = make(map[string]streamProgress)
+	for _, call := range pending {
+		call.finished = true
+	}
 	writer := c.writer
 	stdin := c.stdin
 	cmd := c.cmd
 	c.mu.Unlock()
-	for _, ch := range pending {
-		select {
-		case ch <- nil:
-		default: // buffered channel already holds a reply
-		}
+	for _, call := range pending {
+		close(call.ready)
 	}
 	if writer != nil {
 		writer.Close()

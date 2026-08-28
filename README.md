@@ -232,7 +232,9 @@ Host 的地址/用户/端口/远端 state namespace/scope 身份变化时，旧 
 - **agent 侧**：普通请求进入固定 worker/queue，`job_wait` 进入独立的固定 worker/queue；队列满时返回结构化资源错误，不再为每个请求创建 goroutine。相同 job 的 waiter 共享一个底层 watcher，订阅数、watcher 数和 fan-out 都有硬上限，取消会移除订阅并停止最后一个无人使用的 watcher。
 - **控制面**：`cancel` 不排普通队列，按 caller identity + operation ID 精确命中前台进程组。协议两端每条连接各有一个固定 writer loop，使用有界 control/data 队列、总 frame budget 和 control 优先级；不为单次写创建 goroutine。data 在固定 stream window 内尽力发送，队列压力下可丢弃并由最终截断账本说明；底层 pipe 写超时则关闭污染连接并唤醒全部等待者，terminal/cancel 不会无限卡在另一条慢写后面。
 
-writer 不持连接状态锁执行底层 I/O。取消初始请求、发送精确 cancel、派发回复和 writer teardown 因而不会互相等待锁；如果 SSH stdin/stdout pipe 不支持 write deadline，固定 watchdog 仍可通过关闭 pipe 使整条连接在预算内失败，而不是让 `Do` 或 terminal 永久等待。
+writer 不持连接状态锁执行底层 I/O。host 在同一个 `pending` 状态机和连接锁内原子仲裁 terminal commit 与 context cancel：terminal 已 commit 时即使 `select` 选中 `ctx.Done()` 也返回 terminal；cancel 先赢时先标记/移除 pending，再在锁外发送稳定的精确 cancel。取消初始请求、派发回复和 writer teardown 因而不会互相等待锁，也不会把已被 transport 接受的 success 误报为 canceled。
+
+SSH stdin/stdout pipe 不支持可靠的 write deadline，而且 Linux 上从另一 goroutine `close` 同一个 fd 不保证中断已经进入内核的 pipe `read`/`write`。固定 watchdog 先唤醒等待者并触发有界的 attached cancellation/worker drain；预算结束后 serving agent 走明确的进程退出路径，由进程退出最终关闭 SSH channel。detached supervisor 属于独立 session/context，不在该退出路径中被信号终止。
 
 取消一个请求不需要关掉整条连接。agent 对前台命令建立独立进程组；TERM 后即使 leader 先退出，agent 仍保留其未 reap 状态，在 grace 到期后检查并 KILL 原 PGID，避免遗留忽略 TERM 且关闭继承 fd 的子孙进程，也避免 PID/PGID 复用误杀其他请求。协议 deadline、显式 cancel 和附着连接断开只终止 registry 标为 `DisconnectCancel` 的前台目标组，cancel-before-request tombstone 也绑定目标 op，不能毒化复用同 ID 的其他类型；write/job start/stop/rm 等独立 mutation 不会收到伪造的 wire cancel/deadline，已发送后调用方停止等待会返回 `possibly_executed`/`ambiguous_outcome`，而不是谎报 canceled。detached job 使用独立生命周期，不因控制连接断开而被误杀。每个 stream 只允许一个 terminal 事件。
 
@@ -554,7 +556,7 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 
 本轮完成：**job 记录并发安全**（决策 8，flock；实测过的两种错误答案里，「全员谎报删除成功」比裸 errno 更危险）、**拒绝静默降级 agent**（决策 10；hash 比不出新旧，所以最后连上的永远赢）、**构建标识 + `make check-agents`**（`rdev version` 现在能回答「我这个二进制带的什么 agent」）、**`secrets` CLI 面对齐**（`set` 不是漏了而是做不到，写下来了）。
 
-安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地。Phase 2 已继续落地 host-scoped secret、初始化 lease、递归输出脱敏、截断/短值拒绝和 Host 重定义清理。Phase 3 已完成请求分类与安全重试、稳定 operation ID、agent 端有界去重、结构化错误、协议 cancel/deadline、双向 frame 硬限额、固定 stderr ring、统一资源上限、共享 wait watcher、流状态机/credit 和 CLI/MCP 截断投影；独立复核后的收口还补齐了 leader 早退时的组级 KILL、两端单一有界 writer、rsync 双路有界捕获、业务错误统一映射和 v3 terminal 严格校验。完整完成记录见[演进规划](docs/rdev-evolution-security-plan.md)。
+安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地。Phase 2 已继续落地 host-scoped secret、初始化 lease、递归输出脱敏、截断/短值拒绝和 Host 重定义清理。Phase 3 已完成请求分类与安全重试、稳定 operation ID、agent 端有界去重、结构化错误、协议 cancel/deadline、双向 frame 硬限额、固定 stderr ring、统一资源上限、共享 wait watcher、流状态机/credit 和 CLI/MCP 截断投影；独立复核后的最终收口还补齐了 leader 早退时的组级 KILL、两端单一有界 writer、rsync 双路有界捕获、业务错误统一映射、v3 terminal 严格校验、host 端 cancel/final 原子仲裁，以及真实慢读 SSH channel 下的 agent 进程级退出。完整完成记录见[演进规划](docs/rdev-evolution-security-plan.md)。
 
 **Phase 3 — 请求结果不再靠猜。** 所有操作来自唯一注册表并分为 read-only、idempotent、mutating；未知操作 fail closed。client 为一次逻辑调用生成稳定 operation ID，重连仍绑定同一 caller、operation、请求摘要和 Phase 2 identity/generation lease。agent 的 accepted/final 去重记录有容量、总字节预算和 TTL 上限；同 ID 不同操作或摘要会明确冲突。mutation 只有在同一 agent 的记录能证明安全时才返回已缓存 terminal，重连启动新 agent、agent 重启或安全记录已淘汰时返回 `ambiguous_outcome`，绝不静默再执行。
 
@@ -562,7 +564,7 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 
 协议 request/response frame 统一硬限制为 8 MiB，无换行超长帧在 `limit+1` 字节内失败并关闭污染连接；stderr 保留固定 64 KiB 尾部，bootstrap 辅助 stdout 也有固定上限。read/output/line/wait/watcher/queue/stream window 都有绝对硬上限，调用方只能在硬上限内选择，负数和溢出会拒绝。rsync stdout/stderr 持续 drain、每路默认只保留 256 KiB（绝对上限 512 KiB），Unicode、NUL 和非 UTF-8 数据以 base64 保真；exec/read/rsync 的 base64 字段都先解码原始 bytes、脱敏后再保真编码，不能借编码绕过 secret boundary。CLI/MCP 同时显示每路 retained/original/dropped bytes 和截断提示。协议结果还投影 operation ID、唯一 terminal 与非空 execution state。
 
-**残余边界：** 去重是单个 agent 进程内的短期安全缓存，不是 Phase 4 的磁盘事务日志。v2 peer 可继续使用明确协商的一元协议，但不具备 v3 cancel、streaming、去重或结构化截断保证；对 mutation 的 transport failure 仍按不确定结果处理。writer 超时保证的是等待者被唤醒并关闭污染连接，不承诺把 terminal/cancel 交付给已经停止读取的对端。多机连接池、idle TTL、detached job 磁盘预算和 durable dedupe 保持在后续阶段。
+**残余边界：** 去重是单个 agent 进程内的短期安全缓存，不是 Phase 4 的磁盘事务日志。v2 peer 可继续使用明确协商的一元协议，但不具备 v3 cancel、streaming、去重或结构化截断保证；对 mutation 的 transport failure 仍按不确定结果处理。writer 超时保证等待者返回，并在 agent 侧以有界清理后的进程退出关闭污染 channel；它不承诺把 terminal/cancel 交付给已经停止读取的对端，本机 `ssh` 也可能继续阻塞于尚未被调用方 drain 的本地 stdout pipe，即使远端 agent 已退出。多机连接池、idle TTL、detached job 磁盘预算和 durable dedupe 保持在后续阶段。
 
 **P3 — Windows 远端 Tier 1。** 见上。等第一个真实用户。
 

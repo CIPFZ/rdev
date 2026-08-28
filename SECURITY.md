@@ -81,10 +81,12 @@ host's SSH account; rdev does not sandbox commands within that account.
 - Remote frames, outputs, waits, concurrency, logs, and rdev-managed storage must
   have system-enforced hard bounds. Project config cannot raise those hard caps.
 - Each protocol direction has one fixed writer loop with bounded priority queues
-  and a total queued/in-flight frame budget. A stalled underlying pipe is closed
-  after a fixed write budget; all waiters are woken, and terminal/cancel/control
-  frames either win queue priority or fail the polluted connection within that
-  budget. No request may create a per-write goroutine.
+  and a total queued/in-flight frame budget. A stalled underlying pipe wakes all
+  waiters after a fixed write budget. Because closing a Unix pipe descriptor does
+  not reliably interrupt an already-blocked syscall on that descriptor, the agent
+  then performs bounded attached-work cleanup and exits the serving process; OS
+  process exit closes the channel definitively. No request may create a per-write
+  goroutine, and detached supervisors are outside that connection teardown.
 - Protocol-3 terminal frames are accepted only for the tracked request and
   operation, with one terminal, a valid non-empty execution state, and a
   success/error combination consistent with that state. Unary shape fallback is
@@ -151,7 +153,12 @@ reports `possibly_executed`/`ambiguous_outcome` instead of falsely claiming
 `canceled`; a cancel racing a successful mutating handler is normalized the same
 way. Only a foreground operation whose registry contract is `DisconnectCancel`
 may receive a wire cancel/deadline, and cancel-before-request state is bound to
-that target operation type. Their durable storage budgets and
+that target operation type. Host-side terminal commit and context cancellation
+use one pending state machine under the connection mutex: an already-committed
+terminal wins even if Go's select chooses `ctx.Done`, while a winning cancel
+marks/removes the pending call before its cancel frame is queued outside the
+lock. A success arriving after that cancel boundary is a protocol violation,
+never silently rewritten as canceled. Their durable storage budgets and
 cross-process ownership model remain Phase 4/5
 work. TERM-to-KILL escalation retains the original leader as an unreaped child
 until the group-level grace and KILL decision complete, so an early-exiting leader

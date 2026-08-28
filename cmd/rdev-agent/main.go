@@ -87,19 +87,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "rdev-agent: %v\n", err)
 		os.Exit(1)
 	}
+	serveAgent(state, os.Stdin, os.Stdout, os.Exit)
+}
 
-	in := bufio.NewReaderSize(os.Stdin, 1<<20)
+// serveAgent owns one attached protocol connection. exit is injected so the
+// blocked-pipe teardown can be exercised without terminating the unit-test
+// process; production passes os.Exit.
+func serveAgent(state string, stdin, stdout *os.File, exit func(int)) {
+	serveAgentWithWriteTimeout(state, stdin, stdout, exit, 0)
+}
+
+func serveAgentWithWriteTimeout(state string, stdin, stdout *os.File, exit func(int), writeTimeout time.Duration) {
+	in := bufio.NewReaderSize(stdin, 1<<20)
 	// Replies from every handler pass through one bounded writer loop. Its fixed
-	// watchdog closes stdout and stdin if the host stops reading, which tears down
-	// attached work instead of pinning terminal/control behind a blocked data
-	// flush forever.
-	w := newRespWriter(os.Stdout, os.Stdout.Close)
+	// watchdog initiates bounded attached-work cleanup if the host stops reading.
+	// Closing a pipe descriptor does not reliably interrupt another thread already
+	// blocked in Write or Read on Unix, so a real process also takes the explicit
+	// exit path installed below after cleanup reaches its fixed budget.
+	w := &respWriter{out: stdout, closeOut: stdout.Close, writeTimeout: writeTimeout}
+	w.init()
 
 	server := newAgentServer(context.Background(), state, w)
-	w.onFailure = func() {
-		server.cancel()
-		_ = os.Stdin.Close()
-	}
+	installBlockedPipeExit(server, w, stdin.Close, exit)
 
 	for {
 		line, err := readLine(in)
@@ -126,6 +135,29 @@ func main() {
 	// have an explicit independent lifecycle and continue under their supervisor.
 	server.close()
 	w.flush()
+}
+
+// installBlockedPipeExit makes the process boundary the final cancellation
+// mechanism for a write stuck inside the kernel. framewriter still has exactly
+// one worker and one watchdog: it never creates an unbounded per-write goroutine.
+// Attached groups are canceled and given the normal bounded drain first;
+// detached supervisors use an independent context/session and are not signaled.
+func installBlockedPipeExit(server *agentServer, writer *respWriter, closeInput func() error, exit func(int)) {
+	var once sync.Once
+	writer.onFailure = func() {
+		once.Do(func() {
+			server.cancel()
+			if closeInput != nil {
+				_ = closeInput()
+			}
+			go func() {
+				server.close()
+				if exit != nil {
+					exit(1)
+				}
+			}()
+		})
+	}
 }
 
 // shutdownDrainTimeout bounds the post-disconnect drain. Long enough for an
