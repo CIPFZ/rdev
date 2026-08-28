@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -11,12 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/framewriter"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -29,24 +32,99 @@ import (
 // testing, and it is unreachable through the public Dial path without a live
 // machine.
 func newTestConn(t *testing.T) (c *Conn, requests *json.Decoder, replies io.Writer, killAgent func()) {
+	return newTestConnWithFrameLimit(t, 0)
+}
+
+func newTestConnWithFrameLimit(t *testing.T, frameLimit int) (c *Conn, requests *json.Decoder, replies io.Writer, killAgent func()) {
 	t.Helper()
 
 	reqR, reqW := io.Pipe()
 	respR, respW := io.Pipe()
+	readerSize := streamReadBufferBytes
+	if frameLimit > 0 && frameLimit < readerSize {
+		readerSize = frameLimit
+	}
 
 	c = &Conn{
-		host:    Host{Name: "test", Addr: "u@h"},
-		stderr:  &lockedBuilder{},
-		pending: make(map[string]chan *proto.Response),
-		stdin:   reqW,
-		stdout:  newBufReader(respR),
+		host:            Host{Name: "test", Addr: "u@h"},
+		stderr:          &lockedBuilder{},
+		pending:         make(map[string]*pendingCall),
+		streams:         make(map[string]streamProgress),
+		completed:       make(map[string]struct{}),
+		stdin:           reqW,
+		stdout:          bufio.NewReaderSize(respR, readerSize),
+		frameLimit:      frameLimit,
+		protocolVersion: 2,
 	}
+	c.ensureLifecycle()
+	c.writer = framewriter.New(reqW, reqW.Close, framewriter.Config{
+		MaxFrames: 64, MaxBytes: 2 * proto.AbsoluteRequestFrameBytes,
+		WriteTimeout: time.Second,
+	}, c.stopAfterWriteFailure)
 	go c.readLoop()
 	t.Cleanup(func() {
+		c.writer.Close()
 		respW.Close()
 		reqR.Close()
 	})
 	return c, json.NewDecoder(reqR), respW, func() { respW.Close() }
+}
+
+func TestLockedBuilderRetainsFixedTail(t *testing.T) {
+	w := &lockedBuilder{limit: 5}
+	if n, err := w.Write([]byte("abc")); err != nil || n != 3 {
+		t.Fatalf("first Write = %d, %v", n, err)
+	}
+	if n, err := w.Write([]byte("def")); err != nil || n != 3 {
+		t.Fatalf("second Write = %d, %v", n, err)
+	}
+	if got := w.String(); got != "bcdef" {
+		t.Fatalf("tail after wrap = %q, want bcdef", got)
+	}
+
+	// A single oversized write should retain only its suffix while still
+	// reporting the complete input consumed to os/exec.
+	if n, err := w.Write([]byte("0123456789")); err != nil || n != 10 {
+		t.Fatalf("oversized Write = %d, %v", n, err)
+	}
+	if got := w.String(); got != "56789" {
+		t.Fatalf("tail after oversized write = %q, want 56789", got)
+	}
+}
+
+func TestLockedBuilderConcurrentWritesStayBounded(t *testing.T) {
+	w := &lockedBuilder{limit: 128}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p := []byte(strings.Repeat(fmt.Sprintf("%02d", i), 10))
+			if n, err := w.Write(p); err != nil || n != len(p) {
+				t.Errorf("Write = %d, %v, want %d, nil", n, err, len(p))
+			}
+		}(i)
+	}
+	wg.Wait()
+	if got := len(w.String()); got != 128 {
+		t.Fatalf("retained %d bytes, want fixed capacity 128", got)
+	}
+}
+
+func TestAuxiliaryStdoutCaptureIsBoundedAndAccounted(t *testing.T) {
+	var capture boundedHeadBuilder
+	capture.limit = 5
+	for _, chunk := range [][]byte{[]byte("abc"), []byte("defgh")} {
+		if n, err := capture.Write(chunk); err != nil || n != len(chunk) {
+			t.Fatalf("Write(%q) = %d, %v", chunk, n, err)
+		}
+	}
+	if got := capture.String(); got != "abcde" {
+		t.Fatalf("retained auxiliary stdout = %q, want abcde", got)
+	}
+	if capture.original != 8 || !capture.truncated {
+		t.Fatalf("auxiliary stdout accounting = original %d truncated %v", capture.original, capture.truncated)
+	}
 }
 
 func sendReply(t *testing.T, w io.Writer, resp *proto.Response) {
@@ -59,6 +137,95 @@ func sendReply(t *testing.T, w io.Writer, resp *proto.Response) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadLineLimitAcceptsBoundaryAndRejectsNextByte(t *testing.T) {
+	const limit = 32
+	line := strings.Repeat("x", limit)
+	got, err := readLineLimit(bufio.NewReader(strings.NewReader(line+"\n")), limit)
+	if err != nil {
+		t.Fatalf("boundary frame rejected: %v", err)
+	}
+	if string(got) != line {
+		t.Fatalf("boundary frame = %q, want %q", got, line)
+	}
+
+	_, err = readLineLimit(bufio.NewReader(strings.NewReader(line+"x")), limit)
+	if !errors.Is(err, errFrameTooLarge) {
+		t.Fatalf("delimiter-free overlimit error = %v, want errFrameTooLarge", err)
+	}
+}
+
+func TestOversizedResponseFrameClosesConnection(t *testing.T) {
+	const limit = 64
+	c, requests, replies, _ := newTestConnWithFrameLimit(t, limit)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		done <- err
+	}()
+
+	var req proto.Request
+	if err := requests.Decode(&req); err != nil {
+		t.Fatal(err)
+	}
+	// No delimiter is sent. The reader must reject on byte limit+1 rather than
+	// waiting for a newline or accumulating an arbitrary response.
+	if _, err := replies.Write([]byte(strings.Repeat("x", limit+1))); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errFrameTooLarge) {
+			t.Fatalf("Do error = %v, want errFrameTooLarge", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("oversized response did not fail promptly")
+	}
+
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if !closed {
+		t.Fatal("connection remained usable after oversized response polluted framing")
+	}
+	if _, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing}); err == nil {
+		t.Fatal("Do succeeded after oversized response closed the connection")
+	}
+}
+
+func TestDoRejectsOversizedRequestBeforeWrite(t *testing.T) {
+	var dst bytes.Buffer
+	c := &Conn{
+		stderr:     &lockedBuilder{},
+		pending:    make(map[string]*pendingCall),
+		stdin:      nopWriteCloser{Writer: &dst},
+		frameLimit: 128,
+	}
+	_, err := c.Do(context.Background(), &proto.Request{
+		Op: proto.OpWriteFile,
+		Cat: &proto.WriteParams{
+			Path:    "synthetic",
+			Content: strings.Repeat("x", 256),
+		},
+	})
+	if !errors.Is(err, errFrameTooLarge) {
+		t.Fatalf("Do error = %v, want errFrameTooLarge", err)
+	}
+	if dst.Len() != 0 {
+		t.Fatalf("wrote %d bytes before rejecting oversized request", dst.Len())
+	}
+	c.mu.Lock()
+	pending := len(c.pending)
+	c.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("oversized request left %d pending entries", pending)
+	}
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 // The core of the multiplexing change: a reply that arrives second must still
 // reach the caller that is waiting for it. Under the previous serial design the
@@ -122,6 +289,833 @@ func TestDoRoutesRepliesOutOfOrder(t *testing.T) {
 	if !got["first"] || !got["second"] {
 		t.Errorf("got %v, want both callers to receive their own reply", got)
 	}
+}
+
+func TestDoValidatesStreamingAndReturnsOnlyTerminal(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureStreaming: true}
+	done := make(chan *proto.Response, 1)
+	go func() {
+		response, err := c.Do(context.Background(), &proto.Request{
+			Op: proto.OpExec, OperationID: "op_0123456789abcdef", ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		if err != nil {
+			t.Errorf("Do: %v", err)
+		}
+		done <- response
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	frames := []*proto.Response{
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventAccepted, Seq: 1, OK: true, Execution: proto.StateAccepted},
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventData, Seq: 2, OK: true, Execution: proto.StateAccepted, Data: &proto.DataFrame{Stream: "stdout", Content: "eA==", ContentB64: true}},
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventProgress, Seq: 3, OK: true, Execution: proto.StateAccepted, Progress: &proto.ProgressFrame{Phase: "running"}},
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventFinal, Seq: 4, Terminal: true, OK: true, Execution: proto.StateCompleted, Exec: &proto.ExecResult{OperationID: request.OperationID, Terminal: true, Execution: proto.StateCompleted, Stdout: "x"}},
+	}
+	for _, frame := range frames {
+		sendReply(t, replies, frame)
+	}
+	select {
+	case response := <-done:
+		if response == nil || !response.Terminal || response.Type != proto.EventFinal || response.Exec.Stdout != "x" {
+			t.Fatalf("Do returned non-terminal frame: %+v", response)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Do did not return terminal frame")
+	}
+}
+
+func TestTypedErrorEnvelopeIsPreservedByTransport(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureStreaming: true}
+	type result struct {
+		response *proto.Response
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		response, err := c.Do(context.Background(), &proto.Request{
+			Op: proto.OpReadFile, OperationID: "op_4000000000000000",
+			Read: &proto.ReadParams{Path: "synthetic"},
+		})
+		done <- result{response: response, err: err}
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: request.OperationID, Type: proto.EventAccepted,
+		Seq: 1, OK: true, Execution: proto.StateAccepted,
+	})
+	envelope := proto.NewError(proto.CodeObjectNotFound, request.OperationID, proto.StateFailed)
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: request.OperationID, Type: proto.EventError,
+		Seq: 2, Terminal: true, Execution: proto.StateFailed, Err: envelope.Message, Error: envelope,
+	})
+	select {
+	case got := <-done:
+		var projected *proto.ErrorEnvelope
+		if got.response == nil || got.response.Error == nil || !errors.As(got.err, &projected) ||
+			projected.Code != proto.CodeObjectNotFound || projected.Category != proto.CategoryStorage ||
+			projected.Retry != proto.RetryDispositionNever || projected.ExecutionState != proto.StateFailed {
+			t.Fatalf("transport projection response=%+v error=%v", got.response, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("typed error was not returned")
+	}
+}
+
+func TestInvalidStreamOrderingClosesConnection(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureStreaming: true}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		errCh <- err
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: request.OperationID, Type: proto.EventData, Seq: 1, OK: true, Execution: proto.StateAccepted,
+		Data: &proto.DataFrame{Stream: "stdout", Content: "eA==", ContentB64: true},
+	})
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("data-before-accepted was not rejected")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("invalid stream did not fail the waiter")
+	}
+}
+
+func TestMalformedTypedFinalClosesConnection(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*proto.Response)
+	}{
+		{"empty_execution_state", func(r *proto.Response) { r.Execution = "" }},
+		{"invalid_execution_state", func(r *proto.Response) { r.Execution = "teleported" }},
+		{"wrong_operation_id", func(r *proto.Response) { r.OperationID = "op_9999999999999999" }},
+		{"terminal_bit_false", func(r *proto.Response) { r.Terminal = false }},
+		{"success_with_error", func(r *proto.Response) {
+			r.Error = proto.NewError(proto.CodeInternalFailure, r.OperationID, proto.StateCompleted)
+		}},
+		{"error_marked_ok", func(r *proto.Response) {
+			r.Type = proto.EventError
+			r.OK = true
+			r.Execution = proto.StateFailed
+			r.Error = proto.NewError(proto.CodeInternalFailure, r.OperationID, proto.StateFailed)
+		}},
+		{"error_with_nonterminal_state", func(r *proto.Response) {
+			r.Type = proto.EventError
+			r.OK = false
+			r.Execution = proto.StateAccepted
+			r.Error = proto.NewError(proto.CodeInternalFailure, r.OperationID, proto.StateAccepted)
+		}},
+		{"accepted_then_not_sent", func(r *proto.Response) {
+			r.Type = proto.EventError
+			r.OK = false
+			r.Execution = proto.StateNotSent
+			r.Error = proto.NewError(proto.CodeInvalidRequest, r.OperationID, proto.StateNotSent)
+		}},
+		{"canceled_code_with_failed_state", func(r *proto.Response) {
+			r.Type = proto.EventError
+			r.OK = false
+			r.Execution = proto.StateFailed
+			r.Error = proto.NewError(proto.CodeCanceled, r.OperationID, proto.StateFailed)
+		}},
+		{"raw_legacy_error_mismatch", func(r *proto.Response) {
+			r.Type = proto.EventError
+			r.OK = false
+			r.Execution = proto.StateFailed
+			r.Error = proto.NewError(proto.CodeInternalFailure, r.OperationID, proto.StateFailed)
+			r.Err = "private raw diagnostic"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, requests, replies, _ := newTestConn(t)
+			c.protocolVersion = 3
+			c.features = map[proto.Feature]bool{proto.FeatureStreaming: true}
+			errCh := make(chan error, 1)
+			go func() {
+				_, err := c.Do(context.Background(), &proto.Request{
+					Op: proto.OpPing, OperationID: "op_4000000000000001",
+				})
+				errCh <- err
+			}()
+			var request proto.Request
+			if err := requests.Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			sendReply(t, replies, &proto.Response{
+				ID: request.ID, OperationID: request.OperationID, Type: proto.EventAccepted,
+				Seq: 1, OK: true, Execution: proto.StateAccepted,
+			})
+			final := &proto.Response{
+				ID: request.ID, OperationID: request.OperationID, Type: proto.EventFinal,
+				Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+			}
+			tt.mutate(final)
+			sendReply(t, replies, final)
+			select {
+			case err := <-errCh:
+				var envelope *proto.ErrorEnvelope
+				if !errors.As(err, &envelope) || envelope.Code != proto.CodeInvalidEvent {
+					t.Fatalf("malformed terminal error = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("malformed typed terminal did not close the connection")
+			}
+		})
+	}
+}
+
+func TestDuplicateTypedTerminalClosesConnection(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureStreaming: true}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{
+			Op: proto.OpPing, OperationID: "op_4000000000000002",
+		})
+		done <- err
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	accepted := &proto.Response{ID: request.ID, OperationID: request.OperationID, Type: proto.EventAccepted, Seq: 1, OK: true, Execution: proto.StateAccepted}
+	final := &proto.Response{ID: request.ID, OperationID: request.OperationID, Type: proto.EventFinal, Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted}
+	sendReply(t, replies, accepted)
+	sendReply(t, replies, final)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first terminal did not complete")
+	}
+	sendReply(t, replies, final)
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("duplicate terminal did not close connection")
+	}
+}
+
+func TestLegacyUnaryRequiresNegotiatedLegacyVersion(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 2
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		done <- err
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: request.OperationID, Type: proto.EventFinal,
+		Seq: 1, Terminal: true, OK: true, Execution: proto.StateCompleted,
+	})
+	select {
+	case err := <-done:
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) || envelope.Code != proto.CodeInvalidEvent {
+			t.Fatalf("typed v3 frame on v2 connection = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("v3-shaped frame was accepted by negotiated v2 connection")
+	}
+}
+
+func TestV3WithoutStreamingStillRequiresTypedTerminal(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{
+			Op: proto.OpPing, OperationID: "op_4000000000000004",
+		})
+		done <- err
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	sendReply(t, replies, &proto.Response{ID: request.ID, OK: true, Ping: &proto.PingResult{Version: 3}})
+	select {
+	case err := <-done:
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) || envelope.Code != proto.CodeInvalidEvent {
+			t.Fatalf("unary-shaped v3 terminal = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("v3 unary shape was inferred from missing streaming feature")
+	}
+}
+
+func TestCanceledTypedOperationCannotFinishSuccessfully(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(ctx, &proto.Request{
+			Op: proto.OpExec, OperationID: "op_4000000000000003", ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		done <- err
+	}()
+	var target proto.Request
+	if err := requests.Decode(&target); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	var cancelRequest proto.Request
+	if err := requests.Decode(&cancelRequest); err != nil {
+		t.Fatal(err)
+	}
+	if cancelRequest.Op != proto.OpCancel {
+		t.Fatalf("second request = %q, want cancel", cancelRequest.Op)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("canceled caller did not return")
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: target.ID, OperationID: target.OperationID, Type: proto.EventAccepted,
+		Seq: 1, OK: true, Execution: proto.StateAccepted,
+	})
+	sendReply(t, replies, &proto.Response{
+		ID: target.ID, OperationID: target.OperationID, Type: proto.EventFinal,
+		Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+		Exec: &proto.ExecResult{OperationID: target.OperationID, Terminal: true, Execution: proto.StateCompleted},
+	})
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("cancel-to-success protocol violation did not close connection")
+	}
+}
+
+func TestContextCancelWritesExactProtocolCancel(t *testing.T) {
+	c, requests, _, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(ctx, &proto.Request{
+			Op: proto.OpExec, OperationID: "op_0123456789abcdef", ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		done <- err
+	}()
+	var original proto.Request
+	if err := requests.Decode(&original); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	var cancelRequest proto.Request
+	if err := requests.Decode(&cancelRequest); err != nil {
+		t.Fatal(err)
+	}
+	if cancelRequest.Op != proto.OpCancel || cancelRequest.ClientID != original.ClientID ||
+		cancelRequest.Cancel == nil || cancelRequest.Cancel.OperationID != original.OperationID ||
+		cancelRequest.Cancel.TargetOp != original.Op {
+		t.Fatalf("cancel request = %+v", cancelRequest)
+	}
+	select {
+	case err := <-done:
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) || envelope.Code != proto.CodeCanceled {
+			t.Fatalf("cancel error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled Do did not return")
+	}
+}
+
+func TestContextCancelDoesNotCancelIndependentMutation(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(ctx, &proto.Request{
+			Op: proto.OpWriteFile, OperationID: "op_0123456789abcde0", ClientID: "client_0123456789abcdef",
+			Cat: &proto.WriteParams{Path: "synthetic", Content: "payload"},
+		})
+		done <- err
+	}()
+	var mutation proto.Request
+	if err := requests.Decode(&mutation); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) || envelope.Code != proto.CodeAmbiguousOutcome ||
+			envelope.ExecutionState != proto.StatePossiblyExecuted {
+			t.Fatalf("mutation cancellation = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mutation caller did not return")
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: mutation.ID, OperationID: mutation.OperationID, Type: proto.EventAccepted,
+		Seq: 1, OK: true, Execution: proto.StateAccepted,
+	})
+	sendReply(t, replies, &proto.Response{
+		ID: mutation.ID, OperationID: mutation.OperationID, Type: proto.EventFinal,
+		Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+	})
+
+	healthy := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{
+			Op: proto.OpPing, OperationID: "op_0123456789abcde1", ClientID: "client_0123456789abcdef",
+		})
+		healthy <- err
+	}()
+	var next proto.Request
+	if err := requests.Decode(&next); err != nil {
+		t.Fatal(err)
+	}
+	if next.Op != proto.OpPing {
+		t.Fatalf("unexpected protocol cancel for independent mutation: %+v", next)
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: next.ID, OperationID: next.OperationID, Type: proto.EventAccepted,
+		Seq: 1, OK: true, Execution: proto.StateAccepted,
+	})
+	sendReply(t, replies, &proto.Response{
+		ID: next.ID, OperationID: next.OperationID, Type: proto.EventFinal,
+		Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+	})
+	if err := <-healthy; err != nil {
+		t.Fatalf("healthy request after abandoned mutation: %v", err)
+	}
+}
+
+// A committed terminal is the linearization point for a completed call. The
+// hook holds Do immediately before its response/cancellation select while the
+// test commits the terminal and cancels the context. Both select arms are
+// therefore ready before Do resumes, without relying on scheduler probability.
+func TestTerminalCommitWinsContextSelectionRace(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true}
+	beforeSelect := make(chan struct{})
+	releaseSelect := make(chan struct{})
+	c.testBeforeResponseWait = func() {
+		close(beforeSelect)
+		<-releaseSelect
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan struct {
+		response *proto.Response
+		err      error
+	}, 1)
+	const operationID = "op_0000000000005000"
+	go func() {
+		response, err := c.Do(ctx, &proto.Request{
+			Op: proto.OpExec, OperationID: operationID, ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		result <- struct {
+			response *proto.Response
+			err      error
+		}{response, err}
+	}()
+
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	<-beforeSelect
+	c.mu.Lock()
+	call := c.pending[request.ID]
+	c.mu.Unlock()
+	if call == nil {
+		t.Fatal("request was not pending at the select barrier")
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: operationID, Type: proto.EventAccepted,
+		Seq: 1, OK: true, Execution: proto.StateAccepted,
+	})
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: operationID, Type: proto.EventFinal,
+		Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+	})
+	<-call.ready
+	c.mu.Lock()
+	committed := call.finished && call.response != nil
+	c.mu.Unlock()
+	if !committed {
+		t.Fatal("ready closed without a committed terminal")
+	}
+	cancel()
+	if ctx.Err() == nil {
+		t.Fatal("context was not canceled before select release")
+	}
+	close(releaseSelect)
+	got := <-result
+	if got.err != nil || got.response == nil || !got.response.OK {
+		t.Fatalf("committed success returned response=%+v err=%v", got.response, got.err)
+	}
+}
+
+// The inverse ordering fixes cancellation under c.mu before any terminal can
+// commit. Late target cancellation and late cancel acknowledgement/final frames
+// are consumed exactly once, and the same connection remains reusable.
+func TestContextCancelWinsBeforeTerminalAndLateFramesDrain(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true}
+	const iterations = 1000
+	for i := 0; i < iterations; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		operationID := fmt.Sprintf("op_%016x", i+0x9000)
+		go func() {
+			_, err := c.Do(ctx, &proto.Request{
+				Op: proto.OpExec, OperationID: operationID, ClientID: "client_0123456789abcdef",
+				Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+			})
+			done <- err
+		}()
+		var target proto.Request
+		if err := requests.Decode(&target); err != nil {
+			t.Fatal(err)
+		}
+		sendReply(t, replies, &proto.Response{
+			ID: target.ID, OperationID: operationID, Type: proto.EventAccepted,
+			Seq: 1, OK: true, Execution: proto.StateAccepted,
+		})
+		cancel()
+		if err := <-done; err == nil {
+			t.Fatalf("iteration %d: cancel won but Do returned success", i)
+		} else {
+			var envelope *proto.ErrorEnvelope
+			if !errors.As(err, &envelope) || envelope.Code != proto.CodeCanceled {
+				t.Fatalf("iteration %d: cancellation = %v", i, err)
+			}
+		}
+		var cancelRequest proto.Request
+		if err := requests.Decode(&cancelRequest); err != nil {
+			t.Fatal(err)
+		}
+		if cancelRequest.Op != proto.OpCancel || cancelRequest.Cancel == nil ||
+			cancelRequest.Cancel.OperationID != operationID {
+			t.Fatalf("iteration %d: cancel request = %+v", i, cancelRequest)
+		}
+		envelope := proto.NewError(proto.CodeCanceled, operationID, proto.StateCanceled)
+		sendReply(t, replies, &proto.Response{
+			ID: target.ID, OperationID: operationID, Type: proto.EventError,
+			Seq: 2, Terminal: true, OK: false, Err: envelope.Message,
+			Error: envelope, Execution: proto.StateCanceled,
+		})
+		sendReply(t, replies, &proto.Response{
+			ID: cancelRequest.ID, OperationID: cancelRequest.OperationID, Type: proto.EventAccepted,
+			Seq: 1, OK: true, Execution: proto.StateAccepted,
+		})
+		sendReply(t, replies, &proto.Response{
+			ID: cancelRequest.ID, OperationID: cancelRequest.OperationID, Type: proto.EventFinal,
+			Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+		})
+	}
+
+	healthy := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{
+			Op: proto.OpPing, OperationID: "op_000000000000f001", ClientID: "client_0123456789abcdef",
+		})
+		healthy <- err
+	}()
+	var ping proto.Request
+	if err := requests.Decode(&ping); err != nil {
+		t.Fatal(err)
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: ping.ID, OperationID: ping.OperationID, Type: proto.EventAccepted,
+		Seq: 1, OK: true, Execution: proto.StateAccepted,
+	})
+	sendReply(t, replies, &proto.Response{
+		ID: ping.ID, OperationID: ping.OperationID, Type: proto.EventFinal,
+		Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+	})
+	if err := <-healthy; err != nil {
+		t.Fatalf("connection was not reusable after late cancel frames: %v", err)
+	}
+}
+
+// Both contenders leave the same barrier while c.mu is held. Whichever obtains
+// the lock first defines the result: committed success or cancellation. The
+// forbidden outcome is a success committed by transport while Do reports
+// canceled. This exercises the exact lock boundary 1000 times under both the
+// normal and race test binaries.
+func TestSimultaneousTerminalAndCancelLockBarrier(t *testing.T) {
+	const iterations = 1000
+	for i := 0; i < iterations; i++ {
+		writer := framewriter.New(io.Discard, nil, framewriter.Config{
+			MaxFrames: 4, MaxBytes: 4096, WriteTimeout: time.Second,
+		}, nil)
+		c := &Conn{
+			pending: make(map[string]*pendingCall), streams: make(map[string]streamProgress),
+			completed: make(map[string]struct{}), writer: writer, protocolVersion: 3,
+			features: map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true},
+		}
+		req := &proto.Request{
+			ID: "target", Op: proto.OpExec, OperationID: fmt.Sprintf("op_%016x", i+0xd000),
+			ClientID: "client_0123456789abcdef", Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		}
+		call := &pendingCall{ready: make(chan struct{})}
+		c.pending[req.ID] = call
+		c.streams[req.ID] = streamProgress{
+			state: proto.StreamAccepted, lastSeq: 1, operationID: req.OperationID,
+			typed: true, streaming: true,
+		}
+		response := &proto.Response{
+			ID: req.ID, OperationID: req.OperationID, Type: proto.EventFinal,
+			Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+		}
+
+		start := make(chan struct{})
+		ready := make(chan struct{}, 2)
+		cancelResult := make(chan struct {
+			response *proto.Response
+			err      error
+		}, 1)
+		terminalCommitted := make(chan bool, 1)
+		c.mu.Lock()
+		go func() {
+			ready <- struct{}{}
+			<-start
+			resp, err := c.finishContextCancellation(req, call, context.Canceled)
+			cancelResult <- struct {
+				response *proto.Response
+				err      error
+			}{resp, err}
+		}()
+		go func() {
+			ready <- struct{}{}
+			<-start
+			c.mu.Lock()
+			_, stillPending := c.pending[req.ID]
+			if stillPending {
+				c.commitTerminalLocked(req.ID, response)
+			}
+			c.mu.Unlock()
+			terminalCommitted <- stillPending
+		}()
+		<-ready
+		<-ready
+		close(start)
+		c.mu.Unlock()
+
+		got := <-cancelResult
+		committed := <-terminalCommitted
+		writer.Close()
+		if committed {
+			if got.err != nil || got.response != response {
+				t.Fatalf("iteration %d: committed terminal lost: response=%+v err=%v", i, got.response, got.err)
+			}
+			continue
+		}
+		var envelope *proto.ErrorEnvelope
+		if got.response != nil || !errors.As(got.err, &envelope) || envelope.Code != proto.CodeCanceled {
+			t.Fatalf("iteration %d: cancel winner = response=%+v err=%v", i, got.response, got.err)
+		}
+	}
+}
+
+func TestBlockedInitialWriteReturnsOnContextAndTearsDown(t *testing.T) {
+	blocked := newBlockingRequestWriter(true)
+	c, responseWriter := newWriterTestConn(t, blocked, 25*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(ctx, &proto.Request{
+			Op: proto.OpExec, OperationID: "op_3000000000000001", ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		done <- err
+	}()
+	<-blocked.entered
+	cancel()
+	select {
+	case err := <-done:
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) || envelope.Code != proto.CodeCanceled {
+			t.Fatalf("blocked write cancellation = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Do stayed blocked in the initial pipe write after context cancellation")
+	}
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("stalled writer did not tear down the polluted connection")
+	}
+	_ = responseWriter.Close()
+}
+
+func TestCancelPriorityOvertakesQueuedInitialWrite(t *testing.T) {
+	blocked := newBlockingRequestWriter(true)
+	c, responseWriter := newWriterTestConn(t, blocked, time.Second)
+	firstCtx, stopFirst := context.WithCancel(context.Background())
+	defer stopFirst()
+	go c.Do(firstCtx, &proto.Request{
+		Op: proto.OpExec, OperationID: "op_3000000000000010", ClientID: "client_0123456789abcdef",
+		Exec: &proto.ExecParams{Argv: []string{"first"}},
+	})
+	<-blocked.entered
+
+	targetCtx, cancelTarget := context.WithCancel(context.Background())
+	targetDone := make(chan error, 1)
+	go func() {
+		_, err := c.Do(targetCtx, &proto.Request{
+			Op: proto.OpExec, OperationID: "op_3000000000000011", ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"target"}},
+		})
+		targetDone <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.mu.Lock()
+		pending := len(c.pending)
+		c.mu.Unlock()
+		if pending == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("target request did not reach the writer barrier")
+		}
+		runtime.Gosched()
+	}
+	cancelTarget()
+	select {
+	case <-targetDone:
+	case <-time.After(time.Second):
+		t.Fatal("queued target did not return after cancellation")
+	}
+	blocked.releaseFirst()
+	frames := blocked.waitFrames(t, 3)
+	var requests []proto.Request
+	decoder := json.NewDecoder(bytes.NewReader(frames))
+	for {
+		var request proto.Request
+		if err := decoder.Decode(&request); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatal(err)
+		}
+		requests = append(requests, request)
+	}
+	if len(requests) != 3 || requests[1].Op != proto.OpCancel || requests[1].Cancel == nil ||
+		requests[1].Cancel.OperationID != "op_3000000000000011" ||
+		requests[2].OperationID != "op_3000000000000011" {
+		t.Fatalf("writer order = %+v, want first/cancel/exact target", requests)
+	}
+	_ = c.Close()
+	_ = responseWriter.Close()
+}
+
+type blockingRequestWriter struct {
+	mu       sync.Mutex
+	entered  chan struct{}
+	release  chan struct{}
+	frames   bytes.Buffer
+	frameHit chan struct{}
+	once     sync.Once
+	close    sync.Once
+	block    bool
+}
+
+func newBlockingRequestWriter(block bool) *blockingRequestWriter {
+	return &blockingRequestWriter{
+		entered: make(chan struct{}), release: make(chan struct{}),
+		frameHit: make(chan struct{}, 16), block: block,
+	}
+}
+
+func (w *blockingRequestWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	if w.block {
+		<-w.release
+		w.block = false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.frames.Write(p)
+	w.frameHit <- struct{}{}
+	return n, err
+}
+
+func (w *blockingRequestWriter) Close() error {
+	w.close.Do(func() { close(w.release) })
+	return nil
+}
+
+func (w *blockingRequestWriter) releaseFirst() { w.close.Do(func() { close(w.release) }) }
+
+func (w *blockingRequestWriter) waitFrames(t *testing.T, count int) []byte {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		select {
+		case <-w.frameHit:
+		case <-time.After(time.Second):
+			t.Fatalf("received %d/%d frames", i, count)
+		}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.frames.Bytes()...)
+}
+
+func newWriterTestConn(t *testing.T, requestWriter io.WriteCloser, timeout time.Duration) (*Conn, *io.PipeWriter) {
+	t.Helper()
+	responseReader, responseWriter := io.Pipe()
+	c := &Conn{
+		stderr: &lockedBuilder{}, pending: make(map[string]*pendingCall),
+		streams: make(map[string]streamProgress), completed: make(map[string]struct{}),
+		stdin: requestWriter, stdout: bufio.NewReader(responseReader),
+		protocolVersion: 3,
+		features:        map[proto.Feature]bool{proto.FeatureStreaming: true, proto.FeatureCancel: true},
+	}
+	c.ensureLifecycle()
+	c.writer = framewriter.New(requestWriter, requestWriter.Close, framewriter.Config{
+		MaxFrames: 8, MaxBytes: 2 * proto.AbsoluteRequestFrameBytes, WriteTimeout: timeout,
+	}, c.stopAfterWriteFailure)
+	go c.readLoop()
+	t.Cleanup(func() {
+		_ = c.Close()
+		_ = responseWriter.Close()
+		_ = responseReader.Close()
+	})
+	return c, responseWriter
 }
 
 // A slow call must not delay an unrelated one. This is the regression that
@@ -238,6 +1232,34 @@ func TestDoCanceledCallLeavesConnectionUsable(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("second call never completed")
+	}
+}
+
+func TestAbandonedStreamTrackingHasHardCap(t *testing.T) {
+	c, _, _, _ := newTestConn(t)
+	c.protocolVersion = 3
+	c.features = map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true}
+	c.mu.Lock()
+	for i := 0; i < maxTrackedStreams; i++ {
+		id := fmt.Sprintf("abandoned-%d", i)
+		c.streams[id] = streamProgress{
+			state: proto.StreamAccepted, operationID: fmt.Sprintf("op_%016x", i),
+			typed: true, streaming: true, abandoned: true, canceled: true,
+		}
+	}
+	c.mu.Unlock()
+	_, err := c.Do(context.Background(), &proto.Request{
+		Op: proto.OpPing, OperationID: "op_4000000000000010",
+	})
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeQueueFull || envelope.ExecutionState != proto.StateNotSent {
+		t.Fatalf("tracked-stream cap error = %v", err)
+	}
+	c.mu.Lock()
+	tracked := len(c.streams)
+	c.mu.Unlock()
+	if tracked != maxTrackedStreams {
+		t.Fatalf("tracked streams = %d, want hard cap %d", tracked, maxTrackedStreams)
 	}
 }
 

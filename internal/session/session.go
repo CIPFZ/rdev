@@ -244,6 +244,34 @@ func (r *Registry) RecordConnectionSecurityState(state observe.ConnectionSecurit
 	registry.ConnectionSecurityStateChanged(state, target)
 }
 
+func (r *Registry) RecordRequestEvent(event observe.RequestEvent) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.Request(event)
+}
+
+func (r *Registry) RecordProtocolEvent(event observe.ProtocolEvent) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.Protocol(event)
+}
+
+func (r *Registry) RecordResourceEvent(event observe.ResourceEvent) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.Resource(event)
+}
+
+func (r *Registry) RecordDedupeEvent(event observe.DedupeEvent) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.Dedupe(event)
+}
+
 func (r *Registry) RecordRedactionHit(count uint64) {
 	r.mu.RLock()
 	registry := r.observe

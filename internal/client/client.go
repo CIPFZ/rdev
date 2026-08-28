@@ -6,15 +6,19 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -31,6 +35,11 @@ type remoteConnection interface {
 	Host() transport.Host
 	SSHArgs() []string
 	Close() error
+}
+
+type negotiatedConnection interface {
+	NegotiatedVersion() int
+	SupportsFeature(proto.Feature) bool
 }
 
 type pooledConnection struct {
@@ -54,12 +63,18 @@ type ConnectionSecurityStatus struct {
 }
 
 type dialFunc func(context.Context, transport.Host, AgentLookup) (remoteConnection, error)
-type rsyncRunner func(context.Context, []string) (string, string, error)
+type rsyncRunner func(context.Context, []string, io.Writer, io.Writer) error
 
 // Client is the entry point for remote operations.
 type Client struct {
 	Hosts   *session.Registry
 	Secrets *secrets.Store
+	// callerID is stable for the lifetime of this Client and scopes remote
+	// operation deduplication. Generation can fail only if the platform random
+	// source fails; retain that error and fail requests closed instead of falling
+	// back to a predictable identity that could collide with another caller.
+	callerID    string
+	callerIDErr error
 
 	lookup AgentLookup
 	dial   dialFunc
@@ -79,10 +94,16 @@ type Client struct {
 }
 
 func New(lookup AgentLookup) *Client {
+	callerID, callerIDErr := proto.NewOperationID()
+	if callerIDErr == nil {
+		callerID = "client_" + strings.TrimPrefix(callerID, "op_")
+	}
 	c := &Client{
-		Hosts:   session.NewRegistry(),
-		Secrets: secrets.New(),
-		lookup:  lookup,
+		Hosts:       session.NewRegistry(),
+		Secrets:     secrets.New(),
+		callerID:    callerID,
+		callerIDErr: callerIDErr,
+		lookup:      lookup,
 		dial: func(ctx context.Context, host transport.Host, lookup AgentLookup) (remoteConnection, error) {
 			return transport.Dial(ctx, host, lookup)
 		},
@@ -396,7 +417,7 @@ func (c *Client) loadHostSecrets(ctx context.Context, resolved session.ResolvedH
 		// Read one byte beyond the accepted cap. EOF/Size are advisory remote
 		// metadata and can be stale if the file grows between stat and read;
 		// observing the extra byte makes the boundary independently enforceable.
-		resp, err := conn.Do(ctx, &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes + 1}})
+		resp, err := c.doRawOnConnection(ctx, conn, &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes + 1}})
 		if err != nil || resp == nil || resp.Read == nil {
 			return loaded, observe.ReasonSecretReadFailed, errors.New("secret read failed")
 		}
@@ -411,6 +432,40 @@ func (c *Client) loadHostSecrets(ctx context.Context, resolved session.ResolvedH
 		return 0, observe.ReasonSecretTooShort, err
 	}
 	return loaded, "", nil
+}
+
+// doRawOnConnection supplies protocol-3 identity without passing the response
+// through normal redaction. Secret bootstrap needs the prospective plaintext
+// under the existing immutable identity lease so it can validate and register
+// the value before any caller-visible projection occurs.
+func (c *Client) doRawOnConnection(ctx context.Context, conn remoteConnection, request *proto.Request) (*proto.Response, error) {
+	if conn == nil || request == nil || c.callerIDErr != nil || c.callerID == "" {
+		return nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
+	}
+	descriptor, err := proto.RequireOperation(request.Op)
+	if err != nil {
+		return nil, err
+	}
+	if negotiated, ok := conn.(negotiatedConnection); ok && negotiated.NegotiatedVersion() >= 3 {
+		for _, feature := range descriptor.RequiredFeatures {
+			if !negotiated.SupportsFeature(feature) {
+				return nil, proto.NewError(proto.CodeUnsupportedFeature, "", proto.StateNotSent)
+			}
+		}
+		operationID, idErr := proto.NewOperationID()
+		if idErr != nil {
+			return nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
+		}
+		request.OperationID = operationID
+		request.ClientID = c.callerID
+	} else {
+		request.OperationID = ""
+		request.ClientID = ""
+		request.Replay = false
+		request.DeadlineUnixMilli = 0
+		request.StreamWindowBytes = 0
+	}
+	return conn.Do(ctx, request)
 }
 
 func validateSecretRead(read *proto.ReadResult) (string, observe.SecretReason, error) {
@@ -447,12 +502,15 @@ type builtRequest struct {
 	Echo    map[string]string
 }
 
-// do sends a request, retrying once on transport failure.
-//
-// A pooled connection can be dead for benign reasons: ControlPersist expired,
-// the network blipped, the remote rebooted. Retrying once turns that into a
-// hiccup instead of an error the caller has to interpret.
+// do sends a request according to the retry policy in proto's shared operation
+// registry. Unknown operations fail closed before any transport is acquired.
 func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*proto.Response, error) {
+	if req == nil {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	if _, err := proto.RequireOperation(req.Op); err != nil {
+		return nil, err
+	}
 	resp, _, err := c.doBuilt(ctx, hostName, func(identity operationIdentity) (*builtRequest, error) {
 		return &builtRequest{Request: req}, nil
 	})
@@ -465,8 +523,25 @@ func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*
 // for the same immutable identity; an alias redefinition aborts rather than
 // replaying argv, stdin, labels, paths, or content from host A to host B.
 func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operationIdentity) (*builtRequest, error)) (*proto.Response, map[string]string, error) {
+	if c.callerIDErr != nil || c.callerID == "" {
+		return nil, nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
+	}
+	operationID, err := proto.NewOperationID()
+	if err != nil {
+		return nil, nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
+	}
+
+	// A deadline is semantic request state, so capture it once. Rebuilding a
+	// request after reconnect must not silently extend its execution budget.
+	var deadlineUnixMilli int64
+	if deadline, ok := ctx.Deadline(); ok {
+		deadlineUnixMilli = deadline.UnixMilli()
+	}
+
 	var firstErr error
 	var firstIdentity secrets.HostIdentity
+	var descriptor proto.OperationDescriptor
+	var operationName string
 	for attempt := 0; attempt < 2; attempt++ {
 		redactionSnapshot := c.Secrets.Snapshot()
 		pooled, st, release, err := c.leasedConn(ctx, hostName)
@@ -489,10 +564,82 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 			release()
 			return nil, nil, redacted
 		}
+		if built == nil || built.Request == nil {
+			release()
+			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+		}
+		if attempt == 0 {
+			operationName = built.Request.Op
+			var descriptorErr error
+			descriptor, descriptorErr = proto.RequireOperation(operationName)
+			if descriptorErr != nil {
+				release()
+				return nil, nil, descriptorErr
+			}
+			deadlineSupported := false
+			for _, feature := range descriptor.RequiredFeatures {
+				deadlineSupported = deadlineSupported || feature == proto.FeatureDeadline
+			}
+			if built.Request.DeadlineUnixMilli != 0 && !deadlineSupported {
+				release()
+				return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+			}
+			// An explicit protocol deadline wins when the context has none, but it
+			// is still frozen here and reused verbatim on every attempt.
+			if deadlineSupported && deadlineUnixMilli == 0 {
+				deadlineUnixMilli = built.Request.DeadlineUnixMilli
+			}
+		} else if built.Request.Op != operationName {
+			release()
+			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+		}
+		if negotiated, ok := pooled.conn.(negotiatedConnection); ok && negotiated.NegotiatedVersion() >= 3 {
+			for _, feature := range descriptor.RequiredFeatures {
+				if !negotiated.SupportsFeature(feature) {
+					release()
+					return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+				}
+			}
+		}
+
+		built.Request.OperationID = operationID
+		built.Request.ClientID = c.callerID
+		built.Request.Replay = attempt > 0
+		built.Request.DeadlineUnixMilli = 0
+		for _, feature := range descriptor.RequiredFeatures {
+			if feature == proto.FeatureDeadline {
+				built.Request.DeadlineUnixMilli = deadlineUnixMilli
+				break
+			}
+		}
+		if built.Request.StreamWindowBytes == 0 {
+			if negotiated, ok := pooled.conn.(negotiatedConnection); ok &&
+				negotiated.NegotiatedVersion() >= 3 && negotiated.SupportsFeature(proto.FeatureStreaming) {
+				built.Request.StreamWindowBytes = 64 << 10
+			}
+		}
+		if connectionUsesLegacyUnary(pooled.conn) {
+			built.Request.OperationID = ""
+			built.Request.ClientID = ""
+			built.Request.Replay = false
+			built.Request.DeadlineUnixMilli = 0
+			built.Request.StreamWindowBytes = 0
+		}
+		c.Hosts.RecordRequestEvent(observe.RequestQueued)
 		resp, doErr := pooled.conn.Do(ctx, built.Request)
 		var safeResp *proto.Response
 		if resp != nil {
 			safeResp = c.redactResponseWith(redactionSnapshot, resp)
+			if safeResp.OperationID == "" {
+				safeResp.OperationID = operationID
+			}
+			if connectionUsesLegacyUnary(pooled.conn) && safeResp.Type == "" {
+				safeResp.Terminal = true
+				if safeResp.Execution == "" {
+					safeResp.Execution = proto.StateCompleted
+				}
+			}
+			stampResponseMetadata(safeResp)
 		}
 		safeEcho := make(map[string]string, len(built.Echo))
 		for key, value := range built.Echo {
@@ -501,10 +648,16 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 		safeErr := c.redactErrWith(redactionSnapshot, doErr)
 		release()
 		if doErr == nil {
+			c.Hosts.RecordRequestEvent(observe.RequestCompleted)
 			return safeResp, safeEcho, nil
 		}
-		// A remote-reported error is a real answer, not a broken pipe.
+		// A remote-reported error is a real answer, not a broken pipe. Context
+		// cancellation is handled by protocol-level cancel in the transport and
+		// must never be converted into a transparent replay here.
 		if resp != nil || ctx.Err() != nil || attempt == 1 {
+			if ctx.Err() != nil {
+				c.Hosts.RecordRequestEvent(observe.RequestCanceled)
+			}
 			return safeResp, safeEcho, safeErr
 		}
 		firstErr = safeErr
@@ -512,8 +665,94 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 		c.detachAndCloseConnection(pooled.host.Alias, pooled, ConnectionSecurityStatus{
 			State: observe.SecurityCold, Generation: pooled.generation,
 		})
+
+		switch descriptor.Retry {
+		case proto.RetrySafe:
+			// Read-only and explicitly idempotent operations may reconnect once.
+			continue
+		case proto.RetryDeduplicated:
+			// A transport failure tears down this per-SSH-channel agent process.
+			// Its in-memory dedupe cache therefore cannot prove that a mutation
+			// did not already execute. Preserve the stable operation identity for
+			// diagnosis, but do not send it to a fresh process.
+			c.Hosts.RecordRequestEvent(observe.RequestAmbiguous)
+			return safeResp, safeEcho, proto.NewError(
+				proto.CodeAmbiguousOutcome, operationID, proto.StatePossiblyExecuted,
+			)
+		default:
+			return safeResp, safeEcho, safeErr
+		}
 	}
 	return nil, nil, firstErr
+}
+
+func stampResponseMetadata(response *proto.Response) {
+	if response == nil {
+		return
+	}
+	stamp := func(operationID *string, terminal *bool, execution *proto.ExecutionState) {
+		if response.OperationID != "" {
+			*operationID = response.OperationID
+		}
+		if response.Terminal {
+			*terminal = true
+		}
+		if response.Execution != "" {
+			*execution = response.Execution
+		}
+	}
+	if response.Exec != nil {
+		stamp(&response.Exec.OperationID, &response.Exec.Terminal, &response.Exec.Execution)
+	}
+	if response.Read != nil {
+		stamp(&response.Read.OperationID, &response.Read.Terminal, &response.Read.Execution)
+	}
+	if response.Cat != nil {
+		stamp(&response.Cat.OperationID, &response.Cat.Terminal, &response.Cat.Execution)
+	}
+	if response.Job != nil {
+		stamp(&response.Job.OperationID, &response.Job.Terminal, &response.Job.Execution)
+		stampJobInfo := func(info *proto.JobInfo) {
+			if info != nil {
+				stamp(&info.OperationID, &info.Terminal, &info.Execution)
+			}
+		}
+		stampJobInfo(response.Job.Info)
+		for _, info := range response.Job.List {
+			stampJobInfo(info)
+		}
+		for _, waited := range response.Job.Waited {
+			if waited != nil {
+				stampJobInfo(waited.Info)
+			}
+		}
+	}
+	if response.List != nil {
+		stamp(&response.List.OperationID, &response.List.Terminal, &response.List.Execution)
+	}
+}
+
+func missingResultError(response *proto.Response) error {
+	operationID := ""
+	state := proto.StateFailed
+	if response != nil {
+		operationID = response.OperationID
+		if proto.ValidExecutionState(response.Execution) {
+			state = response.Execution
+		}
+	}
+	return proto.NewError(proto.CodeInvalidFrame, operationID, state)
+}
+
+func connectionUsesLegacyUnary(conn remoteConnection) bool {
+	negotiated, ok := conn.(negotiatedConnection)
+	if !ok {
+		return true // test/compatibility adapters predate feature introspection
+	}
+	// Typed terminal semantics are a protocol-3 baseline. FeatureStreaming gates
+	// optional data/progress delivery, not permission to mimic protocol 2's
+	// shape or discard operation identity.
+	return negotiated.NegotiatedVersion() < 3
 }
 
 func (c *Client) redactResponse(resp *proto.Response) *proto.Response {
@@ -532,13 +771,31 @@ func (c *Client) redactResponseWith(snapshot *secrets.Store, resp *proto.Respons
 		value = snapshot.RedactValue(value)
 	}
 	out := c.Secrets.RedactValue(value).(*proto.Response)
-	if resp.Read != nil && resp.Read.ContentB64 && out.Read != nil && out.Read.Content != resp.Read.Content {
-		// Do not leave a redaction placeholder mislabeled as valid base64. This
-		// rare collision sacrifices the payload rather than disclosing an exact
-		// registered value or returning silently corrupted encoded data.
-		out.Read.ContentB64 = false
+	if resp.Read != nil && out.Read != nil {
+		out.Read.Content, out.Read.ContentB64 = c.redactWirePayload(snapshot, resp.Read.Content, resp.Read.ContentB64)
+	}
+	if resp.Exec != nil && out.Exec != nil {
+		out.Exec.Stdout, out.Exec.StdoutB64 = c.redactWirePayload(snapshot, resp.Exec.Stdout, resp.Exec.StdoutB64)
+		out.Exec.Stderr, out.Exec.StderrB64 = c.redactWirePayload(snapshot, resp.Exec.Stderr, resp.Exec.StderrB64)
 	}
 	return out
+}
+
+// redactWirePayload decodes binary-safe wire fields before redaction and then
+// chooses a lossless text/base64 projection again. Searching only the encoded
+// spelling would let a secret hidden behind base64 reach CLI or MCP unchanged.
+// A false base64 flag is treated as untrusted metadata: redact the literal and
+// clear the flag rather than returning a mislabeled payload.
+func (c *Client) redactWirePayload(snapshot *secrets.Store, value string, encoded bool) (string, bool) {
+	raw := []byte(value)
+	if encoded {
+		decoded, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return c.redactTextWith(snapshot, value), false
+		}
+		raw = decoded
+	}
+	return encodeCapturedOutput([]byte(c.redactTextWith(snapshot, string(raw))))
 }
 
 // ExecOptions describes a foreground command.
@@ -562,7 +819,7 @@ type ExecResult struct {
 // Exec runs a command and waits for it.
 func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error) {
 	if len(opts.Argv) == 0 {
-		return nil, errors.New("argv must not be empty")
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 
 	resp, echo, err := c.doBuilt(ctx, opts.Host, func(identity operationIdentity) (*builtRequest, error) {
@@ -579,7 +836,7 @@ func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error
 		return nil, err
 	}
 	if resp.Exec == nil {
-		return nil, errors.New("agent returned no exec result")
+		return nil, missingResultError(resp)
 	}
 
 	return &ExecResult{ExecResult: resp.Exec, Cwd: echo["cwd"]}, nil
@@ -650,7 +907,7 @@ type JobStartOptions struct {
 // JobStart launches a job that outlives the connection.
 func (c *Client) JobStart(ctx context.Context, opts JobStartOptions) (*proto.JobInfo, error) {
 	if len(opts.Argv) == 0 {
-		return nil, errors.New("argv must not be empty")
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	resp, _, err := c.doBuilt(ctx, opts.Host, func(identity operationIdentity) (*builtRequest, error) {
 		params, err := c.buildExecParams(identity, opts.Argv, opts.Cwd, opts.Env, opts.LoginShell)
@@ -666,7 +923,7 @@ func (c *Client) JobStart(ctx context.Context, opts JobStartOptions) (*proto.Job
 		return nil, err
 	}
 	if resp.Job == nil || resp.Job.Info == nil {
-		return nil, errors.New("agent returned no job info")
+		return nil, missingResultError(resp)
 	}
 	return c.redactJob(resp.Job.Info), nil
 }
@@ -710,7 +967,7 @@ func (c *Client) JobList(ctx context.Context, host string, limit int) (*JobListR
 		return nil, c.redactErr(err)
 	}
 	if resp.Job == nil {
-		return &JobListResult{}, nil
+		return nil, missingResultError(resp)
 	}
 	for _, j := range resp.Job.List {
 		c.redactJob(j)
@@ -728,7 +985,7 @@ func (c *Client) JobStatus(ctx context.Context, host, id string) (*proto.JobInfo
 		return nil, c.redactErr(err)
 	}
 	if resp.Job == nil || resp.Job.Info == nil {
-		return nil, fmt.Errorf("job %s not found", id)
+		return nil, missingResultError(resp)
 	}
 	return c.redactJob(resp.Job.Info), nil
 }
@@ -758,7 +1015,7 @@ func (c *Client) JobLogs(ctx context.Context, opts JobLogsOptions) (*proto.JobRe
 		return nil, c.redactErr(err)
 	}
 	if resp.Job == nil {
-		return nil, errors.New("agent returned no logs")
+		return nil, missingResultError(resp)
 	}
 	resp.Job.Logs = c.Secrets.Redact(resp.Job.Logs)
 	return resp.Job, nil
@@ -773,7 +1030,7 @@ func (c *Client) JobStop(ctx context.Context, host, id, signal string, graceSec 
 		return nil, c.redactErr(err)
 	}
 	if resp.Job == nil || resp.Job.Info == nil {
-		return nil, fmt.Errorf("job %s not found", id)
+		return nil, missingResultError(resp)
 	}
 	return c.redactJob(resp.Job.Info), nil
 }
@@ -794,18 +1051,23 @@ type JobWaitOptions struct {
 
 // WaitedJob is one job's outcome in a multi-job wait.
 type WaitedJob struct {
-	ID   string
-	Info *proto.JobInfo
-	Err  string
-	Logs string
+	ID             string
+	Info           *proto.JobInfo
+	Err            string
+	Logs           string
+	LogsTruncation proto.Truncation
 }
 
 // JobWaitResult is a finished (or still-running) job plus wait bookkeeping.
 type JobWaitResult struct {
-	Info     *proto.JobInfo
-	TimedOut bool
-	WaitedMS int64
-	Logs     string
+	Info           *proto.JobInfo
+	TimedOut       bool
+	WaitedMS       int64
+	Logs           string
+	LogsTruncation proto.Truncation
+	OperationID    string
+	Terminal       bool
+	Execution      proto.ExecutionState
 	// Waited is populated instead of Info when several ids were requested.
 	Waited []WaitedJob
 }
@@ -820,7 +1082,7 @@ type JobWaitResult struct {
 // costing one blocking round trip per job.
 func (c *Client) JobWait(ctx context.Context, opts JobWaitOptions) (*JobWaitResult, error) {
 	if opts.ID == "" && len(opts.IDs) == 0 {
-		return nil, errors.New("job id required")
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 
 	resp, err := c.do(ctx, opts.Host, &proto.Request{
@@ -837,27 +1099,30 @@ func (c *Client) JobWait(ctx context.Context, opts JobWaitOptions) (*JobWaitResu
 		return nil, c.redactErr(err)
 	}
 	if resp.Job == nil {
-		return nil, errors.New("agent returned no wait result")
+		return nil, missingResultError(resp)
 	}
 
 	out := &JobWaitResult{
-		TimedOut: resp.Job.TimedOut,
-		WaitedMS: resp.Job.WaitedMS,
-		Logs:     c.Secrets.Redact(resp.Job.Logs),
+		TimedOut:       resp.Job.TimedOut,
+		WaitedMS:       resp.Job.WaitedMS,
+		Logs:           c.Secrets.Redact(resp.Job.Logs),
+		LogsTruncation: resp.Job.LogsTruncation,
+		OperationID:    resp.Job.OperationID, Terminal: resp.Job.Terminal, Execution: resp.Job.Execution,
 	}
 	if len(resp.Job.Waited) > 0 {
 		for _, w := range resp.Job.Waited {
 			out.Waited = append(out.Waited, WaitedJob{
-				ID:   w.ID,
-				Info: c.redactJob(w.Info),
-				Err:  c.Secrets.Redact(w.Err),
-				Logs: c.Secrets.Redact(w.Logs),
+				ID:             w.ID,
+				Info:           c.redactJob(w.Info),
+				Err:            c.Secrets.Redact(w.Err),
+				Logs:           c.Secrets.Redact(w.Logs),
+				LogsTruncation: w.LogsTruncation,
 			})
 		}
 		return out, nil
 	}
 	if resp.Job.Info == nil {
-		return nil, fmt.Errorf("job %s not found", opts.ID)
+		return nil, missingResultError(resp)
 	}
 	out.Info = c.redactJob(resp.Job.Info)
 	return out, nil
@@ -889,7 +1154,7 @@ func (c *Client) SetSecretFromRemoteFile(ctx context.Context, host, name, path s
 		c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretReadFailed, host)
 		return errors.New("connection setup failed before secret registration")
 	}
-	resp, readErr := pooled.conn.Do(ctx, &proto.Request{
+	resp, readErr := c.doRawOnConnection(ctx, pooled.conn, &proto.Request{
 		Op:   proto.OpReadFile,
 		Read: &proto.ReadParams{Path: path, Limit: maxSecretFileBytes + 1},
 	})
@@ -1049,7 +1314,7 @@ func (c *Client) ReadFile(ctx context.Context, host, path string, offset, limit 
 		return nil, c.redactErr(err)
 	}
 	if resp.Read == nil {
-		return nil, errors.New("agent returned no content")
+		return nil, missingResultError(resp)
 	}
 	// redactResponse already applies the mandatory boundary even when the remote
 	// marks Content as base64; that flag is not trusted as a disclosure bypass.
@@ -1079,7 +1344,7 @@ func (c *Client) WriteFile(ctx context.Context, opts WriteFileOptions) (*proto.W
 		return nil, c.redactErr(err)
 	}
 	if resp.Cat == nil {
-		return nil, errors.New("agent returned no write result")
+		return nil, missingResultError(resp)
 	}
 	return resp.Cat, nil
 }
@@ -1093,16 +1358,26 @@ type SyncOptions struct {
 	Exclude   []string
 	DryRun    bool
 	Delete    bool
+	// MaxOutputBytes may only lower the per-stream system cap. Zero uses the
+	// bounded default.
+	MaxOutputBytes int64
 }
 
 // SyncResult reports rsync's outcome.
 type SyncResult struct {
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode int    `json:"exit_code"`
-	DryRun   bool   `json:"dry_run,omitempty"`
-	Command  string `json:"command"`
+	Stdout           string           `json:"stdout"`
+	Stderr           string           `json:"stderr"`
+	StdoutB64        bool             `json:"stdout_b64,omitempty"`
+	StderrB64        bool             `json:"stderr_b64,omitempty"`
+	StdoutTruncation proto.Truncation `json:"stdout_truncation"`
+	StderrTruncation proto.Truncation `json:"stderr_truncation"`
+	Truncated        bool             `json:"truncated,omitempty"`
+	ExitCode         int              `json:"exit_code"`
+	DryRun           bool             `json:"dry_run,omitempty"`
+	Command          string           `json:"command"`
 }
+
+const defaultSyncOutputBytes int64 = 256 << 10
 
 // Sync transfers files with rsync over the multiplexed ssh connection.
 //
@@ -1111,10 +1386,17 @@ type SyncResult struct {
 // worse. Reusing the ControlMaster socket keeps it from re-authenticating.
 func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
 	if opts.Local == "" || opts.Remote == "" {
-		return nil, errors.New("local and remote paths required")
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	if opts.Direction != "" && opts.Direction != "push" && opts.Direction != "pull" {
-		return nil, fmt.Errorf("direction must be push or pull, got %q", opts.Direction)
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	limit := opts.MaxOutputBytes
+	if limit < 0 || limit > proto.AbsoluteOutputBytes {
+		return nil, proto.NewError(proto.CodeLimitExceeded, "", proto.StateNotSent)
+	}
+	if limit == 0 {
+		limit = defaultSyncOutputBytes
 	}
 	if err := validateLocalSyncPath(opts.Local); err != nil {
 		return nil, err
@@ -1137,23 +1419,28 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
 
-	var stdout, stderr string
+	stdoutCapture := newBoundedCapture(limit)
+	stderrCapture := newBoundedCapture(limit)
 	var runErr error
 	if c.rsync != nil {
-		stdout, stderr, runErr = c.rsync(ctx, args)
+		runErr = c.rsync(ctx, args, stdoutCapture, stderrCapture)
 	} else {
 		cmd := exec.CommandContext(ctx, "rsync", args...)
-		var out, errBuf strings.Builder
-		cmd.Stdout = &out
-		cmd.Stderr = &errBuf
+		cmd.Stdout = stdoutCapture
+		cmd.Stderr = stderrCapture
 		runErr = cmd.Run()
-		stdout, stderr = out.String(), errBuf.String()
 	}
+	stdoutRaw, stdoutTruncation := stdoutCapture.payload()
+	stderrRaw, stderrTruncation := stderrCapture.payload()
+	redactedStdout, stdoutB64 := encodeCapturedOutput([]byte(c.redactTextWith(redactionSnapshot, string(stdoutRaw))))
+	redactedStderr, stderrB64 := encodeCapturedOutput([]byte(c.redactTextWith(redactionSnapshot, string(stderrRaw))))
 
 	res := &SyncResult{
-		Stdout: c.redactTextWith(redactionSnapshot, stdout),
-		Stderr: c.redactTextWith(redactionSnapshot, stderr),
-		DryRun: opts.DryRun,
+		Stdout: redactedStdout, Stderr: redactedStderr,
+		StdoutB64: stdoutB64, StderrB64: stderrB64,
+		StdoutTruncation: stdoutTruncation, StderrTruncation: stderrTruncation,
+		Truncated: stdoutTruncation.Truncated || stderrTruncation.Truncated,
+		DryRun:    opts.DryRun,
 		// Redacted like the streams above. This echoes the assembled argv, and argv
 		// is caller-supplied: an --exclude pattern or a path can carry a credential.
 		// Leaving one field of the same struct unscrubbed is exactly the accident
@@ -1165,9 +1452,59 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	if errors.As(runErr, &ee) {
 		res.ExitCode = ee.ExitCode()
 	} else if runErr != nil {
+		if ctx.Err() != nil {
+			return nil, c.redactErrWith(redactionSnapshot, ctx.Err())
+		}
 		return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("run rsync: %w", runErr))
 	}
 	return res, nil
+}
+
+type boundedCapture struct {
+	mu    sync.Mutex
+	buf   []byte
+	total int64
+	limit int64
+}
+
+func newBoundedCapture(limit int64) *boundedCapture {
+	if limit <= 0 || limit > proto.AbsoluteOutputBytes {
+		limit = defaultSyncOutputBytes
+	}
+	return &boundedCapture{limit: limit}
+}
+
+func (b *boundedCapture) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.buf == nil {
+		b.buf = make([]byte, 0, int(b.limit))
+	}
+	if int64(len(p)) > int64(^uint64(0)>>1)-b.total {
+		b.total = int64(^uint64(0) >> 1)
+	} else {
+		b.total += int64(len(p))
+	}
+	if remaining := b.limit - int64(len(b.buf)); remaining > 0 {
+		keep := min(int64(len(p)), remaining)
+		b.buf = append(b.buf, p[:int(keep)]...)
+	}
+	return len(p), nil
+}
+
+func (b *boundedCapture) payload() ([]byte, proto.Truncation) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	raw := append([]byte(nil), b.buf...)
+	truncation, _ := proto.NewTruncation(b.total, int64(len(raw)))
+	return raw, truncation
+}
+
+func encodeCapturedOutput(raw []byte) (string, bool) {
+	if utf8.Valid(raw) && !bytes.ContainsRune(raw, 0) {
+		return string(raw), false
+	}
+	return base64.StdEncoding.EncodeToString(raw), true
 }
 
 func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []string {
@@ -1201,11 +1538,11 @@ func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []st
 // a local rsync operand. A leading '-' is legitimate because Sync inserts '--'.
 func validateLocalSyncPath(p string) error {
 	if p == "" {
-		return errors.New("local sync path required")
+		return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	for _, r := range p {
 		if r == 0 || unicode.IsControl(r) {
-			return errors.New("local sync path contains a control character")
+			return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 		}
 	}
 	return nil
@@ -1216,16 +1553,16 @@ func validateLocalSyncPath(p string) error {
 // absolute, relative, and ~/ paths without relying on remote-shell quoting.
 func validateRemoteSyncPath(p string) error {
 	if p == "" {
-		return errors.New("remote sync path required")
+		return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	if strings.HasPrefix(p, "-") {
-		return fmt.Errorf("remote sync path %q must not start with '-'", p)
+		return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	for _, r := range p {
 		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
 			!(r >= '0' && r <= '9') && r != '.' && r != '_' && r != '-' &&
 			r != '/' && r != '~' {
-			return fmt.Errorf("remote sync path %q contains unsupported character %q", p, r)
+			return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 		}
 	}
 	return nil
@@ -1236,6 +1573,9 @@ func (c *Client) Ping(ctx context.Context, host string) (*proto.PingResult, erro
 	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpPing})
 	if err != nil {
 		return nil, c.redactErr(err)
+	}
+	if resp.Ping == nil {
+		return nil, missingResultError(resp)
 	}
 	return resp.Ping, nil
 }
@@ -1269,7 +1609,7 @@ type JobRmResult struct {
 // that was already gone comes back in Missing, not as an error.
 func (c *Client) JobRm(ctx context.Context, opts JobRmOptions) (*JobRmResult, error) {
 	if opts.ID == "" && opts.OlderThanSec <= 0 && opts.KeepLast <= 0 {
-		return nil, errors.New("job_rm needs an id, older_than_sec, or keep_last")
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	resp, err := c.do(ctx, opts.Host, &proto.Request{
 		Op: proto.OpJobRm,
@@ -1283,7 +1623,7 @@ func (c *Client) JobRm(ctx context.Context, opts JobRmOptions) (*JobRmResult, er
 		return nil, c.redactErr(err)
 	}
 	if resp.Job == nil {
-		return nil, errors.New("agent returned no removal result")
+		return nil, missingResultError(resp)
 	}
 	return &JobRmResult{
 		Removed:    resp.Job.Removed,
@@ -1306,7 +1646,7 @@ func (c *Client) List(ctx context.Context, host, path string, limit int) (*proto
 		return nil, c.redactErr(err)
 	}
 	if resp.List == nil {
-		return nil, errors.New("agent returned no listing")
+		return nil, missingResultError(resp)
 	}
 	// A path can carry a credential (a token in a directory name), and so can a
 	// filename, so redact both.

@@ -1,10 +1,12 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,8 +34,18 @@ type fakeRemoteConn struct {
 	closeFn func()
 }
 
-func (f *fakeRemoteConn) Host() transport.Host { return f.host }
-func (f *fakeRemoteConn) SSHArgs() []string    { return []string{"-p", fmt.Sprint(f.host.Port)} }
+type noStreamingConn struct{ *fakeRemoteConn }
+
+func (c *noStreamingConn) SupportsFeature(feature proto.Feature) bool {
+	return feature != proto.FeatureStreaming && proto.IsKnownFeature(feature)
+}
+
+func (f *fakeRemoteConn) Host() transport.Host   { return f.host }
+func (f *fakeRemoteConn) SSHArgs() []string      { return []string{"-p", fmt.Sprint(f.host.Port)} }
+func (f *fakeRemoteConn) NegotiatedVersion() int { return proto.Version }
+func (f *fakeRemoteConn) SupportsFeature(feature proto.Feature) bool {
+	return proto.IsKnownFeature(feature)
+}
 func (f *fakeRemoteConn) Close() error {
 	f.mu.Lock()
 	f.closed = true
@@ -54,7 +66,10 @@ func (f *fakeRemoteConn) Do(_ context.Context, req *proto.Request) (*proto.Respo
 	if f.handler != nil {
 		return f.handler(req)
 	}
-	r := &proto.Response{OK: true}
+	r := &proto.Response{
+		OperationID: req.OperationID, Type: proto.EventFinal,
+		Seq: 1, Terminal: true, Execution: proto.StateCompleted, OK: true,
+	}
 	switch req.Op {
 	case proto.OpExec:
 		r.Exec = &proto.ExecResult{}
@@ -218,11 +233,301 @@ func TestSyncRejectsBadDirection(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	// The host is unresolvable here, so either failure is acceptable; what
-	// matters is that it does not silently default to a direction.
-	if !strings.Contains(err.Error(), "sideways") && !strings.Contains(err.Error(), "unknown host") {
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeInvalidRequest || envelope.ExecutionState != proto.StateNotSent {
 		t.Errorf("unexpected error: %v", err)
 	}
+}
+
+func TestSyncStreamsIntoBoundedBinarySafeCaptures(t *testing.T) {
+	c := syncTestClient(t)
+	stdoutChunk := append([]byte("中文"), 0xff, 0x00, 'x')
+	stderrChunk := []byte{0xfe, 'e', 'r', 'r', '\n'}
+	const writes = 4096
+	c.rsync = func(_ context.Context, _ []string, stdout, stderr io.Writer) error {
+		for i := 0; i < writes; i++ {
+			if _, err := stdout.Write(stdoutChunk); err != nil {
+				return err
+			}
+			if _, err := stderr.Write(stderrChunk); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	res, err := c.Sync(t.Context(), SyncOptions{
+		Host: "dev", Direction: "push", Local: "local", Remote: "remote", MaxOutputBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, decodeErr := base64.StdEncoding.DecodeString(res.Stdout)
+	if decodeErr != nil || !res.StdoutB64 || len(stdout) != 1024 {
+		t.Fatalf("stdout retained=%d b64=%v decode=%v", len(stdout), res.StdoutB64, decodeErr)
+	}
+	stderr, decodeErr := base64.StdEncoding.DecodeString(res.Stderr)
+	if decodeErr != nil || !res.StderrB64 || len(stderr) != 1024 {
+		t.Fatalf("stderr retained=%d b64=%v decode=%v", len(stderr), res.StderrB64, decodeErr)
+	}
+	wantStdout := int64(writes * len(stdoutChunk))
+	wantStderr := int64(writes * len(stderrChunk))
+	if !res.Truncated || res.StdoutTruncation.OriginalBytes != wantStdout ||
+		res.StdoutTruncation.RetainedBytes != 1024 || res.StdoutTruncation.DroppedBytes != wantStdout-1024 ||
+		res.StderrTruncation.OriginalBytes != wantStderr || res.StderrTruncation.RetainedBytes != 1024 ||
+		res.StderrTruncation.DroppedBytes != wantStderr-1024 {
+		t.Fatalf("sync truncation accounting = %+v / %+v", res.StdoutTruncation, res.StderrTruncation)
+	}
+}
+
+func TestSyncBinaryCaptureRedactsBeforeBase64Projection(t *testing.T) {
+	c := syncTestClient(t)
+	const token = "sync-binary-secret-value"
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), token); err != nil {
+		t.Fatal(err)
+	}
+	c.rsync = func(_ context.Context, _ []string, stdout, stderr io.Writer) error {
+		_, _ = stdout.Write(append([]byte{0xff, 0x00}, []byte(token)...))
+		return nil
+	}
+	res, err := c.Sync(t.Context(), SyncOptions{
+		Host: "dev", Direction: "push", Local: "local", Remote: "remote", MaxOutputBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(res.Stdout)
+	if err != nil || !res.StdoutB64 {
+		t.Fatalf("binary projection b64=%v decode=%v", res.StdoutB64, err)
+	}
+	if bytes.Contains(decoded, []byte(token)) || !bytes.Contains(decoded, []byte("<redacted:tok>")) {
+		t.Fatalf("binary projection was not redacted before base64: %q", decoded)
+	}
+}
+
+func TestSyncOutputLimitRejectsNegativeAndAboveHardCap(t *testing.T) {
+	c := newTestClient()
+	for _, limit := range []int64{-1, proto.AbsoluteOutputBytes + 1, int64(^uint64(0) >> 1)} {
+		_, err := c.Sync(t.Context(), SyncOptions{
+			Host: "dev", Direction: "push", Local: "local", Remote: "remote", MaxOutputBytes: limit,
+		})
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) || envelope.Code != proto.CodeLimitExceeded || envelope.ExecutionState != proto.StateNotSent {
+			t.Fatalf("limit %d error = %v", limit, err)
+		}
+	}
+}
+
+func TestBoundedCaptureAllocationNeverExceedsRetentionCap(t *testing.T) {
+	capture := newBoundedCapture(1024)
+	payload := bytes.Repeat([]byte("x"), 1<<20)
+	if n, err := capture.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("drain write n=%d err=%v", n, err)
+	}
+	capture.mu.Lock()
+	retained, allocated, total := len(capture.buf), cap(capture.buf), capture.total
+	capture.mu.Unlock()
+	if retained != 1024 || allocated != 1024 || total != int64(len(payload)) {
+		t.Fatalf("retained=%d allocated=%d total=%d", retained, allocated, total)
+	}
+}
+
+func TestSyncContextCancelStopsStreamingRunner(t *testing.T) {
+	c := syncTestClient(t)
+	entered := make(chan struct{})
+	c.rsync = func(ctx context.Context, _ []string, stdout, stderr io.Writer) error {
+		close(entered)
+		chunk := make([]byte, 32<<10)
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				_, _ = stdout.Write(chunk)
+				_, _ = stderr.Write(chunk)
+			}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Sync(ctx, SyncOptions{Host: "dev", Direction: "push", Local: "local", Remote: "remote"})
+		done <- err
+	}()
+	<-entered
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("sync cancellation = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sync did not stop after context cancellation")
+	}
+}
+
+func TestBusinessErrorEnvelopeSurvivesClientBoundary(t *testing.T) {
+	tests := []struct {
+		name  string
+		code  proto.ErrorCode
+		state proto.ExecutionState
+		call  func(*Client) error
+	}{
+		{
+			name: "output_limit", code: proto.CodeLimitExceeded, state: proto.StateNotSent,
+			call: func(c *Client) error {
+				_, err := c.Exec(t.Context(), ExecOptions{Host: "dev", Argv: []string{"true"}, MaxOutputBytes: 600000})
+				return err
+			},
+		},
+		{
+			name: "missing_file", code: proto.CodeObjectNotFound, state: proto.StateFailed,
+			call: func(c *Client) error {
+				_, err := c.ReadFile(t.Context(), "dev", "private/path", 0, 0)
+				return err
+			},
+		},
+		{
+			name: "missing_job", code: proto.CodeObjectNotFound, state: proto.StateFailed,
+			call: func(c *Client) error {
+				_, err := c.JobStatus(t.Context(), "dev", "private-job")
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient()
+			host := transport.Host{Name: "dev", Addr: "u@h"}
+			if err := c.Hosts.Add(host); err != nil {
+				t.Fatal(err)
+			}
+			c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+				return &fakeRemoteConn{host: host, handler: func(req *proto.Request) (*proto.Response, error) {
+					envelope := proto.NewError(tt.code, req.OperationID, tt.state)
+					response := &proto.Response{
+						ID: req.ID, OperationID: req.OperationID, Type: proto.EventError,
+						Seq: 1, Terminal: true, Execution: tt.state, Error: envelope,
+					}
+					return response, envelope
+				}}, nil
+			}
+			err := tt.call(c)
+			var envelope *proto.ErrorEnvelope
+			if !errors.As(err, &envelope) {
+				t.Fatalf("client error = %v", err)
+			}
+			descriptor, _ := proto.LookupError(tt.code)
+			if envelope.Code != tt.code || envelope.Category != descriptor.Category ||
+				envelope.Retry != descriptor.Retry || envelope.Retryable != descriptor.Retryable ||
+				envelope.ExecutionState != tt.state || envelope.OperationID == "" || !envelope.Terminal {
+				t.Fatalf("client envelope = %+v", envelope)
+			}
+			if strings.Contains(envelope.Message, "private") {
+				t.Fatalf("client envelope leaked private input: %+v", envelope)
+			}
+		})
+	}
+}
+
+func TestContextDeadlineOnlyProjectsToDeadlineCapableOperation(t *testing.T) {
+	c := newTestClient()
+	host := transport.Host{Name: "dev", Addr: "u@h"}
+	if err := c.Hosts.Add(host); err != nil {
+		t.Fatal(err)
+	}
+	var seen []proto.Request
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: host, handler: func(req *proto.Request) (*proto.Response, error) {
+			seen = append(seen, *req)
+			response := &proto.Response{
+				OperationID: req.OperationID, Type: proto.EventFinal, Seq: 1,
+				Terminal: true, Execution: proto.StateCompleted, OK: true,
+			}
+			if req.Op == proto.OpReadFile {
+				response.Read = &proto.ReadResult{}
+			} else {
+				response.Exec = &proto.ExecResult{}
+			}
+			return response, nil
+		}}, nil
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Minute))
+	defer cancel()
+	if _, err := c.ReadFile(ctx, "dev", "synthetic", 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(ctx, ExecOptions{Host: "dev", Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[0].DeadlineUnixMilli != 0 || seen[1].DeadlineUnixMilli == 0 {
+		t.Fatalf("projected deadlines: %+v", seen)
+	}
+}
+
+func TestExplicitDeadlineRejectedForUnsupportedOperation(t *testing.T) {
+	c := newTestClient()
+	host := transport.Host{Name: "dev", Addr: "u@h"}
+	if err := c.Hosts.Add(host); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: host, handler: func(req *proto.Request) (*proto.Response, error) {
+			called = true
+			return nil, nil
+		}}, nil
+	}
+	_, err := c.do(context.Background(), "dev", &proto.Request{
+		Op: proto.OpReadFile, Read: &proto.ReadParams{Path: "synthetic"}, DeadlineUnixMilli: 42,
+	})
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeInvalidRequest || called {
+		t.Fatalf("unsupported explicit deadline error=%v called=%v", err, called)
+	}
+}
+
+func TestV3WithoutStreamingKeepsTypedOperationIdentity(t *testing.T) {
+	c := newTestClient()
+	host := transport.Host{Name: "dev", Addr: "u@h"}
+	if err := c.Hosts.Add(host); err != nil {
+		t.Fatal(err)
+	}
+	var seen proto.Request
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		base := &fakeRemoteConn{host: host, handler: func(req *proto.Request) (*proto.Response, error) {
+			seen = *req
+			return &proto.Response{
+				ID: req.ID, OperationID: req.OperationID, Type: proto.EventFinal,
+				Seq: 1, Terminal: true, Execution: proto.StateCompleted, OK: true,
+				Read: &proto.ReadResult{OperationID: req.OperationID, Terminal: true, Execution: proto.StateCompleted},
+			}, nil
+		}}
+		return &noStreamingConn{fakeRemoteConn: base}, nil
+	}
+	if _, err := c.ReadFile(t.Context(), "dev", "synthetic", 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if seen.OperationID == "" || seen.ClientID == "" || seen.StreamWindowBytes != 0 {
+		t.Fatalf("v3 no-streaming request = %+v", seen)
+	}
+}
+
+func syncTestClient(t *testing.T) *Client {
+	t.Helper()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	c := newTestClient()
+	host := transport.Host{Name: "dev", Addr: "u@h"}
+	if err := c.Hosts.Add(host); err != nil {
+		t.Fatal(err)
+	}
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: host}, nil
+	}
+	return c
 }
 
 func TestRedactErrScrubsSecrets(t *testing.T) {
@@ -706,7 +1011,7 @@ func TestIdentityLeaseCoversExecReadWriteAndSync(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-				c.rsync = func(context.Context, []string) (string, string, error) { close(entered); <-release; return "", "", nil }
+				c.rsync = func(context.Context, []string, io.Writer, io.Writer) error { close(entered); <-release; return nil }
 			}
 			opDone := make(chan error, 1)
 			go func() {
@@ -1141,7 +1446,7 @@ func TestRetrySlowCloseCannotOverwriteReplacementReadyPublication(t *testing.T) 
 
 	retryDone := make(chan error, 1)
 	go func() {
-		_, err := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		_, err := c.ReadFile(context.Background(), "dev", "status", 0, 1)
 		retryDone <- err
 	}()
 	<-closeEntered
@@ -1198,6 +1503,37 @@ func TestUntrustedBase64FlagCannotBypassResponseRedaction(t *testing.T) {
 	}
 }
 
+func TestBinaryResponseRedactsBeforeBase64Projection(t *testing.T) {
+	c := newTestClient()
+	const token = "binary-response-secret"
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), token); err != nil {
+		t.Fatal(err)
+	}
+	raw := append([]byte{0xff, 0x00}, []byte(token)...)
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	got := c.redactResponse(&proto.Response{
+		Read: &proto.ReadResult{Content: encoded, ContentB64: true},
+		Exec: &proto.ExecResult{
+			Stdout: encoded, StdoutB64: true,
+			Stderr: encoded, StderrB64: true,
+		},
+	})
+	for name, payload := range map[string]string{
+		"read": got.Read.Content, "stdout": got.Exec.Stdout, "stderr": got.Exec.Stderr,
+	} {
+		decoded, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil {
+			t.Fatalf("%s lost binary projection: %v", name, err)
+		}
+		if bytes.Contains(decoded, []byte(token)) || !bytes.Contains(decoded, []byte("<redacted:tok>")) {
+			t.Fatalf("%s binary redaction = %q", name, decoded)
+		}
+	}
+	if !got.Read.ContentB64 || !got.Exec.StdoutB64 || !got.Exec.StderrB64 {
+		t.Fatalf("binary flags were not preserved: read=%v stdout=%v stderr=%v", got.Read.ContentB64, got.Exec.StdoutB64, got.Exec.StderrB64)
+	}
+}
+
 func TestFixedRequestRetryRefusesRedefinedAlias(t *testing.T) {
 	c := newTestClient()
 	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@a"})
@@ -1224,11 +1560,144 @@ func TestFixedRequestRetryRefusesRedefinedAlias(t *testing.T) {
 		}}, nil
 	}
 	_, err := c.WriteFile(t.Context(), WriteFileOptions{Host: "dev", Path: "/tmp/x", Content: "host-a-only-data"})
-	if err == nil || !strings.Contains(err.Error(), "identity changed") {
-		t.Fatalf("cross-identity retry error = %v", err)
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeAmbiguousOutcome || envelope.ExecutionState != proto.StatePossiblyExecuted {
+		t.Fatalf("cross-identity mutation error = %#v, want ambiguous_outcome", err)
 	}
 	if requestsOnB != 0 {
 		t.Fatalf("host A request was replayed to host B %d times", requestsOnB)
+	}
+}
+
+func TestResponseLossRetrySemanticsByOperationClass(t *testing.T) {
+	t.Run("read-only reconnects with stable operation identity", func(t *testing.T) {
+		c := newTestClient()
+		if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+			t.Fatal(err)
+		}
+		type seenRequest struct {
+			operationID string
+			clientID    string
+			replay      bool
+		}
+		var seen []seenRequest
+		dials := 0
+		c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+			dials++
+			thisDial := dials
+			return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+				seen = append(seen, seenRequest{req.OperationID, req.ClientID, req.Replay})
+				if thisDial == 1 {
+					// Model a completed read whose final response was lost with the
+					// transport. Repeating a read is explicitly safe.
+					return nil, errors.New("injected response loss")
+				}
+				return &proto.Response{OK: true, Read: &proto.ReadResult{Content: "ok", EOF: true}}, nil
+			}}, nil
+		}
+
+		res, err := c.ReadFile(t.Context(), "dev", "synthetic", 0, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Content != "ok" || dials != 2 || len(seen) != 2 {
+			t.Fatalf("result=%+v dials=%d seen=%+v", res, dials, seen)
+		}
+		if seen[0].operationID == "" || seen[0].operationID != seen[1].operationID {
+			t.Fatalf("operation IDs changed across retry: %+v", seen)
+		}
+		if seen[0].clientID == "" || seen[0].clientID != seen[1].clientID || seen[0].clientID != c.callerID {
+			t.Fatalf("caller IDs changed across retry: %+v caller=%q", seen, c.callerID)
+		}
+		if seen[0].replay || !seen[1].replay {
+			t.Fatalf("replay markers = %+v, want false then true", seen)
+		}
+	})
+
+	t.Run("idempotent reconnects with stable operation identity", func(t *testing.T) {
+		c := newTestClient()
+		if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+			t.Fatal(err)
+		}
+		var operationIDs, clientIDs []string
+		var replays []bool
+		dials := 0
+		c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+			dials++
+			thisDial := dials
+			return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+				operationIDs = append(operationIDs, req.OperationID)
+				clientIDs = append(clientIDs, req.ClientID)
+				replays = append(replays, req.Replay)
+				if thisDial == 1 {
+					return nil, errors.New("injected response loss")
+				}
+				return &proto.Response{OK: true}, nil
+			}}, nil
+		}
+
+		_, err := c.do(t.Context(), "dev", &proto.Request{
+			Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: "op_synthetic_target"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dials != 2 || len(operationIDs) != 2 || operationIDs[0] == "" || operationIDs[0] != operationIDs[1] {
+			t.Fatalf("dials=%d operation IDs=%v", dials, operationIDs)
+		}
+		if clientIDs[0] == "" || clientIDs[0] != clientIDs[1] || replays[0] || !replays[1] {
+			t.Fatalf("client IDs=%v replay=%v", clientIDs, replays)
+		}
+	})
+
+	t.Run("mutation is not replayed without dedupe proof", func(t *testing.T) {
+		c := newTestClient()
+		if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+			t.Fatal(err)
+		}
+		executions := 0
+		var operationID, clientID string
+		c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+			return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+				executions++
+				operationID, clientID = req.OperationID, req.ClientID
+				// The mutation completed, but its final response was lost.
+				return nil, errors.New("injected response loss")
+			}}, nil
+		}
+
+		_, err := c.WriteFile(t.Context(), WriteFileOptions{Host: "dev", Path: "synthetic", Content: "value"})
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) {
+			t.Fatalf("error = %#v, want structured envelope", err)
+		}
+		if envelope.Code != proto.CodeAmbiguousOutcome || envelope.ExecutionState != proto.StatePossiblyExecuted || envelope.OperationID != operationID {
+			t.Fatalf("envelope = %+v operationID=%q", envelope, operationID)
+		}
+		if executions != 1 || operationID == "" || clientID != c.callerID {
+			t.Fatalf("executions=%d operationID=%q clientID=%q caller=%q", executions, operationID, clientID, c.callerID)
+		}
+	})
+}
+
+func TestUnknownOperationFailsClosedBeforeDial(t *testing.T) {
+	c := newTestClient()
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+		t.Fatal(err)
+	}
+	dials := 0
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		dials++
+		return &fakeRemoteConn{host: h}, nil
+	}
+
+	_, err := c.do(t.Context(), "dev", &proto.Request{Op: "synthetic_unknown"})
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeUnknownOperation || envelope.ExecutionState != proto.StateNotSent {
+		t.Fatalf("error = %#v, want unknown-operation envelope", err)
+	}
+	if dials != 0 {
+		t.Fatalf("unknown operation dialed %d times", dials)
 	}
 }
 
@@ -1426,6 +1895,35 @@ func TestRemoteSecretReadErrorDoesNotExposeProspectiveValue(t *testing.T) {
 	err := c.SetSecretFromRemoteFile(t.Context(), "dev", "tok", "~/token")
 	if err == nil || strings.Contains(err.Error(), "prospective") || strings.Contains(err.Error(), "雪界") {
 		t.Fatalf("unsafe remote secret read error = %v", err)
+	}
+}
+
+func TestRemoteSecretReadUsesNegotiatedV3Identity(t *testing.T) {
+	c := newTestClient()
+	host := transport.Host{Name: "dev", Addr: "u@h"}
+	if err := c.Hosts.Add(host); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+			if req.Op != proto.OpReadFile || proto.ValidateOperationID(req.OperationID) != nil ||
+				proto.ValidateOperationID(req.ClientID) != nil {
+				t.Fatalf("raw v3 secret request = %+v", req)
+			}
+			seen++
+			return &proto.Response{
+				OperationID: req.OperationID, Type: proto.EventFinal, Seq: 1,
+				Terminal: true, Execution: proto.StateCompleted, OK: true,
+				Read: &proto.ReadResult{Content: "registered-secret-value", Size: 23, EOF: true},
+			}, nil
+		}}, nil
+	}
+	if err := c.SetSecretFromRemoteFile(t.Context(), "dev", "tok", "~/token"); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 1 {
+		t.Fatalf("raw secret request count = %d", seen)
 	}
 }
 

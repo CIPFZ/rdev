@@ -6,12 +6,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
 )
@@ -42,6 +44,169 @@ func newJobState(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return state
+}
+
+func measuredDirSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	size, err := dirSize(dir)
+	if err != nil {
+		t.Fatalf("measure %s: %v", dir, err)
+	}
+	return size
+}
+
+func TestJobRecencyOrderHandlesMixedPrecisionAndTies(t *testing.T) {
+	whole := &proto.JobInfo{ID: "job-z", StartedAt: "2026-08-28T12:00:00Z"}
+	fractional := &proto.JobInfo{ID: "job-a", StartedAt: "2026-08-28T12:00:00.1Z"}
+	if !jobInfoNewer(fractional, whole) {
+		t.Error("fractional timestamp should be newer than the whole-second legacy record")
+	}
+	if jobInfoNewer(whole, fractional) {
+		t.Error("whole-second legacy record should not sort after a later fractional timestamp")
+	}
+
+	tiedA := &proto.JobInfo{ID: "job-a", StartedAt: whole.StartedAt}
+	tiedD := &proto.JobInfo{ID: "job-d", StartedAt: whole.StartedAt}
+	if !jobInfoNewer(tiedD, tiedA) || jobInfoNewer(tiedA, tiedD) {
+		t.Error("equal timestamps should use descending job ID as a deterministic tie-breaker")
+	}
+}
+
+func TestDirSizeFailsClosedWhenRecordCannotBeWalked(t *testing.T) {
+	if _, err := dirSize(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("missing job record was measured as zero bytes instead of returning an error")
+	}
+}
+
+// Exercise the real targeted and sweep removal paths with a deterministic
+// mid-walk stat failure. WalkDir reads and sorts a directory before visiting its
+// children; pausing on meta.json and removing a later entry guarantees that the
+// later DirEntry.Info fails without timing or permission assumptions.
+func TestJobRmFailsClosedWhenRecordChangesDuringMeasurement(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params func(string) *proto.JobParams
+		sweep  bool
+	}{
+		{
+			name: "targeted",
+			params: func(id string) *proto.JobParams {
+				return &proto.JobParams{ID: id}
+			},
+		},
+		{
+			name: "sweep",
+			params: func(string) *proto.JobParams {
+				return &proto.JobParams{OlderThanSec: 1}
+			},
+			sweep: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newJobState(t)
+			id := "20200101-000000-deadbeef"
+			dir := jobDir(state, id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			stamp := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+				ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+				"exit_code": 0, "ended_at": stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(dir, "zz-walk-victim")
+			payload := []byte("must be counted exactly after retry")
+			if err := os.WriteFile(victim, payload, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			dirSizeVisitHook = func(root, path string) {
+				if root == dir && path == filepath.Join(dir, "meta.json") {
+					once.Do(func() {
+						close(entered)
+						<-release
+					})
+				}
+			}
+			t.Cleanup(func() { dirSizeVisitHook = nil })
+
+			type outcome struct {
+				res *proto.JobResult
+				err error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				res, err := jobRm(tc.params(id), state)
+				done <- outcome{res: res, err: err}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("removal did not reach the mid-measurement barrier")
+			}
+			if err := os.Remove(victim); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+
+			var first outcome
+			select {
+			case first = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("removal did not return after the injected stat failure")
+			}
+			dirSizeVisitHook = nil
+
+			if tc.sweep {
+				if first.err != nil {
+					t.Fatalf("sweep should skip a record it cannot measure, got %v", first.err)
+				}
+				if len(first.res.Removed) != 0 || len(first.res.Skipped) != 0 || first.res.FreedBytes != 0 {
+					t.Fatalf("failed sweep measurement reported removal: %+v", first.res)
+				}
+			} else {
+				if first.err == nil {
+					t.Fatal("targeted removal hid the measurement error")
+				}
+				if first.res != nil || !errors.Is(first.err, fs.ErrNotExist) {
+					t.Fatalf("targeted failure = (%+v, %v), want nil result and stat ENOENT", first.res, first.err)
+				}
+			}
+			if _, err := os.Stat(dir); err != nil {
+				t.Fatalf("job directory was deleted after an incomplete measurement: %v", err)
+			}
+
+			// Recreate the vanished entry, then retry through the same API. Completion
+			// proves the first call released the job lock; exact accounting proves the
+			// failed attempt contributed neither a partial size nor a false removal.
+			if err := os.WriteFile(victim, payload, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			want := measuredDirSize(t, dir)
+			retry, err := jobRm(tc.params(id), state)
+			if err != nil {
+				t.Fatalf("retry after restoring the record: %v", err)
+			}
+			if len(retry.Removed) != 1 || retry.Removed[0] != id || retry.FreedBytes != want {
+				t.Fatalf("retry = %+v, want Removed=[%s] FreedBytes=%d", retry, id, want)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("job directory survived successful retry: %v", err)
+			}
+			if _, err := os.Stat(lockPath(dir)); !os.IsNotExist(err) {
+				t.Fatalf("job lock file survived successful retry: %v", err)
+			}
+		})
+	}
 }
 
 // Removing a job twice must not leak a filesystem error. The second caller asked
@@ -88,7 +253,7 @@ func TestConcurrentJobRmHasOneWinner(t *testing.T) {
 	for round := 0; round < 20; round++ {
 		state := newJobState(t)
 		id := startFinishedJob(t, state)
-		size := dirSize(jobDir(state, id))
+		size := measuredDirSize(t, jobDir(state, id))
 
 		const racers = 6
 		var wg sync.WaitGroup
@@ -136,8 +301,10 @@ func TestConcurrentJobRmHasOneWinner(t *testing.T) {
 	}
 }
 
-// A sweep and a targeted removal race on the same records. Neither may report a
-// job the other one deleted, and no filesystem error may escape.
+// A sweep and a targeted removal race on the same records. The lock seam proves
+// the targeted call is blocked on the exact flock already held by the sweep;
+// neither may report a job the other one deleted, and no filesystem error may
+// escape.
 func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 	for round := 0; round < 10; round++ {
 		state := newJobState(t)
@@ -146,57 +313,116 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 		sizes := make(map[string]int64, jobs)
 		for i := range ids {
 			ids[i] = startFinishedJob(t, state)
-			sizes[ids[i]] = dirSize(jobDir(state, ids[i]))
+			sizes[ids[i]] = measuredDirSize(t, jobDir(state, ids[i]))
 		}
 		var want int64
 		for _, s := range sizes {
 			want += s
 		}
 
-		// A sweeper claiming every job, racing a targeted rm for each one.
-		var wg sync.WaitGroup
-		start := make(chan struct{})
-		var mu sync.Mutex
-		var results []*proto.Response
-		record := func(r *proto.Response) {
-			mu.Lock()
-			results = append(results, r)
-			mu.Unlock()
+		ordered, err := jobList(&proto.JobParams{Limit: jobs}, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// keep_last=1 is a valid sweep filter. The oldest listed job is certain to
+		// be a sweep candidate.
+		target := ordered.List[len(ordered.List)-1].ID
+		targetDir := jobDir(state, target)
+		targetLock := lockPath(targetDir)
+		sweepHeld := make(chan struct{})
+		targetedContended := make(chan struct{})
+		release := make(chan struct{})
+		var heldOnce, contendedOnce, releaseOnce sync.Once
+		releaseSweep := func() { releaseOnce.Do(func() { close(release) }) }
+		jobLockTestSeam = &jobLockTestHooks{
+			acquired: func(path string) {
+				if path == targetLock {
+					heldOnce.Do(func() {
+						close(sweepHeld)
+						<-release
+					})
+				}
+			},
+			contended: func(path string) {
+				if path == targetLock {
+					contendedOnce.Do(func() { close(targetedContended) })
+				}
+			},
+		}
+		t.Cleanup(func() {
+			releaseSweep()
+			jobLockTestSeam = nil
+		})
+
+		results := make([]*proto.Response, jobs+1)
+		sweepDone := make(chan struct{})
+		go func() {
+			results[0] = handleSafely(&proto.Request{
+				Op: proto.OpJobRm, Job: &proto.JobParams{KeepLast: 1},
+			}, state)
+			close(sweepDone)
+		}()
+		select {
+		case <-sweepHeld:
+		case <-time.After(10 * time.Second):
+			releaseSweep()
+			<-sweepDone
+			jobLockTestSeam = nil
+			t.Fatalf("round %d: sweep did not acquire the target lock for %s", round, target)
 		}
 
+		var wg sync.WaitGroup
+		targetIndex := -1
+		for i, id := range ids {
+			if id == target {
+				targetIndex = i
+				break
+			}
+		}
+		if targetIndex < 0 {
+			t.Fatalf("round %d: target %s absent from fixture", round, target)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			<-start
-			// keep_last covers everything present; an age filter would spare these,
-			// since they just ended.
-			record(handleSafely(&proto.Request{
-				Op: proto.OpJobRm, Job: &proto.JobParams{KeepLast: 0, OlderThanSec: 0},
-			}, state))
+			results[targetIndex+1] = handleSafely(&proto.Request{
+				Op: proto.OpJobRm, Job: &proto.JobParams{ID: target},
+			}, state)
 		}()
-		for _, id := range ids {
-			wg.Add(1)
-			go func(id string) {
-				defer wg.Done()
-				<-start
-				record(handleSafely(&proto.Request{
-					Op: proto.OpJobRm, Job: &proto.JobParams{ID: id},
-				}, state))
-			}(id)
+		select {
+		case <-targetedContended:
+			// The non-blocking flock probe returned EWOULDBLOCK. The targeted
+			// call is now about to wait in blocking LOCK_EX on the sweep's lock.
+		case <-time.After(10 * time.Second):
+			releaseSweep()
+			wg.Wait()
+			<-sweepDone
+			jobLockTestSeam = nil
+			t.Fatalf("round %d: targeted rm did not contend on the target lock for %s", round, target)
 		}
-		close(start)
+
+		for i, id := range ids {
+			if i == targetIndex {
+				continue
+			}
+			wg.Add(1)
+			go func(i int, id string) {
+				defer wg.Done()
+				results[i+1] = handleSafely(&proto.Request{
+					Op: proto.OpJobRm, Job: &proto.JobParams{ID: id},
+				}, state)
+			}(i, id)
+		}
+		releaseSweep()
 		wg.Wait()
+		<-sweepDone
+		jobLockTestSeam = nil
 
 		seen := map[string]int{}
 		var freed int64
-		for _, r := range results {
+		for i, r := range results {
 			if !r.OK {
-				// A filterless sweep is rejected by validation, which is a usage
-				// error rather than a race. Anything else is the bug under test.
-				if r.Job == nil && strings.Contains(r.Err, "needs an id") {
-					continue
-				}
-				t.Fatalf("round %d: a racer surfaced an error: %s", round, r.Err)
+				t.Fatalf("round %d: racer %d surfaced an error: %s", round, i, r.Err)
 			}
 			for _, id := range r.Job.Removed {
 				seen[id]++
@@ -214,26 +440,66 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 		if freed != want {
 			t.Fatalf("round %d: freed_bytes = %d, want %d", round, freed, want)
 		}
+		sweepWins := 0
+		for _, id := range results[0].Job.Removed {
+			if id == target {
+				sweepWins++
+			}
+		}
+		if sweepWins != 1 {
+			t.Fatalf("round %d: sweep removed target %s %d times, want exactly once", round, target, sweepWins)
+		}
+		for i, id := range ids {
+			if id != target {
+				continue
+			}
+			r := results[i+1].Job
+			if len(r.Removed) != 0 || len(r.Missing) != 1 || r.Missing[0] != target {
+				t.Fatalf("round %d: targeted loser for %s = %+v, want one Missing", round, target, r)
+			}
+		}
 	}
 }
 
 // The sweep's own concurrency: several sweepers over the same directory must
-// still remove each job once.
+// still remove each job once. This fixture deliberately gives every job the
+// same whole-second StartedAt, matching records written before sub-second
+// timestamps were introduced. Without the ID tie-breaker, ReadDir order keeps
+// job-a instead of the defined newest job-d. job-d's two-byte payload makes the
+// old failure exact and deterministic: freed_bytes is want+2, the same symptom
+// that made the original process-based fixture flaky near a PID digit boundary.
 func TestConcurrentSweepsHaveOneWinnerPerJob(t *testing.T) {
 	for round := 0; round < 10; round++ {
 		state := newJobState(t)
-		const jobs = 4
-		// keep_last=1 spares the newest and sweeps the rest. An age filter cannot
-		// be used here: these jobs just ended, so nothing has aged out yet.
+		ids := []string{"job-a", "job-b", "job-c", "job-d"}
+		jobs := len(ids)
 		const keep = 1
-		ids := make([]string, 0, jobs)
 		sizes := make(map[string]int64, jobs)
-		for i := 0; i < jobs; i++ {
-			id := startFinishedJob(t, state)
-			ids = append(ids, id)
-			sizes[id] = dirSize(jobDir(state, id))
+		stamp := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		for _, id := range ids {
+			dir := jobDir(state, id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+				ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(filepath.Join(dir, "status.json"), map[string]any{
+				"exit_code": 0, "ended_at": stamp,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if id == "job-d" {
+				if err := os.WriteFile(filepath.Join(dir, "payload"), []byte("xx"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sizes[id] = measuredDirSize(t, dir)
 		}
-		// Newest first is what keep_last retains, and ids were started in order.
+		// Equal timestamps use descending ID as the documented total order, so
+		// job-d is the one keep_last record and a/b/c are the exact reclaim set.
 		var want int64
 		for _, id := range ids[:jobs-keep] {
 			want += sizes[id]
@@ -274,6 +540,9 @@ func TestConcurrentSweepsHaveOneWinnerPerJob(t *testing.T) {
 		}
 		if len(seen) != jobs-keep {
 			t.Fatalf("round %d: %d jobs removed, want %d", round, len(seen), jobs-keep)
+		}
+		if _, err := os.Stat(jobDir(state, "job-d")); err != nil {
+			t.Fatalf("round %d: deterministic keep_last winner job-d was removed: %v", round, err)
 		}
 		if freed != want {
 			t.Fatalf("round %d: freed_bytes = %d, want %d", round, freed, want)

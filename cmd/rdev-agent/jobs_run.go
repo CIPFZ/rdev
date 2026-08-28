@@ -10,7 +10,7 @@
 package main
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,7 +35,7 @@ const (
 
 func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.Spec == nil || len(p.Spec.Argv) == 0 {
-		return nil, errors.New("job spec with argv required")
+		return nil, invalidRequestError("job spec with argv required")
 	}
 
 	id := newJobID()
@@ -81,16 +81,19 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start job: %w", err)
+		return nil, processStartError(err)
 	}
 
+	// Preserve sub-second start order. keep_last cannot infer which job is newer
+	// when several starts are truncated to the same whole second.
+	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	meta := &jobMeta{
 		ID:        id,
 		Label:     p.Label,
 		Argv:      p.Spec.Argv,
 		Cwd:       p.Spec.Cwd,
 		PID:       cmd.Process.Pid,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		StartedAt: startedAt,
 	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), meta); err != nil {
 		return nil, err
@@ -108,7 +111,10 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 
 func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.ID == "" {
-		return nil, errors.New("job id required")
+		return nil, invalidRequestError("job id required")
+	}
+	if p.GraceSec < 0 || p.GraceSec > hardExecTimeoutSec {
+		return nil, limitExceededError("grace_sec is outside the hard limit")
 	}
 	dir := jobDir(state, p.ID)
 	meta, err := readMeta(dir)
@@ -117,8 +123,12 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 
 	sig := syscall.SIGTERM
-	if strings.EqualFold(p.Signal, "KILL") {
+	switch {
+	case p.Signal == "", strings.EqualFold(p.Signal, "TERM"):
+	case strings.EqualFold(p.Signal, "KILL"):
 		sig = syscall.SIGKILL
+	default:
+		return nil, invalidRequestError("signal must be TERM or KILL")
 	}
 
 	// Signal the whole process group (negative pid). Because jobStart used
@@ -134,7 +144,7 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		if pidErr != nil {
 			child := readChildPID(dir)
 			if child <= 0 || syscall.Kill(child, sig) != nil {
-				return nil, fmt.Errorf("signal job %s (pid %d): %w", p.ID, meta.PID, groupErr)
+				return nil, processStateError("job process is unavailable")
 			}
 			// Also sweep the orphan's own group, in case it spawned children.
 			syscall.Kill(-child, sig)
@@ -188,54 +198,7 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 // status check every few seconds. The job is never affected by the wait, so a
 // TimedOut reply just means "ask again".
 func jobWait(p *proto.JobParams, state string) (*proto.JobResult, error) {
-	if len(p.IDs) > 0 {
-		return jobWaitMany(p, state)
-	}
-	if p.ID == "" {
-		return nil, errors.New("job id required")
-	}
-	dir := jobDir(state, p.ID)
-	meta, err := readMeta(dir)
-	if err != nil {
-		return nil, fmt.Errorf("job %s: %w", p.ID, err)
-	}
-
-	budget := p.WaitTimeoutSec
-	if budget <= 0 {
-		budget = defaultWaitSec
-	}
-	if budget > maxWaitSec {
-		budget = maxWaitSec
-	}
-
-	start := time.Now()
-	deadline := start.Add(time.Duration(budget) * time.Second)
-	interval := waitPollMin
-
-	for {
-		info := metaToInfo(meta, dir)
-		if info.State != proto.JobRunning {
-			return finishWait(p, dir, info, start, false), nil
-		}
-		if !time.Now().Before(deadline) {
-			return finishWait(p, dir, info, start, true), nil
-		}
-
-		// Do not overshoot the deadline: sleeping past it would report a longer
-		// wait than the caller asked for.
-		sleep := interval
-		if remaining := time.Until(deadline); remaining < sleep {
-			sleep = remaining
-		}
-		time.Sleep(sleep)
-
-		if interval < waitPollMax {
-			interval *= 2
-			if interval > waitPollMax {
-				interval = waitPollMax
-			}
-		}
-	}
+	return jobWaitContext(context.Background(), defaultWaitHub, p, state)
 }
 
 // jobWaitMany waits on several jobs in one call.
@@ -247,112 +210,7 @@ func jobWait(p *proto.JobParams, state string) (*proto.JobResult, error) {
 // A job that cannot be read (unknown id) is reported per-job rather than failing
 // the call, since the other jobs still have useful answers.
 func jobWaitMany(p *proto.JobParams, state string) (*proto.JobResult, error) {
-	budget := p.WaitTimeoutSec
-	if budget <= 0 {
-		budget = defaultWaitSec
-	}
-	if budget > maxWaitSec {
-		budget = maxWaitSec
-	}
-
-	start := time.Now()
-	deadline := start.Add(time.Duration(budget) * time.Second)
-
-	// Deduplicate: a caller assembling ids from several places can repeat one, and
-	// polling it twice per round is pure waste.
-	type target struct {
-		id   string
-		dir  string
-		meta *jobMeta
-		done *proto.JobInfo
-		err  string
-	}
-	seen := make(map[string]bool, len(p.IDs))
-	targets := make([]*target, 0, len(p.IDs))
-	for _, id := range p.IDs {
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		t := &target{id: id, dir: jobDir(state, id)}
-		meta, err := readMeta(t.dir)
-		if err != nil {
-			t.err = fmt.Sprintf("job %s: %v", id, err)
-		} else {
-			t.meta = meta
-		}
-		targets = append(targets, t)
-	}
-	if len(targets) == 0 {
-		return nil, errors.New("job_wait: no usable ids")
-	}
-
-	interval := waitPollMin
-	timedOut := false
-	for {
-		pending := 0
-		anyDone := false
-		for _, t := range targets {
-			if t.done != nil || t.err != "" {
-				if t.done != nil {
-					anyDone = true
-				}
-				continue
-			}
-			info := metaToInfo(t.meta, t.dir)
-			if info.State != proto.JobRunning {
-				t.done = info
-				anyDone = true
-				continue
-			}
-			pending++
-		}
-
-		// WaitAny lets a caller react to the first finisher -- usually the first
-		// failure in a batch -- without waiting out the slowest job.
-		if pending == 0 || (p.WaitAny && anyDone) {
-			break
-		}
-		if !time.Now().Before(deadline) {
-			timedOut = true
-			break
-		}
-
-		sleep := interval
-		if remaining := time.Until(deadline); remaining < sleep {
-			sleep = remaining
-		}
-		time.Sleep(sleep)
-		if interval < waitPollMax {
-			interval *= 2
-			if interval > waitPollMax {
-				interval = waitPollMax
-			}
-		}
-	}
-
-	res := &proto.JobResult{
-		TimedOut: timedOut,
-		WaitedMS: time.Since(start).Milliseconds(),
-	}
-	for _, t := range targets {
-		w := &proto.WaitedJob{ID: t.id, Err: t.err}
-		switch {
-		case t.err != "":
-		case t.done != nil:
-			w.Info = t.done
-		default:
-			// Still running when the budget expired, or when WaitAny returned early.
-			w.Info = metaToInfo(t.meta, t.dir)
-		}
-		if p.TailOnExit > 0 && w.Info != nil {
-			if logs, err := readTail(filepath.Join(t.dir, "stdout"), p.TailOnExit); err == nil {
-				w.Logs = logs
-			}
-		}
-		res.Waited = append(res.Waited, w)
-	}
-	return res, nil
+	return jobWaitContext(context.Background(), defaultWaitHub, p, state)
 }
 
 // finishWait assembles the wait reply, attaching trailing output when asked.

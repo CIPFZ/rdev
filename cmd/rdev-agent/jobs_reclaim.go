@@ -9,7 +9,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +33,7 @@ func jobRm(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return jobRmOne(p.ID, state)
 	}
 	if p.OlderThanSec <= 0 && p.KeepLast <= 0 {
-		return nil, errors.New("job_rm needs an id, older_than_sec, or keep_last")
+		return nil, invalidRequestError("job_rm needs a filter")
 	}
 	return jobRmSweep(p, state)
 }
@@ -74,7 +73,10 @@ func jobRmOne(id, state string) (*proto.JobResult, error) {
 			return nil
 		}
 
-		size := dirSize(dir)
+		size, err := dirSize(dir)
+		if err != nil {
+			return fmt.Errorf("measure job %s: %w", id, err)
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			return fmt.Errorf("remove job %s: %w", id, err)
 		}
@@ -126,9 +128,11 @@ func jobRmSweep(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		finished = append(finished, candidate{id: info.ID, dir: dir, info: info})
 	}
 
-	// Newest first, so KeepLast retains the most recent jobs.
+	// Newest first, so KeepLast retains the most recent jobs. The comparator is
+	// a total order: old whole-second records can tie, and every concurrent agent
+	// must still protect the same IDs.
 	sort.Slice(finished, func(i, j int) bool {
-		return finished[i].info.StartedAt > finished[j].info.StartedAt
+		return jobInfoNewer(finished[i].info, finished[j].info)
 	})
 
 	now := time.Now()
@@ -159,7 +163,10 @@ func jobRmSweep(p *proto.JobParams, state string) (*proto.JobResult, error) {
 				res.Skipped = append(res.Skipped, c.id)
 				return nil
 			}
-			size := dirSize(c.dir)
+			size, err := dirSize(c.dir)
+			if err != nil {
+				return err
+			}
 			if err := os.RemoveAll(c.dir); err != nil {
 				return err // a failed removal is not worth failing the whole sweep
 			}
@@ -195,17 +202,39 @@ func endedBefore(info *proto.JobInfo, now time.Time, d time.Duration) bool {
 	return now.Sub(t) > d
 }
 
-// dirSize sums the job directory's files so the caller learns what was freed.
-func dirSize(dir string) int64 {
+// dirSizeVisitHook is a test seam for deterministic filesystem fault and lock
+// interleaving tests. Production leaves it nil, so normal measurement behavior
+// is unchanged. Tests set and clear it only while no other test is running.
+var dirSizeVisitHook func(root, path string)
+
+// dirSize sums the logical size of every non-directory entry in a job record.
+//
+// Callers measure while holding the job lock and only after confirming that no
+// process is alive. Final status writes use that lock; the unlocked initial meta
+// and child-pid writes happen while the supervisor is alive and removal is
+// forbidden. A finished process cannot extend its logs, so the snapshot is stable
+// through RemoveAll.
+// Refusing to delete when any entry cannot be measured is deliberate: silently
+// skipping a stat error would report an inexact freed_bytes value after the
+// evidence had already been destroyed.
+func dirSize(dir string) (int64, error) {
 	var total int64
-	filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
-		if info, err := d.Info(); err == nil {
-			total += info.Size()
+		if dirSizeVisitHook != nil {
+			dirSizeVisitHook(dir, path)
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
 		return nil
 	})
-	return total
+	return total, err
 }
