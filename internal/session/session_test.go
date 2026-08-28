@@ -1056,6 +1056,241 @@ func TestApplyHostUpdatePersistenceFailureLeavesLiveSnapshotUntouched(t *testing
 	}
 }
 
+func loadPersistedRegistryForTest(t *testing.T) *Registry {
+	t.Helper()
+	r := NewRegistry()
+	err := r.Load()
+	var untrusted *UntrustedProjectError
+	if errors.As(err, &untrusted) {
+		if _, err = r.ApproveProject(untrusted.Trust.Digest); err != nil {
+			t.Fatalf("approve persisted project config: %v", err)
+		}
+	} else if err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+	return r
+}
+
+func TestApplyHostUpdateRejectsDurableCrossScopeMigrationWithoutMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldAddr, newAddr string
+		from, to               Scope
+	}{
+		{name: "global-to-project", from: ScopeGlobal, to: ScopeProject, oldAddr: "u@global-old", newAddr: "u@project-new"},
+		{name: "project-to-global", from: ScopeProject, to: ScopeGlobal, oldAddr: "u@project-old", newAddr: "u@global-new"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(t.TempDir())
+			r := NewRegistry()
+			oldHost := transport.Host{Name: "dev", Addr: tc.oldAddr}
+			oldCwd := "~/old"
+			if _, err := r.ApplyHostUpdate(HostUpdate{
+				Name: "dev", Host: &oldHost, Scope: tc.from, SetScope: true,
+				Cwd: &oldCwd, Secrets: map[string]string{"old": "~/old-secret"}, Persist: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := r.Inspect("dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writes := 0
+			r.io.write = func(string, []byte) error {
+				writes++
+				return errors.New("injected destination write failure")
+			}
+			newHost := transport.Host{Name: "dev", Addr: tc.newAddr}
+			newCwd := "~/new"
+			_, err = r.ApplyHostUpdate(HostUpdate{
+				Name: "dev", Host: &newHost, Scope: tc.to, SetScope: true,
+				Cwd: &newCwd, Secrets: map[string]string{"new": "~/new-secret"}, Persist: true,
+			})
+			if err == nil || !strings.Contains(err.Error(), "no crash-consistent cross-file transaction") ||
+				!strings.Contains(err.Error(), "explicitly save/remove") {
+				t.Fatalf("cross-scope error = %v", err)
+			}
+			if writes != 0 {
+				t.Fatalf("rejected migration reached write/delete primitive %d times", writes)
+			}
+			after, err := r.Inspect("dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Host != before.Host || after.Scope != before.Scope || after.Generation != before.Generation ||
+				after.State.Cwd != before.State.Cwd || after.State.Secrets["old"] != "~/old-secret" ||
+				len(after.State.Secrets) != 1 {
+				t.Fatalf("rejected migration changed live state: before=%+v after=%+v", before, after)
+			}
+
+			fresh := loadPersistedRegistryForTest(t)
+			got, err := fresh.Inspect("dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Host.Addr != tc.oldAddr || got.Scope != tc.from || got.State.Cwd != "~/old" ||
+				got.State.Secrets["old"] != "~/old-secret" || len(got.State.Secrets) != 1 {
+				t.Fatalf("restart did not preserve old durable definition: %+v", got)
+			}
+		})
+	}
+}
+
+func TestNonPersistentScopeChangeIsLiveOnlyAndCannotBypassMigrationGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldAddr, newAddr string
+		from, to               Scope
+	}{
+		{name: "global-to-project", from: ScopeGlobal, to: ScopeProject, oldAddr: "u@global-old", newAddr: "u@project-live"},
+		{name: "project-to-global", from: ScopeProject, to: ScopeGlobal, oldAddr: "u@project-old", newAddr: "u@global-live"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(t.TempDir())
+			r := NewRegistry()
+			oldHost := transport.Host{Name: "dev", Addr: tc.oldAddr}
+			if _, err := r.ApplyHostUpdate(HostUpdate{
+				Name: "dev", Host: &oldHost, Scope: tc.from, SetScope: true,
+				Secrets: map[string]string{"old": "~/old-secret"}, Persist: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := r.Inspect("dev")
+			newHost := transport.Host{Name: "dev", Addr: tc.newAddr}
+			if _, err := r.ApplyHostUpdate(HostUpdate{
+				Name: "dev", Host: &newHost, Scope: tc.to, SetScope: true,
+				Secrets: map[string]string{"new": "~/new-secret"}, Persist: false,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			live, _ := r.Inspect("dev")
+			if live.Scope != tc.to || live.Host.Addr != tc.newAddr || live.Generation == before.Generation ||
+				live.State.Secrets["new"] != "~/new-secret" || len(live.State.Secrets) != 1 {
+				t.Fatalf("live-only scope change is incomplete: %+v", live)
+			}
+
+			writes := 0
+			originalWrite := r.io.write
+			r.io.write = func(path string, data []byte) error {
+				writes++
+				return originalWrite(path, data)
+			}
+			if err := r.Save(tc.to); err == nil || !strings.Contains(err.Error(), "no crash-consistent cross-file transaction") {
+				t.Fatalf("SetScope/Save bypass error = %v", err)
+			}
+			if writes != 0 {
+				t.Fatalf("guarded destination Save wrote %d files", writes)
+			}
+			if _, err := r.ApplyHostUpdate(HostUpdate{Name: "dev", Persist: true}); err == nil ||
+				!strings.Contains(err.Error(), "no crash-consistent cross-file transaction") {
+				t.Fatalf("second persist bypass error = %v", err)
+			}
+
+			fresh := loadPersistedRegistryForTest(t)
+			durable, err := fresh.Inspect("dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if durable.Scope != tc.from || durable.Host.Addr != tc.oldAddr ||
+				durable.State.Secrets["old"] != "~/old-secret" || len(durable.State.Secrets) != 1 {
+				t.Fatalf("restart did not discard live-only scope change: %+v", durable)
+			}
+		})
+	}
+}
+
+func TestCrossScopeExplicitSourceRemovalFailureKeepsMigrationGuarded(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		from, to Scope
+	}{
+		{name: "global-to-project", from: ScopeGlobal, to: ScopeProject},
+		{name: "project-to-global", from: ScopeProject, to: ScopeGlobal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(t.TempDir())
+			r := NewRegistry()
+			host := transport.Host{Name: "dev", Addr: "u@old"}
+			if _, err := r.ApplyHostUpdate(HostUpdate{
+				Name: "dev", Host: &host, Scope: tc.from, SetScope: true,
+				Secrets: map[string]string{"old": "~/old-secret"}, Persist: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			newHost := transport.Host{Name: "dev", Addr: "u@new"}
+			if _, err := r.ApplyHostUpdate(HostUpdate{
+				Name: "dev", Host: &newHost, Scope: tc.to, SetScope: true,
+				Secrets: map[string]string{"new": "~/new-secret"}, Persist: false,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			originalWrite := r.io.write
+			r.io.write = func(string, []byte) error { return errors.New("injected source deletion failure") }
+			if err := r.Save(tc.from); err == nil || !strings.Contains(err.Error(), "source deletion failure") {
+				t.Fatalf("source removal error = %v", err)
+			}
+			destinationWrites := 0
+			r.io.write = func(path string, data []byte) error {
+				destinationWrites++
+				return originalWrite(path, data)
+			}
+			if err := r.Save(tc.to); err == nil || !strings.Contains(err.Error(), "no crash-consistent cross-file transaction") {
+				t.Fatalf("destination remained unguarded after source failure: %v", err)
+			}
+			if destinationWrites != 0 {
+				t.Fatalf("destination write ran after failed source removal: %d", destinationWrites)
+			}
+			fresh := loadPersistedRegistryForTest(t)
+			got, err := fresh.Inspect("dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Scope != tc.from || got.Host.Addr != "u@old" || got.State.Secrets["old"] != "~/old-secret" {
+				t.Fatalf("failed source removal left a half migration: %+v", got)
+			}
+		})
+	}
+}
+
+func TestCrossScopeGuardDistinguishesOverrideUpdateFromMigration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	r := NewRegistry()
+	if err := r.loadBytes("global", []byte(`{"hosts":[{"name":"dev","addr":"u@global","secrets":{"global":"~/global-secret"}}]}`), ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.loadBytes("project", []byte(`{"hosts":[{"name":"dev","addr":"u@project","secrets":{"project":"~/project-secret"}}]}`), ScopeProject); err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	r.io.write = func(string, []byte) error { writes++; return nil }
+	projectCwd := "~/updated"
+	if _, err := r.ApplyHostUpdate(HostUpdate{Name: "dev", Cwd: &projectCwd, Persist: true}); err != nil {
+		t.Fatalf("same-scope project override update was rejected: %v", err)
+	}
+	if writes != 1 {
+		t.Fatalf("same-scope update writes=%d, want 1", writes)
+	}
+	globalHost := transport.Host{Name: "dev", Addr: "u@global-moved"}
+	if _, err := r.ApplyHostUpdate(HostUpdate{
+		Name: "dev", Host: &globalHost, Scope: ScopeGlobal, SetScope: true, Persist: true,
+	}); err == nil || !strings.Contains(err.Error(), "no crash-consistent cross-file transaction") {
+		t.Fatalf("project-to-global migration with a shadowed global definition was accepted: %v", err)
+	}
+	if writes != 1 {
+		t.Fatalf("rejected migration performed destination write: %d", writes)
+	}
+	got, err := r.Inspect("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != ScopeProject || got.Host.Addr != "u@project" || got.State.Cwd != "~/updated" ||
+		got.State.Secrets["project"] != "~/project-secret" || len(got.State.Secrets) != 1 {
+		t.Fatalf("rejected migration changed project override: %+v", got)
+	}
+}
+
 func TestApplyHostUpdatePublishesCombinedSnapshotAtomically(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())

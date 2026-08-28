@@ -97,13 +97,34 @@ func New(lookup AgentLookup) *Client {
 }
 
 func (c *Client) invalidateHost(name string, generation uint64) {
-	c.Disconnect(name)
+	detached := c.disconnectWithStatus(name, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: generation})
 	if resolved, err := c.Hosts.Resolve(name); err == nil {
 		c.Secrets.DeleteStaleHost(secrets.Scope(resolved.Scope), secretHostIdentity(resolved))
 	} else {
 		c.Secrets.DeleteHost(name)
 	}
-	c.setConnectionSecurity(name, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: generation})
+	if detached {
+		return
+	}
+	// The registry publishes before invoking this hook. A request may already
+	// have started initialization for the new generation, so do not replace its
+	// initializing/failed state (or a new ready connection) with cold.
+	c.mu.Lock()
+	previous := c.security[name]
+	_, connected := c.conns[name]
+	if connected || previous.Generation == generation {
+		c.mu.Unlock()
+		return
+	}
+	// Supersede any already-detached teardown that may still be blocked in
+	// Close. Without a new token it could return later and restore its old
+	// generation even though the registry invalidation already published.
+	c.nextPublication++
+	c.latestPublication[name] = c.nextPublication
+	status := ConnectionSecurityStatus{State: observe.SecurityCold, Generation: generation}
+	c.security[name] = status
+	c.mu.Unlock()
+	c.recordConnectionSecurityTransition(name, previous, status)
 }
 
 func (c *Client) setConnectionSecurity(name string, status ConnectionSecurityStatus) {
@@ -112,6 +133,50 @@ func (c *Client) setConnectionSecurity(name string, status ConnectionSecuritySta
 	c.security[name] = status
 	c.mu.Unlock()
 	c.recordConnectionSecurityTransition(name, previous, status)
+}
+
+// publishConnectionSecurityIfCurrent is the only post-Close publication
+// boundary. Close may block while another goroutine reserves or publishes a
+// replacement. The closing owner may update status only while its publication
+// token is still current and the alias has no replacement connection.
+func (c *Client) publishConnectionSecurityIfCurrent(name string, publication uint64, status ConnectionSecurityStatus) bool {
+	c.mu.Lock()
+	if _, connected := c.conns[name]; connected || c.latestPublication[name] != publication {
+		c.mu.Unlock()
+		return false
+	}
+	previous := c.security[name]
+	c.security[name] = status
+	c.mu.Unlock()
+	c.recordConnectionSecurityTransition(name, previous, status)
+	return true
+}
+
+// detachConnection removes exactly the expected published connection. An
+// instance check at detach plus a token check after Close prevents both ABA
+// replacement and stale status publication.
+func (c *Client) detachConnection(name string, expected pooledConnection) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, ok := c.conns[name]
+	if !ok || current.conn != expected.conn || current.publication != expected.publication {
+		return false
+	}
+	delete(c.conns, name)
+	return true
+}
+
+func (c *Client) closeDetachedConnection(name string, detached pooledConnection, status ConnectionSecurityStatus) {
+	_ = detached.conn.Close()
+	c.publishConnectionSecurityIfCurrent(name, detached.publication, status)
+}
+
+func (c *Client) detachAndCloseConnection(name string, expected pooledConnection, status ConnectionSecurityStatus) bool {
+	if !c.detachConnection(name, expected) {
+		return false
+	}
+	c.closeDetachedConnection(name, expected, status)
+	return true
 }
 
 func (c *Client) recordConnectionSecurityTransition(name string, previous, status ConnectionSecurityStatus) {
@@ -165,12 +230,11 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 			c.mu.Unlock()
 			return existing.conn, nil
 		}
-		if ok {
-			delete(c.conns, resolved.Host.Name)
-		}
 		c.mu.Unlock()
 		if ok {
-			_ = existing.conn.Close()
+			c.detachAndCloseConnection(resolved.Host.Name, existing, ConnectionSecurityStatus{
+				State: observe.SecurityCold, Generation: existing.generation,
+			})
 		}
 
 		c.mu.Lock()
@@ -194,47 +258,49 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 		c.mu.Unlock()
 		st := c.Hosts.State(resolved.Host.Name)
 		if err := secrets.ValidateDeclarations(st.Secrets); err != nil {
-			releaseIdentity()
 			c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretInvalid, resolved.Host.Name)
-			c.setConnectionSecurity(resolved.Host.Name, ConnectionSecurityStatus{
+			c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{
 				State: observe.SecurityFailed, Generation: resolved.Generation,
 				Declared: len(st.Secrets), Reason: observe.ReasonSecretInvalid,
 			})
+			releaseIdentity()
 			return nil, errors.New("connection security initialization failed (invalid secret declaration)")
 		}
 		status := ConnectionSecurityStatus{
 			State: observe.SecurityInitializing, Generation: resolved.Generation,
 			Declared: len(st.Secrets),
 		}
-		c.setConnectionSecurity(resolved.Host.Name, status)
+		c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, status)
 
 		conn, dialErr := c.dial(ctx, resolved.Host, c.lookup)
 		if dialErr != nil {
-			releaseIdentity()
 			if len(st.Secrets) > 0 {
 				// Declared values are intentionally not available until the secure
 				// connection can read them. Bootstrap diagnostics may nevertheless
 				// echo one (for example from a remote shell profile), so returning the
 				// raw dial error here would create an unredactable pre-init leak.
 				c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretReadFailed, resolved.Host.Name)
-				c.setConnectionSecurity(resolved.Host.Name, ConnectionSecurityStatus{
+				c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{
 					State: observe.SecurityFailed, Generation: resolved.Generation,
 					Declared: len(st.Secrets), Reason: observe.ReasonSecretReadFailed,
 				})
+				releaseIdentity()
 				return nil, errors.New("connection setup failed before declared secrets could be protected")
 			}
-			c.setConnectionSecurity(resolved.Host.Name, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: resolved.Generation})
+			c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: resolved.Generation})
+			releaseIdentity()
 			return nil, dialErr
 		}
 		loaded, reason, loadErr := c.loadHostSecrets(ctx, resolved, st, conn)
 		if loadErr != nil {
-			_ = conn.Close()
-			releaseIdentity()
-			c.Hosts.RecordSecretLoadFailure(reason, resolved.Host.Name)
-			c.setConnectionSecurity(resolved.Host.Name, ConnectionSecurityStatus{
+			c.closeDetachedConnection(resolved.Host.Name, pooledConnection{
+				conn: conn, generation: resolved.Generation, publication: setupPublication,
+			}, ConnectionSecurityStatus{
 				State: observe.SecurityFailed, Generation: resolved.Generation,
 				Declared: len(st.Secrets), Loaded: loaded, Reason: reason,
 			})
+			releaseIdentity()
+			c.Hosts.RecordSecretLoadFailure(reason, resolved.Host.Name)
 			return nil, fmt.Errorf("connection security initialization failed (%s)", reason)
 		}
 
@@ -443,13 +509,9 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 		}
 		firstErr = safeErr
 
-		c.mu.Lock()
-		if current, ok := c.conns[pooled.host.Alias]; ok && current.conn == pooled.conn {
-			delete(c.conns, pooled.host.Alias)
-		}
-		c.mu.Unlock()
-		_ = pooled.conn.Close()
-		c.setConnectionSecurity(pooled.host.Alias, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: pooled.generation})
+		c.detachAndCloseConnection(pooled.host.Alias, pooled, ConnectionSecurityStatus{
+			State: observe.SecurityCold, Generation: pooled.generation,
+		})
 	}
 	return nil, nil, firstErr
 }
@@ -1281,44 +1343,37 @@ func (c *Client) IsConnected(hostName string) bool {
 // through Hosts.Host, which would auto-register an unknown ssh-style name.
 // Both are only called with names that are already registered.
 func (c *Client) Disconnect(hostName string) bool {
+	return c.disconnectWithStatus(hostName, ConnectionSecurityStatus{})
+}
+
+func (c *Client) disconnectWithStatus(hostName string, status ConnectionSecurityStatus) bool {
 	c.mu.Lock()
 	conn, ok := c.conns[hostName]
-	if ok {
-		delete(c.conns, hostName)
-	}
 	c.mu.Unlock()
 
 	if !ok {
 		return false
 	}
-	conn.conn.Close()
-	c.mu.Lock()
-	// Close may block. A reconnect can publish while it is in progress, so only
-	// the teardown that still owns the latest publication may write cold.
-	if _, connected := c.conns[hostName]; connected || c.latestPublication[hostName] != conn.publication {
-		c.mu.Unlock()
-		return true
+	if status.State == "" {
+		status = ConnectionSecurityStatus{State: observe.SecurityCold, Generation: conn.generation}
 	}
-	status := ConnectionSecurityStatus{State: observe.SecurityCold, Generation: conn.generation}
-	previous := c.security[hostName]
-	c.security[hostName] = status
-	c.mu.Unlock()
-	c.recordConnectionSecurityTransition(hostName, previous, status)
-	return true
+	return c.detachAndCloseConnection(hostName, conn, status)
 }
 
 // Close tears down all pooled connections.
 func (c *Client) Close() {
 	c.mu.Lock()
-	conns := make([]remoteConnection, 0, len(c.conns))
-	for _, conn := range c.conns {
-		conns = append(conns, conn.conn)
+	conns := make(map[string]pooledConnection, len(c.conns))
+	for name, conn := range c.conns {
+		conns[name] = conn
 	}
 	c.conns = make(map[string]pooledConnection)
 	c.mu.Unlock()
 
-	for _, conn := range conns {
-		conn.Close()
+	for name, conn := range conns {
+		c.closeDetachedConnection(name, conn, ConnectionSecurityStatus{
+			State: observe.SecurityCold, Generation: conn.generation,
+		})
 	}
 }
 

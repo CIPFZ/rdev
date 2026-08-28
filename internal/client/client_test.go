@@ -1071,6 +1071,120 @@ func TestSlowOldCloseCannotOverwriteNewReadyPublication(t *testing.T) {
 	}
 }
 
+func TestSlowDetachedCloseCannotRestoreGenerationBeforeHostInvalidation(t *testing.T) {
+	c := newTestClient()
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@old"}); err != nil {
+		t.Fatal(err)
+	}
+	closeEntered, releaseClose := make(chan struct{}), make(chan struct{})
+	c.dial = func(_ context.Context, host transport.Host, _ AgentLookup) (remoteConnection, error) {
+		return &fakeRemoteConn{host: host, closeFn: func() {
+			close(closeEntered)
+			<-releaseClose
+		}}, nil
+	}
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	disconnected := make(chan bool, 1)
+	go func() { disconnected <- c.Disconnect("dev") }()
+	<-closeEntered
+
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := c.Hosts.Resolve("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := c.ConnectionSecurity("dev")
+	if status.State != observe.SecurityCold || status.Generation != resolved.Generation {
+		t.Fatalf("host invalidation state = %+v, generation=%d", status, resolved.Generation)
+	}
+
+	close(releaseClose)
+	if ok := <-disconnected; !ok {
+		t.Fatal("old connection was not detached")
+	}
+	status = c.ConnectionSecurity("dev")
+	if status.State != observe.SecurityCold || status.Generation != resolved.Generation {
+		t.Fatalf("old Close restored stale generation: status=%+v generation=%d", status, resolved.Generation)
+	}
+}
+
+func TestRetrySlowCloseCannotOverwriteReplacementReadyPublication(t *testing.T) {
+	c := newTestClient()
+	for _, host := range []transport.Host{{Name: "dev", Addr: "u@dev"}, {Name: "other", Addr: "u@other"}} {
+		if err := c.Hosts.Add(host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseline := c.Hosts.SecuritySnapshot().ConnectionSecurityTransitions
+	closeEntered, releaseClose := make(chan struct{}), make(chan struct{})
+	devDials := 0
+	c.dial = func(_ context.Context, host transport.Host, _ AgentLookup) (remoteConnection, error) {
+		conn := &fakeRemoteConn{host: host}
+		if host.Name == "dev" {
+			devDials++
+			if devDials == 1 {
+				conn.handler = func(*proto.Request) (*proto.Response, error) {
+					return nil, errors.New("injected broken transport")
+				}
+				conn.closeFn = func() {
+					close(closeEntered)
+					<-releaseClose
+				}
+			}
+		}
+		return conn, nil
+	}
+
+	retryDone := make(chan error, 1)
+	go func() {
+		_, err := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		retryDone <- err
+	}()
+	<-closeEntered
+
+	// A second caller can publish a replacement while the retry path is blocked
+	// closing the detached transport.
+	if _, err := c.conn(t.Context(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("replacement is not ready: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+	if got := c.Hosts.SecuritySnapshot().ConnectionSecurityTransitions[string(observe.SecurityCold)]; got != baseline[string(observe.SecurityCold)] {
+		t.Fatalf("stale retry teardown published cold before Close returned: before=%d after=%d", baseline[string(observe.SecurityCold)], got)
+	}
+
+	otherDone := make(chan error, 1)
+	go func() { _, err := c.conn(context.Background(), "other"); otherDone <- err }()
+	select {
+	case err := <-otherDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retry Close on dev blocked unrelated host")
+	}
+
+	close(releaseClose)
+	if err := <-retryDone; err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsConnected("dev") || c.ConnectionSecurity("dev").State != observe.SecurityReady {
+		t.Fatalf("stale retry Close overwrote replacement: connected=%v status=%+v", c.IsConnected("dev"), c.ConnectionSecurity("dev"))
+	}
+	metrics := c.Hosts.SecuritySnapshot().ConnectionSecurityTransitions
+	if metrics[string(observe.SecurityCold)] != baseline[string(observe.SecurityCold)] ||
+		metrics[string(observe.SecurityInitializing)]-baseline[string(observe.SecurityInitializing)] != 3 ||
+		metrics[string(observe.SecurityReady)]-baseline[string(observe.SecurityReady)] != 3 ||
+		metrics[string(observe.SecurityFailed)] != baseline[string(observe.SecurityFailed)] {
+		t.Fatalf("connection security transition metrics are inconsistent: %v", metrics)
+	}
+}
+
 func TestUntrustedBase64FlagCannotBypassResponseRedaction(t *testing.T) {
 	c := newTestClient()
 	const token = "coincidental-base64-text"
