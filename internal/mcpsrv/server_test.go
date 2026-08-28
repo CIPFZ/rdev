@@ -165,6 +165,46 @@ func TestPhase3OutputProjectionPreservesTruncationAndTerminalMetadata(t *testing
 	}
 }
 
+func TestOfficialMCPSDKPreservesTypedTerminalAndSyncTruncation(t *testing.T) {
+	srv := New(newTestClient())
+	stdout, _ := proto.NewTruncation(4096, 128)
+	stderr, _ := proto.NewTruncation(256, 64)
+	type noInput struct{}
+	mcp.AddTool(srv, &mcp.Tool{Name: "test_typed_terminal", Description: "test"},
+		func(context.Context, *mcp.CallToolRequest, noInput) (*mcp.CallToolResult, ExecOut, error) {
+			return nil, toExecOut(&client.ExecResult{ExecResult: &proto.ExecResult{
+				OperationID: "op_2123456789abcdef", Terminal: true, Execution: proto.StateCompleted,
+				Stdout: "retained", StdoutTruncation: stdout, StderrTruncation: stderr, Truncated: true,
+			}}), nil
+		})
+	mcp.AddTool(srv, &mcp.Tool{Name: "test_sync_truncation", Description: "test"},
+		func(context.Context, *mcp.CallToolRequest, noInput) (*mcp.CallToolResult, SyncOut, error) {
+			return nil, SyncOut{
+				Stdout: "AAE=", StdoutB64: true, StdoutTruncation: stdout,
+				StderrTruncation: stderr, Truncated: true, ExitCode: 0,
+			}, nil
+		})
+	cs := connectServer(t, srv)
+
+	var exec ExecOut
+	if isErr, text := callTool(t, cs, "test_typed_terminal", noInput{}, &exec); isErr {
+		t.Fatal(text)
+	}
+	if exec.OperationID != "op_2123456789abcdef" || !exec.Terminal ||
+		exec.ExecutionState != proto.StateCompleted || exec.StdoutTruncation.DroppedBytes != 3968 {
+		t.Fatalf("official SDK typed terminal = %+v", exec)
+	}
+	var syncOut SyncOut
+	if isErr, text := callTool(t, cs, "test_sync_truncation", noInput{}, &syncOut); isErr {
+		t.Fatal(text)
+	}
+	if !syncOut.StdoutB64 || !syncOut.Truncated || syncOut.StdoutTruncation.OriginalBytes != 4096 ||
+		syncOut.StdoutTruncation.RetainedBytes != 128 || syncOut.StdoutTruncation.DroppedBytes != 3968 ||
+		syncOut.StderrTruncation.DroppedBytes != 192 {
+		t.Fatalf("official SDK sync projection = %+v", syncOut)
+	}
+}
+
 func TestMCPStructuredErrorEnvelopeIsPreserved(t *testing.T) {
 	c := newTestClient()
 	srv := New(c)
@@ -192,7 +232,8 @@ func TestMCPStructuredErrorEnvelopeIsPreserved(t *testing.T) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Code != proto.CodeAmbiguousOutcome || envelope.Retryable ||
+	if envelope.Code != proto.CodeAmbiguousOutcome || envelope.Category != proto.CategoryTransport ||
+		envelope.Retry != proto.RetryDispositionUnsafe || envelope.Retryable ||
 		envelope.ExecutionState != proto.StatePossiblyExecuted || envelope.OperationID != "op_0123456789abcdef" || !envelope.Terminal {
 		t.Fatalf("MCP envelope lost fields: %+v", envelope)
 	}
@@ -583,6 +624,35 @@ func TestSyncRejectsBadDirection(t *testing.T) {
 	}
 }
 
+func TestSyncHardLimitUsesStableMCPEnvelope(t *testing.T) {
+	cs := connect(t, newTestClient())
+	result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "rdev_sync",
+		Arguments: SyncIn{
+			Host: "dev", Direction: "push", Local: "local", Remote: "remote", MaxOutputBytes: 600000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("hard limit was not an MCP tool error: %+v", result)
+	}
+	raw, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope proto.ErrorEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Code != proto.CodeLimitExceeded || envelope.Category != proto.CategoryResource ||
+		envelope.Retry != proto.RetryDispositionNever || envelope.Retryable ||
+		envelope.ExecutionState != proto.StateNotSent || !envelope.Terminal {
+		t.Fatalf("MCP hard-limit envelope = %+v", envelope)
+	}
+}
+
 func TestToJobOutHandlesNil(t *testing.T) {
 	if got := toJobOut(nil); got.ID != "" {
 		t.Errorf("toJobOut(nil) = %+v, want a zero value rather than a panic", got)
@@ -635,8 +705,8 @@ func TestJobWaitStillRequiresAnID(t *testing.T) {
 	if !isErr {
 		t.Fatal("a wait with neither id nor ids should be rejected")
 	}
-	if !strings.Contains(msg, "job id required") {
-		t.Errorf("err = %q, want it to say an id is required", msg)
+	if !strings.Contains(msg, "invalid request") {
+		t.Errorf("err = %q, want the stable request.invalid message", msg)
 	}
 }
 

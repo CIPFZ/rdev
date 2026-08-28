@@ -24,16 +24,20 @@ type queuedRequest struct {
 // goroutine creation: fixed worker sets consume bounded queues, so a hostile
 // caller cannot turn queueing into an unbounded goroutine allocation.
 type agentServer struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	state   string
-	writer  *respWriter
-	cache   *operationCache
-	early   *earlyCancelStore
-	waits   *waitHub
-	normalQ chan queuedRequest
-	waitQ   chan queuedRequest
-	workers sync.WaitGroup
+	ctx          context.Context
+	cancel       context.CancelFunc
+	state        string
+	writer       *respWriter
+	cache        *operationCache
+	early        *earlyCancelStore
+	waits        *waitHub
+	normalQ      chan queuedRequest
+	waitQ        chan queuedRequest
+	workers      sync.WaitGroup
+	modeMu       sync.RWMutex
+	version      int
+	features     map[proto.Feature]bool
+	withDeadline func(context.Context, time.Time) (context.Context, context.CancelFunc)
 }
 
 func newAgentServer(parent context.Context, state string, writer *respWriter) *agentServer {
@@ -45,6 +49,11 @@ func newAgentServer(parent context.Context, state string, writer *respWriter) *a
 		waits:   newWaitHub(realWaitClock{}),
 		normalQ: make(chan queuedRequest, maxNormalQueue),
 		waitQ:   make(chan queuedRequest, maxWaitQueue),
+		version: proto.Version, features: make(map[proto.Feature]bool),
+		withDeadline: context.WithDeadline,
+	}
+	for _, feature := range proto.SupportedFeatures() {
+		s.features[feature] = true
 	}
 	for i := 0; i < maxConcurrentRequests; i++ {
 		s.workers.Add(1)
@@ -58,13 +67,17 @@ func newAgentServer(parent context.Context, state string, writer *respWriter) *a
 }
 
 func (s *agentServer) submit(request proto.Request) {
-	if request.Op == proto.OpCancel {
-		s.handleCancel(&request)
-		return
-	}
 	descriptor, err := proto.RequireOperation(request.Op)
 	if err != nil {
 		s.writeError(&request, proto.CodeUnknownOperation, proto.StateNotSent, 1)
+		return
+	}
+	if envelope := s.validateRequestControls(&request); envelope != nil {
+		s.writeEnvelope(&request, envelope, 1)
+		return
+	}
+	if request.Op == proto.OpCancel {
+		s.handleCancel(&request)
 		return
 	}
 	queue := s.normalQ
@@ -74,7 +87,7 @@ func (s *agentServer) submit(request proto.Request) {
 	select {
 	case queue <- queuedRequest{request: request}:
 	case <-s.ctx.Done():
-		s.writeError(&request, proto.CodeCanceled, proto.StateNotSent, 1)
+		s.writeError(&request, proto.CodeCanceled, proto.StateCanceled, 1)
 	default:
 		s.writeError(&request, proto.CodeQueueFull, proto.StateNotSent, 1)
 	}
@@ -97,6 +110,9 @@ func (s *agentServer) worker(queue <-chan queuedRequest) {
 
 func (s *agentServer) process(request *proto.Request) {
 	var activeRecord *operationRecord
+	var emitter *execStreamEmitter
+	accepted := false
+	lastSeq := uint64(0)
 	defer func() {
 		if recover() == nil {
 			return
@@ -104,37 +120,63 @@ func (s *agentServer) process(request *proto.Request) {
 		// A malformed request must not take down the whole multiplexed agent or
 		// leave an accepted dedupe record waiting forever. The public error is
 		// registry-backed and deliberately contains no panic value or stack.
-		envelope := proto.NewError(proto.CodeInternalFailure, request.OperationID, proto.StatePossiblyExecuted)
-		response := errorResponse(request, envelope, 1)
+		state, nextSeq := proto.StateNotSent, uint64(1)
+		if accepted {
+			state = proto.StatePossiblyExecuted
+			nextSeq = lastSeq + 1
+			if emitter != nil {
+				nextSeq = emitter.finalSeq()
+			}
+		}
+		envelope := proto.NewError(proto.CodeInternalFailure, request.OperationID, state)
+		response := errorResponse(request, envelope, nextSeq)
 		if activeRecord == nil || s.cache.finish(activeRecord, response) {
 			s.writer.write(response)
 		}
 	}()
 	if s.ctx.Err() != nil {
-		s.writeError(request, proto.CodeCanceled, proto.StateNotSent, 1)
+		s.writeError(request, proto.CodeCanceled, proto.StateCanceled, 1)
 		return
 	}
-	if request.StreamWindowBytes < 0 || request.StreamWindowBytes > proto.AbsoluteStreamWindowBytes {
-		s.writeError(request, proto.CodeLimitExceeded, proto.StateNotSent, 1)
+	if envelope := s.validateRequestControls(request); envelope != nil {
+		s.writeEnvelope(request, envelope, 1)
 		return
 	}
-	// Protocol-2 fallback remains unary. It is accepted only for compatibility;
-	// it deliberately receives none of the dedupe guarantees advertised by v3.
-	if request.OperationID == "" || request.ClientID == "" {
+	// The initial hello is unary-shaped for N-1 compatibility. Every later
+	// fallback is selected from the negotiated mode, never inferred from a
+	// response/request shape that a malformed v3 peer could mimic.
+	if request.Op == proto.OpPing && request.Hello != nil {
+		response := handleContext(s.ctx, request, s.state, s.waits)
+		s.rememberNegotiation(response)
+		s.writer.write(response)
+		return
+	}
+	if s.negotiatedVersion() < 3 {
 		response := handleContext(s.ctx, request, s.state, s.waits)
 		s.writer.write(response)
 		return
 	}
-
+	if request.OperationID == "" || request.ClientID == "" {
+		s.writeError(request, proto.CodeInvalidRequest, proto.StateNotSent, 1)
+		return
+	}
+	if !s.negotiatedFeature(proto.FeatureStreaming) {
+		request.StreamWindowBytes = 0
+	}
+	descriptor, _ := proto.LookupOperation(request.Op)
 	base := s.ctx
-	if descriptor, _ := proto.LookupOperation(request.Op); descriptor.Disconnect == proto.DisconnectContinue {
+	if descriptor.Disconnect == proto.DisconnectContinue {
 		base = context.Background()
 	}
 	opCtx, cancel := context.WithCancel(base)
 	if request.DeadlineUnixMilli != 0 {
 		deadline := time.UnixMilli(request.DeadlineUnixMilli)
 		var deadlineCancel context.CancelFunc
-		opCtx, deadlineCancel = context.WithDeadline(opCtx, deadline)
+		withDeadline := s.withDeadline
+		if withDeadline == nil {
+			withDeadline = context.WithDeadline
+		}
+		opCtx, deadlineCancel = withDeadline(opCtx, deadline)
 		previous := cancel
 		cancel = func() { deadlineCancel(); previous() }
 	}
@@ -172,7 +214,7 @@ func (s *agentServer) process(request *proto.Request) {
 		return
 	}
 
-	if s.early.take(request.ClientID, request.OperationID) {
+	if s.early.take(request.ClientID, request.OperationID, request.Op) {
 		envelope := proto.NewError(proto.CodeCanceled, request.OperationID, proto.StateCanceled)
 		response := errorResponse(request, envelope, 1)
 		s.cache.finish(begin.record, response)
@@ -180,18 +222,27 @@ func (s *agentServer) process(request *proto.Request) {
 		return
 	}
 
-	s.writer.write(acceptedResponse(request, 1))
-	s.writer.write(&proto.Response{
-		ID: request.ID, OperationID: request.OperationID, Type: proto.EventProgress,
-		Seq: 2, OK: true, Execution: proto.StateAccepted,
-		Progress: &proto.ProgressFrame{Phase: "running"},
-	})
-	emitter := newExecStreamEmitter(s.writer, request, 2)
+	if !s.writer.write(acceptedResponse(request, 1)) {
+		return
+	}
+	accepted = true
+	lastSeq = 1
+	if s.negotiatedFeature(proto.FeatureStreaming) {
+		if s.writer.write(&proto.Response{
+			ID: request.ID, OperationID: request.OperationID, Type: proto.EventProgress,
+			Seq: 2, OK: true, Execution: proto.StateAccepted,
+			Progress: &proto.ProgressFrame{Phase: "running"},
+		}) {
+			lastSeq = 2
+		}
+	}
+	emitter = newExecStreamEmitter(s.writer, request, lastSeq)
 	response := handleContextStream(opCtx, request, s.state, s.waits, emitter.emit)
 	response.OperationID = request.OperationID
 	response.Type = proto.EventFinal
 	response.Terminal = true
 	if response.Error != nil {
+		normalizeAcceptedTerminalError(response.Error)
 		response.Execution = response.Error.ExecutionState
 	} else {
 		response.Execution = proto.StateCompleted
@@ -213,24 +264,111 @@ func (s *agentServer) process(request *proto.Request) {
 	}
 }
 
+func (s *agentServer) validateRequestControls(request *proto.Request) *proto.ErrorEnvelope {
+	if request == nil {
+		return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	if request.StreamWindowBytes < 0 || request.StreamWindowBytes > proto.AbsoluteStreamWindowBytes {
+		return proto.NewError(proto.CodeLimitExceeded, request.OperationID, proto.StateNotSent)
+	}
+	descriptor, ok := proto.LookupOperation(request.Op)
+	if !ok {
+		return proto.NewError(proto.CodeUnknownOperation, request.OperationID, proto.StateNotSent)
+	}
+	version := s.negotiatedVersion()
+	if version < 3 {
+		if request.Op == proto.OpCancel || request.DeadlineUnixMilli != 0 {
+			return proto.NewError(proto.CodeUnsupportedFeature, request.OperationID, proto.StateNotSent)
+		}
+		return nil
+	}
+	deadlineCapable := false
+	for _, feature := range descriptor.RequiredFeatures {
+		deadlineCapable = deadlineCapable || feature == proto.FeatureDeadline
+		if !s.negotiatedFeature(feature) {
+			return proto.NewError(proto.CodeUnsupportedFeature, request.OperationID, proto.StateNotSent)
+		}
+	}
+	if request.DeadlineUnixMilli != 0 && !deadlineCapable {
+		return proto.NewError(proto.CodeInvalidRequest, request.OperationID, proto.StateNotSent)
+	}
+	return nil
+}
+
+// normalizeAcceptedTerminalError keeps the terminal state coherent with the
+// already-emitted accepted frame. Validation/admission errors discovered by a
+// handler did not execute the requested work, but after protocol acceptance
+// their terminal phase is "failed", not the pre-admission "not_sent" state.
+func normalizeAcceptedTerminalError(envelope *proto.ErrorEnvelope) {
+	if envelope == nil {
+		return
+	}
+	switch envelope.Code {
+	case proto.CodeCanceled, proto.CodeDeadlineExceeded:
+		envelope.ExecutionState = proto.StateCanceled
+	case proto.CodeAmbiguousOutcome:
+		envelope.ExecutionState = proto.StatePossiblyExecuted
+	default:
+		envelope.ExecutionState = proto.StateFailed
+	}
+}
+
+func (s *agentServer) negotiatedVersion() int {
+	s.modeMu.RLock()
+	defer s.modeMu.RUnlock()
+	return s.version
+}
+
+func (s *agentServer) negotiatedFeature(feature proto.Feature) bool {
+	s.modeMu.RLock()
+	defer s.modeMu.RUnlock()
+	return s.version >= 3 && s.features[feature]
+}
+
+func (s *agentServer) rememberNegotiation(response *proto.Response) {
+	if response == nil || !response.OK || response.Ping == nil {
+		return
+	}
+	s.modeMu.Lock()
+	defer s.modeMu.Unlock()
+	s.version = response.Ping.NegotiatedVersion
+	s.features = make(map[proto.Feature]bool)
+	if s.version >= 3 {
+		for _, feature := range response.Ping.Features {
+			s.features[feature] = true
+		}
+	}
+}
+
 func stampResultMetadata(response *proto.Response) {
 	if response == nil {
 		return
 	}
+	stamp := func(operationID *string, terminal *bool, execution *proto.ExecutionState) {
+		if response.OperationID != "" {
+			*operationID = response.OperationID
+		}
+		if response.Terminal {
+			*terminal = true
+		}
+		if response.Execution != "" {
+			*execution = response.Execution
+		}
+	}
 	if response.Exec != nil {
-		response.Exec.OperationID, response.Exec.Terminal, response.Exec.Execution = response.OperationID, response.Terminal, response.Execution
+		stamp(&response.Exec.OperationID, &response.Exec.Terminal, &response.Exec.Execution)
 	}
 	if response.Read != nil {
-		response.Read.OperationID, response.Read.Terminal, response.Read.Execution = response.OperationID, response.Terminal, response.Execution
+		stamp(&response.Read.OperationID, &response.Read.Terminal, &response.Read.Execution)
 	}
 	if response.Cat != nil {
-		response.Cat.OperationID, response.Cat.Terminal, response.Cat.Execution = response.OperationID, response.Terminal, response.Execution
+		stamp(&response.Cat.OperationID, &response.Cat.Terminal, &response.Cat.Execution)
 	}
 	if response.Job != nil {
-		response.Job.OperationID, response.Job.Terminal, response.Job.Execution = response.OperationID, response.Terminal, response.Execution
+		stamp(&response.Job.OperationID, &response.Job.Terminal, &response.Job.Execution)
 		stampJobInfo := func(info *proto.JobInfo) {
 			if info != nil {
-				info.OperationID, info.Terminal, info.Execution = response.OperationID, response.Terminal, response.Execution
+				stamp(&info.OperationID, &info.Terminal, &info.Execution)
 			}
 		}
 		stampJobInfo(response.Job.Info)
@@ -244,7 +382,7 @@ func stampResultMetadata(response *proto.Response) {
 		}
 	}
 	if response.List != nil {
-		response.List.OperationID, response.List.Terminal, response.List.Execution = response.OperationID, response.Terminal, response.Execution
+		stamp(&response.List.OperationID, &response.List.Terminal, &response.List.Execution)
 	}
 }
 
@@ -350,9 +488,24 @@ func (s *agentServer) handleCancel(request *proto.Request) {
 		s.writeError(request, proto.CodeInvalidRequest, proto.StateNotSent, 1)
 		return
 	}
-	found, _ := s.cache.cancel(request.ClientID, request.Cancel.OperationID)
+	if request.Cancel.TargetOp != "" {
+		descriptor, ok := proto.LookupOperation(request.Cancel.TargetOp)
+		if !ok || descriptor.Disconnect != proto.DisconnectCancel {
+			s.writeError(request, proto.CodeProcessInvalidState, proto.StateNotSent, 1)
+			return
+		}
+	}
+	found, _, eligible := s.cache.cancel(request.ClientID, request.Cancel.OperationID, request.Cancel.TargetOp)
+	if found && !eligible {
+		s.writeError(request, proto.CodeProcessInvalidState, proto.StateNotSent, 1)
+		return
+	}
 	if !found {
-		if err := s.early.add(request.ClientID, request.Cancel.OperationID); err != nil {
+		if request.Cancel.TargetOp == "" {
+			s.writeError(request, proto.CodeInvalidRequest, proto.StateNotSent, 1)
+			return
+		}
+		if err := s.early.add(request.ClientID, request.Cancel.OperationID, request.Cancel.TargetOp); err != nil {
 			s.writeError(request, proto.CodeQueueFull, proto.StateNotSent, 1)
 			return
 		}
@@ -393,7 +546,9 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 				proto.ProtocolRange{Min: request.Hello.MinVersion, Max: request.Hello.MaxVersion},
 			); ok {
 				response.Ping.NegotiatedVersion = version
-				response.Ping.Features = proto.NegotiateFeatures(proto.SupportedFeatures(), request.Hello.Features)
+				if version >= 3 {
+					response.Ping.Features = proto.NegotiateFeatures(proto.SupportedFeatures(), request.Hello.Features)
+				}
 			} else {
 				err = proto.NewError(proto.CodeUnsupportedFeature, request.OperationID, proto.StateNotSent)
 			}
@@ -440,14 +595,7 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 		}
 	}
 	if err != nil {
-		var envelope *proto.ErrorEnvelope
-		if !errors.As(err, &envelope) {
-			envelope = proto.NewError(proto.CodeInternalFailure, request.OperationID, proto.StateFailed)
-		} else if envelope.OperationID == "" {
-			copy := *envelope
-			copy.OperationID = request.OperationID
-			envelope = &copy
-		}
+		envelope := classifyAgentError(err, request.OperationID)
 		response.OK = false
 		response.Err = envelope.Message
 		response.Error = envelope

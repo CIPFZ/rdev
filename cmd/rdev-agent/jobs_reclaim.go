@@ -9,7 +9,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +33,7 @@ func jobRm(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return jobRmOne(p.ID, state)
 	}
 	if p.OlderThanSec <= 0 && p.KeepLast <= 0 {
-		return nil, errors.New("job_rm needs an id, older_than_sec, or keep_last")
+		return nil, invalidRequestError("job_rm needs a filter")
 	}
 	return jobRmSweep(p, state)
 }

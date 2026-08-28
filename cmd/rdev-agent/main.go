@@ -31,12 +31,12 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
+	"github.com/CIPFZ/rdev/internal/framewriter"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -89,12 +89,17 @@ func main() {
 	}
 
 	in := bufio.NewReaderSize(os.Stdin, 1<<20)
-	// Replies are written from many goroutines, so the writer is guarded: a
-	// response is one line, and interleaved writes would corrupt the framing the
-	// host relies on.
-	w := &respWriter{out: bufio.NewWriter(os.Stdout)}
+	// Replies from every handler pass through one bounded writer loop. Its fixed
+	// watchdog closes stdout and stdin if the host stops reading, which tears down
+	// attached work instead of pinning terminal/control behind a blocked data
+	// flush forever.
+	w := newRespWriter(os.Stdout, os.Stdout.Close)
 
 	server := newAgentServer(context.Background(), state, w)
+	w.onFailure = func() {
+		server.cancel()
+		_ = os.Stdin.Close()
+	}
 
 	for {
 		line, err := readLine(in)
@@ -133,48 +138,71 @@ const shutdownDrainTimeout = 2 * time.Second
 // hundreds of processes on a machine someone else is using.
 const maxConcurrentRequests = 16
 
-// respWriter serializes replies onto the single stdout pipe.
+// respWriter serializes replies onto the single stdout pipe through bounded
+// priority queues. Data may be dropped before admission; terminal/control is
+// never silently dropped and a blocked underlying write closes the connection.
 type respWriter struct {
-	mu             sync.Mutex
-	controlWaiting atomic.Int32
-	out            *bufio.Writer
+	initOnce     sync.Once
+	out          io.Writer
+	closeOut     func() error
+	writeTimeout time.Duration
+	frames       *framewriter.Writer
+	onFailure    func()
+}
+
+func newRespWriter(out io.Writer, closeOut func() error) *respWriter {
+	w := &respWriter{out: out, closeOut: closeOut}
+	w.init()
+	return w
+}
+
+func (w *respWriter) init() {
+	w.initOnce.Do(func() {
+		timeout := w.writeTimeout
+		if timeout <= 0 {
+			timeout = 2 * time.Second
+		}
+		w.frames = framewriter.New(w.out, w.closeOut, framewriter.Config{
+			MaxFrames: 64, MaxBytes: 2 * proto.AbsoluteResponseFrameBytes,
+			WriteTimeout: timeout,
+		}, func(err error) {
+			if !errors.Is(err, framewriter.ErrClosed) && w.onFailure != nil {
+				w.onFailure()
+			}
+		})
+	})
 }
 
 func (w *respWriter) write(resp *proto.Response) bool {
+	w.init()
+	terminalReplacement := false
 	b, err := json.Marshal(resp)
 	if err != nil {
+		terminalReplacement = true
 		envelope := proto.NewError(proto.CodeInternalFailure, resp.OperationID, proto.StatePossiblyExecuted)
 		b, _ = json.Marshal(errorResponse(&proto.Request{ID: resp.ID, OperationID: resp.OperationID}, envelope, max(resp.Seq, 1)))
 	}
 	if int64(len(b)) > proto.AbsoluteResponseFrameBytes {
+		terminalReplacement = true
 		envelope := proto.NewError(proto.CodeFrameTooLarge, resp.OperationID, proto.StatePossiblyExecuted)
 		truncation, _ := proto.NewTruncation(int64(len(b)), 0)
 		envelope.Truncation = &truncation
 		b, _ = json.Marshal(errorResponse(&proto.Request{ID: resp.ID, OperationID: resp.OperationID}, envelope, max(resp.Seq, 1)))
 	}
+	b = append(b, '\n')
+	priority := framewriter.Control
 	if resp.Type == proto.EventData {
-		if w.controlWaiting.Load() != 0 || !w.mu.TryLock() {
-			return false
-		}
-	} else {
-		w.controlWaiting.Add(1)
-		w.mu.Lock()
-		w.controlWaiting.Add(-1)
+		priority = framewriter.Data
+	} else if terminalReplacement || resp.Terminal || resp.Type == proto.EventFinal || resp.Type == proto.EventError {
+		priority = framewriter.Critical
 	}
-	defer w.mu.Unlock()
-	if _, err := w.out.Write(b); err != nil {
-		return false
-	}
-	if err := w.out.WriteByte('\n'); err != nil {
-		return false
-	}
-	return w.out.Flush() == nil // flush per reply: the host blocks waiting for this line
+	return w.frames.Write(context.Background(), b, priority) == nil
 }
 
 func (w *respWriter) flush() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.out.Flush()
+	if w.frames != nil {
+		w.frames.Close()
+	}
 }
 
 // handleSafely runs handle and converts a panic into an error reply.
@@ -190,10 +218,10 @@ func handleSafely(req *proto.Request, state string) (resp *proto.Response) {
 			// The stack goes to stderr, which the host captures and surfaces in
 			// transport errors, so a panic stays diagnosable.
 			fmt.Fprintf(os.Stderr, "rdev-agent: panic handling op %q: %v\n%s\n", req.Op, r, debug.Stack())
+			envelope := proto.NewError(proto.CodeInternalFailure, req.OperationID, proto.StateFailed)
 			resp = &proto.Response{
-				ID:  req.ID,
-				OK:  false,
-				Err: fmt.Sprintf("agent panic handling %q: %v", req.Op, r),
+				ID: req.ID, OperationID: req.OperationID, OK: false,
+				Err: envelope.Message, Error: envelope, Execution: envelope.ExecutionState,
 			}
 		}
 	}()
@@ -235,62 +263,7 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 }
 
 func handle(req *proto.Request, state string) *proto.Response {
-	resp := &proto.Response{ID: req.ID}
-	var err error
-
-	switch req.Op {
-	case proto.OpPing:
-		resp.Ping = doPing()
-	case proto.OpExec:
-		if req.Exec == nil {
-			err = errors.New("exec params required")
-			break
-		}
-		resp.Exec, err = doExec(req.Exec)
-	case proto.OpReadFile:
-		if req.Read == nil {
-			err = errors.New("read params required")
-			break
-		}
-		resp.Read, err = doRead(req.Read)
-	case proto.OpWriteFile:
-		if req.Cat == nil {
-			err = errors.New("write params required")
-			break
-		}
-		resp.Cat, err = doWrite(req.Cat)
-	case proto.OpList:
-		if req.List == nil {
-			err = errors.New("list params required")
-			break
-		}
-		resp.List, err = doList(req.List)
-	default:
-		// Job ops are dispatched by doJob, which owns the list of names it
-		// handles. Routing anything unrecognized there rather than duplicating
-		// the set here means adding a job op cannot be half-wired.
-		if !isJobOp(req.Op) {
-			// Say what this most likely means. An unadorned "unknown op" reads as a
-			// protocol bug, when in practice it means the host is newer than the
-			// binary it is talking to.
-			err = fmt.Errorf("unknown op %q (this agent speaks protocol %d; "+
-				"if the host is newer, rebuild and re-upload it)", req.Op, proto.Version)
-			break
-		}
-		if req.Job == nil {
-			err = errors.New("job params required")
-			break
-		}
-		resp.Job, err = doJob(req.Op, req.Job, state)
-	}
-
-	if err != nil {
-		resp.OK = false
-		resp.Err = err.Error()
-		return resp
-	}
-	resp.OK = true
-	return resp
+	return handleContext(context.Background(), req, state, defaultWaitHub)
 }
 
 func doPing() *proto.PingResult {
@@ -339,7 +312,7 @@ func expandHome(p string) string {
 // spaces, quotes, or `$(...)` is passed through byte-for-byte.
 func buildCmd(p *proto.ExecParams) (*exec.Cmd, error) {
 	if len(p.Argv) == 0 {
-		return nil, errors.New("argv must not be empty")
+		return nil, invalidRequestError("argv must not be empty")
 	}
 
 	var cmd *exec.Cmd
@@ -358,10 +331,13 @@ func buildCmd(p *proto.ExecParams) (*exec.Cmd, error) {
 		dir := expandHome(p.Cwd)
 		info, err := os.Stat(dir)
 		if err != nil {
-			return nil, fmt.Errorf("cwd %q: %w", p.Cwd, err)
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, objectNotFoundError(err)
+			}
+			return nil, err
 		}
 		if !info.IsDir() {
-			return nil, fmt.Errorf("cwd %q is not a directory", p.Cwd)
+			return nil, invalidRequestError("cwd is not a directory")
 		}
 		cmd.Dir = dir
 	}
@@ -461,16 +437,16 @@ func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, s
 
 	limit := p.MaxOutputBytes
 	if limit < 0 || int64(limit) > proto.AbsoluteOutputBytes {
-		return nil, errors.New("max_output_bytes is outside the hard limit")
+		return nil, limitExceededError("max_output_bytes is outside the hard limit")
 	}
 	if limit == 0 {
 		limit = defaultMaxOutput
 	}
 	if p.TimeoutSec < 0 || p.TimeoutSec > hardExecTimeoutSec {
-		return nil, errors.New("timeout_sec is outside the hard limit")
+		return nil, limitExceededError("timeout_sec is outside the hard limit")
 	}
 	if int64(len(p.Stdin)) > proto.AbsoluteRequestFrameBytes {
-		return nil, errors.New("stdin exceeds the hard limit")
+		return nil, limitExceededError("stdin exceeds the hard limit")
 	}
 	stdout := &capWriter{cap: limit, hook: stdoutHook}
 	stderr := &capWriter{cap: limit, hook: stderrHook}
@@ -486,11 +462,16 @@ func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, s
 
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %q: %w", p.Argv[0], err)
+		return nil, processStartError(err)
 	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	pgid := cmd.Process.Pid // Setpgid makes the child's PID the original PGID.
+	exited, stopObserving, observeErr := observeProcessExit(cmd.Process.Pid)
+	if observeErr != nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("observe foreground process: %w", observeErr)
+	}
+	defer stopObserving()
 
 	var timedOut bool
 	var canceled bool
@@ -499,15 +480,19 @@ func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, s
 		timer = time.After(time.Duration(p.TimeoutSec) * time.Second)
 	}
 	select {
-	case err = <-done:
+	case <-exited:
+		err = cmd.Wait()
 	case <-ctx.Done():
 		canceled = true
-		terminateProcessGroup(cmd.Process.Pid, done)
+		terminateProcessGroup(pgid)
+		err = cmd.Wait()
+		waitProcessGroupGone(pgid)
 		err = ctx.Err()
 	case <-timer:
 		timedOut = true
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-done
+		terminateProcessGroup(pgid)
+		err = cmd.Wait()
+		waitProcessGroupGone(pgid)
 	}
 
 	stdoutText, stdoutB64, stdoutRetained := stdout.payload()
@@ -546,23 +531,44 @@ func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, s
 	return res, nil
 }
 
+var processGroupGrace = 250 * time.Millisecond
+
 // terminateProcessGroup gives cooperative children a brief TERM window, then
-// kills and reaps the exact process group owned by this request. No process-name
-// matching is involved, so unrelated requests are unaffected.
-func terminateProcessGroup(pgid int, done <-chan error) {
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	select {
-	case <-done:
+// escalates the original request-owned group independently of leader exit. The
+// leader is deliberately left unreaped by observeProcessExit until this helper
+// returns, keeping its PID/PGID reserved throughout the reuse-sensitive window.
+func terminateProcessGroup(pgid int) {
+	if pgid <= 0 {
 		return
-	case <-time.After(250 * time.Millisecond):
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	<-done
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	timer := time.NewTimer(processGroupGrace)
+	defer timer.Stop()
+	<-timer.C
+	if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+		return
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return
+	}
+}
+
+func waitProcessGroupGone(pgid int) {
+	deadline := time.Now().Add(processGroupGrace)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
+	if p.Path == "" {
+		return nil, invalidRequestError("read path required")
+	}
 	if p.Offset < 0 {
-		return nil, errors.New("read offset must not be negative")
+		return nil, invalidRequestError("read offset must not be negative")
 	}
 	path := expandHome(p.Path)
 	f, err := os.Open(path)
@@ -576,12 +582,12 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 		return nil, err
 	}
 	if info.IsDir() {
-		return nil, fmt.Errorf("%s is a directory", p.Path)
+		return nil, invalidRequestError("read path is a directory")
 	}
 
 	limit := p.Limit
 	if limit < 0 || limit > proto.AbsoluteReadBytes {
-		return nil, errors.New("read limit is outside the hard limit")
+		return nil, limitExceededError("read limit is outside the hard limit")
 	}
 	if limit == 0 {
 		limit = defaultReadLimit
@@ -606,7 +612,7 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 	truncation, _ := proto.NewTruncation(original, int64(n))
 	end, addErr := proto.CheckedAdd(p.Offset, int64(n))
 	if addErr != nil {
-		return nil, errors.New("read range overflows")
+		return nil, limitExceededError("read range overflows")
 	}
 	res := &proto.ReadResult{
 		Size: info.Size(), EOF: end >= info.Size(),
@@ -625,6 +631,9 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 }
 
 func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
+	if p.Path == "" {
+		return nil, invalidRequestError("write path required")
+	}
 	path := expandHome(p.Path)
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -636,7 +645,7 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	if p.ContentB64 {
 		decoded, err := base64.StdEncoding.DecodeString(p.Content)
 		if err != nil {
-			return nil, fmt.Errorf("decode base64 content: %w", err)
+			return nil, invalidRequestError("invalid base64 content")
 		}
 		data = decoded
 	}
@@ -723,7 +732,7 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 
 	limit := p.Limit
 	if limit < 0 || limit > 10_000 {
-		return nil, errors.New("list limit is outside the hard limit")
+		return nil, limitExceededError("list limit is outside the hard limit")
 	}
 	if limit == 0 {
 		limit = defaultListLimit

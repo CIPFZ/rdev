@@ -54,7 +54,7 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 	case proto.OpJobRm:
 		return jobRm(p, state)
 	}
-	return nil, fmt.Errorf("unknown job op %q", op)
+	return nil, invalidRequestError("unknown job operation")
 }
 
 // jobMeta is the on-disk record. It is the single source of truth: a fresh
@@ -72,7 +72,7 @@ func jobDir(state, id string) string { return filepath.Join(state, "jobs", id) }
 
 func jobStatus(id, state string) (*proto.JobInfo, error) {
 	if id == "" {
-		return nil, errors.New("job id required")
+		return nil, invalidRequestError("job id required")
 	}
 	dir := jobDir(state, id)
 	meta, err := readMeta(dir)
@@ -173,7 +173,7 @@ func readMeta(dir string) (*jobMeta, error) {
 		return nil, err
 	}
 	if m.ID == "" {
-		return nil, errors.New("invalid job metadata")
+		return nil, processStateError("invalid job metadata")
 	}
 	return &m, nil
 }
@@ -243,7 +243,7 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 
 	limit := p.Limit
 	if limit < 0 || limit > 1000 {
-		return nil, errors.New("job list limit is outside the hard limit")
+		return nil, limitExceededError("job list limit is outside the hard limit")
 	}
 	if limit == 0 {
 		limit = defaultJobListLimit

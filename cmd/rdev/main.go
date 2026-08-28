@@ -136,15 +136,20 @@ func main() {
 	if err != nil {
 		var envelope *proto.ErrorEnvelope
 		if errors.As(err, &envelope) {
-			fmt.Fprintf(os.Stderr,
-				"rdev: code=%s retryable=%t execution_state=%s operation_id=%s terminal=%t message=%s\n",
-				envelope.Code, envelope.Retryable, envelope.ExecutionState,
-				envelope.OperationID, envelope.Terminal, c.Secrets.Redact(envelope.Message))
+			fmt.Fprintln(os.Stderr, cliErrorLine(c, envelope))
 		} else {
 			fmt.Fprintf(os.Stderr, "rdev: %s\n", c.Secrets.Redact(err.Error()))
 		}
 		os.Exit(1)
 	}
+}
+
+func cliErrorLine(c *client.Client, envelope *proto.ErrorEnvelope) string {
+	return fmt.Sprintf(
+		"rdev: code=%s category=%s retry=%s retryable=%t execution_state=%s operation_id=%s terminal=%t message=%s",
+		envelope.Code, envelope.Category, envelope.Retry, envelope.Retryable, envelope.ExecutionState,
+		envelope.OperationID, envelope.Terminal, c.Secrets.Redact(envelope.Message),
+	)
 }
 
 func usage() {
@@ -625,23 +630,56 @@ func cmdSync(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(fs.pos) < 4 {
-		return errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]")
+		return errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete] [-max-output-bytes N]")
+	}
+	var maxOutputBytes int64
+	if raw, ok := fs.vals["max-output-bytes"]; ok {
+		var parseErr error
+		maxOutputBytes, parseErr = strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+		}
 	}
 	res, err := c.Sync(ctx, client.SyncOptions{
 		Host: fs.pos[0], Direction: fs.pos[1], Local: fs.pos[2], Remote: fs.pos[3],
 		Exclude: fs.repeat["exclude"], DryRun: fs.bools["dry-run"], Delete: fs.bools["delete"],
+		MaxOutputBytes: maxOutputBytes,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Print(res.Stdout)
-	if res.Stderr != "" {
-		fmt.Fprint(os.Stderr, res.Stderr)
+	stdout, stderr := []byte(res.Stdout), []byte(res.Stderr)
+	if res.StdoutB64 {
+		stdout, err = base64.StdEncoding.DecodeString(res.Stdout)
+		if err != nil {
+			return proto.NewError(proto.CodeInvalidFrame, "", proto.StateCompleted)
+		}
+	}
+	if res.StderrB64 {
+		stderr, err = base64.StdEncoding.DecodeString(res.Stderr)
+		if err != nil {
+			return proto.NewError(proto.CodeInvalidFrame, "", proto.StateCompleted)
+		}
+	}
+	_, _ = os.Stdout.Write(stdout)
+	_, _ = os.Stderr.Write(stderr)
+	if res.Truncated {
+		fmt.Fprint(os.Stderr, syncTruncationNotice(res))
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("rsync exited %d", res.ExitCode)
 	}
 	return nil
+}
+
+func syncTruncationNotice(res *client.SyncResult) string {
+	if res == nil || !res.Truncated {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\nrdev: sync output truncated stdout_retained=%d stdout_original=%d stdout_dropped=%d stderr_retained=%d stderr_original=%d stderr_dropped=%d\n",
+		res.StdoutTruncation.RetainedBytes, res.StdoutTruncation.OriginalBytes, res.StdoutTruncation.DroppedBytes,
+		res.StderrTruncation.RetainedBytes, res.StderrTruncation.OriginalBytes, res.StderrTruncation.DroppedBytes)
 }
 
 // ---------- hosts ----------

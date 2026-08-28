@@ -38,6 +38,7 @@ type operationRecord struct {
 	final       *proto.Response
 	finalBytes  int64
 	finished    bool
+	canceled    bool
 }
 
 // operationCache is intentionally process-local. A retry marked Replay that
@@ -134,14 +135,36 @@ func (c *operationCache) finish(record *operationRecord, response *proto.Respons
 	if record == nil {
 		return false
 	}
-	clone := cloneResponse(response)
-	encoded, marshalErr := json.Marshal(clone)
-	finalBytes := int64(len(encoded))
+	originalResponse := response
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if record.finished {
 		return false
 	}
+	if record.canceled && (response == nil || response.OK) {
+		requestID := ""
+		seq := uint64(1)
+		if response != nil {
+			requestID, seq = response.ID, max(response.Seq, 1)
+		}
+		code, state := proto.CodeCanceled, proto.StateCanceled
+		// Once a mutating handler has been accepted, a cooperative cancellation
+		// request cannot prove that no side effect occurred. A handler that races
+		// cancellation and reports success is therefore ambiguous, never safely
+		// canceled.
+		if record.class == proto.ClassMutating {
+			code, state = proto.CodeAmbiguousOutcome, proto.StatePossiblyExecuted
+		}
+		envelope := proto.NewError(code, record.operationID, state)
+		response = &proto.Response{
+			ID: requestID, OperationID: record.operationID, Type: proto.EventError,
+			Seq: seq, Terminal: true, Execution: state,
+			OK: false, Err: envelope.Message, Error: envelope,
+		}
+	}
+	clone := cloneResponse(response)
+	encoded, marshalErr := json.Marshal(clone)
+	finalBytes := int64(len(encoded))
 	for marshalErr == nil && c.bytes+finalBytes > c.byteCap && c.evictOneLocked(record) {
 	}
 	if clone == nil || marshalErr != nil || finalBytes <= 0 || finalBytes > c.byteCap || c.bytes+finalBytes > c.byteCap {
@@ -165,6 +188,9 @@ func (c *operationCache) finish(record *operationRecord, response *proto.Respons
 	}
 	record.finished = true
 	record.final = clone
+	if originalResponse != nil && clone != nil {
+		*originalResponse = *clone
+	}
 	record.finalBytes = finalBytes
 	c.bytes += finalBytes
 	record.lastUsed = c.clock.Now()
@@ -173,20 +199,25 @@ func (c *operationCache) finish(record *operationRecord, response *proto.Respons
 	return true
 }
 
-func (c *operationCache) cancel(clientID, operationID string) (found, terminal bool) {
+func (c *operationCache) cancel(clientID, operationID, targetOp string) (found, terminal, eligible bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	record := c.records[operationCacheKey(clientID, operationID)]
 	if record == nil {
-		return false, false
+		return false, false, false
+	}
+	descriptor, known := proto.LookupOperation(record.op)
+	if !known || descriptor.Disconnect != proto.DisconnectCancel || (targetOp != "" && targetOp != record.op) {
+		return true, record.finished, false
 	}
 	if record.finished {
-		return true, true
+		return true, true, true
 	}
+	record.canceled = true
 	if record.cancel != nil {
 		record.cancel()
 	}
-	return true, false
+	return true, false, true
 }
 
 func (c *operationCache) expireLocked(now time.Time) {
@@ -243,17 +274,22 @@ type earlyCancelStore struct {
 	clock    runtimeClock
 	capacity int
 	ttl      time.Duration
-	items    map[string]time.Time
+	items    map[string]earlyCancelEntry
+}
+
+type earlyCancelEntry struct {
+	created  time.Time
+	targetOp string
 }
 
 func newEarlyCancelStore(clock runtimeClock, capacity int, ttl time.Duration) *earlyCancelStore {
 	if clock == nil {
 		clock = realRuntimeClock{}
 	}
-	return &earlyCancelStore{clock: clock, capacity: capacity, ttl: ttl, items: make(map[string]time.Time)}
+	return &earlyCancelStore{clock: clock, capacity: capacity, ttl: ttl, items: make(map[string]earlyCancelEntry)}
 }
 
-func (s *earlyCancelStore) add(clientID, operationID string) error {
+func (s *earlyCancelStore) add(clientID, operationID, targetOp string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock.Now()
@@ -265,23 +301,23 @@ func (s *earlyCancelStore) add(clientID, operationID string) error {
 	if len(s.items) >= s.capacity {
 		return errors.New("early cancel capacity reached")
 	}
-	s.items[key] = now
+	s.items[key] = earlyCancelEntry{created: now, targetOp: targetOp}
 	return nil
 }
 
-func (s *earlyCancelStore) take(clientID, operationID string) bool {
+func (s *earlyCancelStore) take(clientID, operationID, targetOp string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireLocked(s.clock.Now())
 	key := operationCacheKey(clientID, operationID)
-	_, ok := s.items[key]
+	entry, ok := s.items[key]
 	delete(s.items, key)
-	return ok
+	return ok && entry.targetOp == targetOp
 }
 
 func (s *earlyCancelStore) expireLocked(now time.Time) {
-	for key, created := range s.items {
-		if now.Sub(created) >= s.ttl {
+	for key, entry := range s.items {
+		if now.Sub(entry.created) >= s.ttl {
 			delete(s.items, key)
 		}
 	}

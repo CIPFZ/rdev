@@ -313,6 +313,9 @@ const (
 	CodeQueueFull            ErrorCode = "resource.queue_full"
 	CodeWatcherLimit         ErrorCode = "resource.watcher_limit"
 	CodeSlowConsumer         ErrorCode = "resource.slow_consumer"
+	CodeObjectNotFound       ErrorCode = "object.not_found"
+	CodeProcessStartFailure  ErrorCode = "process.start_failed"
+	CodeProcessInvalidState  ErrorCode = "process.invalid_state"
 	CodeInternalFailure      ErrorCode = "internal.failure"
 )
 
@@ -341,6 +344,9 @@ var errorRegistry = map[ErrorCode]ErrorDescriptor{
 	CodeQueueFull:            errorDescriptor(CodeQueueFull, CategoryResource, "request queue is full", RetryDispositionAfterBackoff, true, true),
 	CodeWatcherLimit:         errorDescriptor(CodeWatcherLimit, CategoryResource, "job wait watcher limit reached", RetryDispositionAfterBackoff, true, true),
 	CodeSlowConsumer:         errorDescriptor(CodeSlowConsumer, CategoryResource, "stream consumer is too slow", RetryDispositionNever, false, true),
+	CodeObjectNotFound:       errorDescriptor(CodeObjectNotFound, CategoryStorage, "requested object was not found", RetryDispositionNever, false, true),
+	CodeProcessStartFailure:  errorDescriptor(CodeProcessStartFailure, CategoryProcess, "process could not be started", RetryDispositionNever, false, true),
+	CodeProcessInvalidState:  errorDescriptor(CodeProcessInvalidState, CategoryProcess, "process is not in the required state", RetryDispositionNever, false, true),
 	CodeInternalFailure:      errorDescriptor(CodeInternalFailure, CategoryInternal, "internal failure", RetryDispositionNever, false, true),
 }
 
@@ -375,6 +381,8 @@ func validExecutionState(state ExecutionState) bool {
 		return false
 	}
 }
+
+func ValidExecutionState(state ExecutionState) bool { return validExecutionState(state) }
 
 // ErrorEnvelope is the stable error shape shared by every protocol surface.
 // Message comes from the fixed registry; arbitrary remote text is intentionally

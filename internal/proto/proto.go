@@ -89,6 +89,9 @@ type Request struct {
 // by job_stop and are never implicitly converted into foreground cancellation.
 type CancelParams struct {
 	OperationID string `json:"operation_id"`
+	// TargetOp binds cancel-before-request tombstones to an operation whose
+	// registry policy explicitly permits foreground cancellation.
+	TargetOp string `json:"target_op,omitempty"`
 }
 
 // ExecParams describes a foreground command.

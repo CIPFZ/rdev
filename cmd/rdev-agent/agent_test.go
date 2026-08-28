@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -742,19 +742,17 @@ func TestJobLogsStaleOffsetPastEOF(t *testing.T) {
 	}
 }
 
-func TestJobLogsNegativeOffset(t *testing.T) {
+func TestJobLogsNegativeOffsetIsInvalidRequest(t *testing.T) {
 	state := t.TempDir()
 	dir := filepath.Join(state, "jobs", "j1")
 	os.MkdirAll(dir, 0o755)
 	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
 	os.WriteFile(filepath.Join(dir, "stdout"), []byte("a\nb\n"), 0o644)
 
-	res, err := jobLogs(&proto.JobParams{ID: "j1", SinceOffset: -5}, state)
-	if err != nil {
-		t.Fatalf("a negative offset should clamp to 0, not fail: %v", err)
-	}
-	if !strings.Contains(res.Logs, "a") || !strings.Contains(res.Logs, "b") {
-		t.Errorf("Logs = %q, want the whole file", res.Logs)
+	_, err := jobLogs(&proto.JobParams{ID: "j1", SinceOffset: -5}, state)
+	var typed *agentError
+	if !errors.As(err, &typed) || typed.kind != agentInvalid {
+		t.Fatalf("negative offset error = %v, want typed invalid request", err)
 	}
 }
 
@@ -1161,7 +1159,7 @@ func TestJobRmRoutedThroughHandle(t *testing.T) {
 // relies on to match replies to requests.
 func TestRespWriterSerializesConcurrentReplies(t *testing.T) {
 	var buf lockedBuffer
-	w := &respWriter{out: bufio.NewWriter(&buf)}
+	w := newRespWriter(&buf, nil)
 
 	const n = 50
 	var wg sync.WaitGroup

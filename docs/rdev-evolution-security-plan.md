@@ -971,15 +971,16 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 Phase 3 完成记录：
 
 - `internal/proto` 是 operation descriptor、error code、execution state、feature、stream event 和 hard limit 的唯一注册来源。client、agent、CLI 和 MCP 都消费同一组类型；未知 operation 和未知安全语义 fail closed。
-- client 为每个逻辑调用固定 caller/operation ID、deadline 和请求摘要。read-only/idempotent 只按注册策略受控重试；mutation 在 agent 内存去重仍能证明相同请求时复用 accepted/final，跨新 agent、重启或记录淘汰则返回 `ambiguous_outcome`。同 operation ID 的 op/digest 冲突明确拒绝。
+- client 为每个逻辑调用固定 caller/operation ID、适用操作的 deadline 和请求摘要。read-only/idempotent 只按注册策略受控重试；mutation 在 agent 内存去重仍能证明相同请求时复用 accepted/final，跨新 agent、重启或记录淘汰则返回 `ambiguous_outcome`。同 operation ID 的 op/digest 冲突明确拒绝。
 - agent 的去重表同时受 TTL、条目容量和 64 MiB 结果字节预算约束，运行中 accepted 记录不被淘汰；超出结果预算的 mutation 保留 compact ambiguous tombstone，不能退化成重新执行。该表是进程内故障窗口保护，不宣称跨重启 exactly-once；durable mutation journal 不借本阶段提前实现。
-- 前台命令拥有独立进程组。cancel/deadline/attached disconnect 精确终止目标组，detach job 保持独立；控制请求不进入普通队列。状态机执行 `accepted → progress/data* → final`，并在取消、终态、断连和 detach 竞态下保持唯一 terminal。
-- request/response NDJSON frame 使用共同 8 MiB 绝对上限；无换行超帧只读取 `limit+1` 即关闭污染连接。stderr 使用固定 64 KiB ring。read/output/line/wait/watcher/queue/window 参数经防负数和防溢出的绝对上限校验，调用方只能调低。
+- 前台命令拥有独立进程组。只有 registry 声明 `DisconnectCancel` 的前台操作接收 wire cancel/deadline，cancel target 和 early tombstone 均绑定 target op；已发送的独立 mutation 在 caller context 结束时返回 `possibly_executed`/`ambiguous_outcome`，cancel 与 handler success 竞态也不降格成确定 canceled。cancel/deadline/attached disconnect 精确终止目标组，detach job 保持独立；TERM 后的 leader 即使先退出也不会终止 escalation，agent 在保留 leader 未 reap、从而阻止 PID/PGID 复用的窗口内，对原 PGID 执行 grace 后检查/KILL。控制请求不进入普通队列。状态机执行 `accepted → progress/data* → final`，并在取消、终态、断连和 detach 竞态下保持唯一 terminal。
+- request/response NDJSON frame 使用共同 8 MiB 绝对上限；无换行超帧只读取 `limit+1` 即关闭污染连接。stderr 使用固定 64 KiB ring，bootstrap 辅助 SSH 输出也有固定保留上限。read/output/line/wait/watcher/queue/window 参数经防负数和防溢出的绝对上限校验，调用方只能在硬上限内选择。
 - `job_wait` 使用独立 worker/queue 和共享 watcher hub；相同 job fan-out 一个观察循环，waiter/watcher 都有上限，取消会解除订阅并在无人使用时回收。目录和 job list 改为增量有界选择，避免为列表预载全部 metadata。
-- streaming 通过 N/N-1 版本区间与 feature 交集协商。exec 的 data chunk 在进程仍运行时由 stdout/stderr copy 路径直接发出，受 frame budget、stream credit 和输出预算约束；writer 优先 terminal/cancel 等控制帧，慢 data consumer 不制造无界缓冲或阻塞其他流。CLI/MCP 最终投影明确带 `truncated`、retained/original/dropped bytes、operation ID、terminal 与 execution state。
-- 新增的观测词汇是固定低基数枚举；secret、argv、stdout/stderr 和远端路径不进入 label。测试使用临时目录、合成数据、fault injection/barrier，并覆盖响应丢失三种操作分类、restart/eviction/conflict、取消竞态、超大/无换行/二进制/无限输出、watcher fan-out/queue、N/N-1、唯一 terminal、慢消费者与 CLI/MCP 元数据。
+- streaming 通过 N/N-1 版本区间与 feature 交集协商。两端每条连接使用一个固定 writer loop、有界 control/data 队列、control 优先级与 queued+in-flight 总 frame budget；底层 write 超时会关闭污染 pipe、唤醒全部等待者，不按 write 创建 goroutine。exec data chunk 在进程仍运行时直接发出并受 stream credit/输出预算约束；慢 data consumer 只能造成带账本的丢弃或连接 teardown，不能无限阻塞 terminal/cancel。v3 final/error 必须匹配 request/operation ID、terminal 位、合法非空 execution state、OK/error 组合和嵌套结果元数据；重复 terminal 或 cancel 后 success 会作为协议错误关闭连接。legacy unary 只由协商版本选择，不再按 `Type==""` 猜测。
+- rsync stdout/stderr 不再使用无界 builder；两路持续 drain、各自有 retention cap，并返回 original/retained/dropped/truncated 与二进制 base64 标记。exec/read/rsync 的 binary wire value 在 client 端先 decode、对 raw bytes 脱敏、再 lossless encode，CLI 和官方 Go MCP SDK 投影同一安全账本。普通业务错误经 agent 的单一 typed mapping 边界转换：参数/资源、object not found、process start/state 分别使用稳定 registry code/category/retry/execution state，只有未知错误映射为 `internal.failure`，对外消息不含路径、argv 或 raw errno。
+- 新增的观测词汇是固定低基数枚举；secret、argv、stdout/stderr 和远端路径不进入 label。测试使用临时目录、合成数据、fake deadline、blocking writer 和 barrier，并覆盖响应丢失三种操作分类、restart/eviction/conflict、leader 早退且子进程忽略 TERM、cancel/deadline/disconnect、初始写与 data 写阻塞、精确 cancel 优先级、rsync Unicode/NUL/非 UTF-8 与无限输出、typed error 全链路投影、malformed/重复/cancel-to-success terminal、watcher fan-out/queue、N/N-1 以及官方 MCP SDK 元数据。
 
-兼容与残余边界：协议 3 的最低兼容版本是 2；v2 共同操作保留一元 fallback，但只有双方协商到对应 feature 才启用 v3 cancel、streaming、dedupe 和结构化截断。标准 MCP progress 仍依赖调用方提供 progress token，未提供时 MCP 返回最终聚合结果而不伪造实时通知。Phase 4 的百机连接池、idle TTL、job 磁盘预算、持久去重/事务日志和 job durable ownership 未在本阶段扩大范围。
+兼容与残余边界：协议 3 的最低兼容版本是 2；v2 共同操作保留一元 fallback，但只有双方协商到对应 feature 才启用 v3 cancel、streaming、dedupe 和结构化截断。writer 的固定预算保证等待者返回和污染连接关闭，不保证向已经停止读取的 peer 成功交付 control frame。标准 MCP progress 仍依赖调用方提供 progress token，未提供时 MCP 返回最终聚合结果而不伪造实时通知。rsync 截断账本描述本机保留内容，不提供被丢弃字节的持久归档。Phase 4 的百机连接池、idle TTL、detached job 磁盘预算、持久去重/事务日志和 job durable ownership 未在本阶段扩大范围。
 
 ### Phase 4：单进程百机 Connection Manager 与 job 耐久性
 

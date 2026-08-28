@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -76,7 +75,7 @@ func watcherKey(state, id string) string { return state + "\x00" + id }
 
 func (h *waitHub) subscribe(id, state string) (<-chan waitObservation, func(), error) {
 	if id == "" {
-		return nil, nil, errors.New("job id required")
+		return nil, nil, invalidRequestError("job id required")
 	}
 	key := watcherKey(state, id)
 
@@ -98,7 +97,7 @@ func (h *waitHub) subscribe(id, state string) (<-chan waitObservation, func(), e
 		meta, err := readMeta(jobDir(state, id))
 		if err != nil {
 			h.mu.Unlock()
-			return nil, nil, fmt.Errorf("job unavailable")
+			return nil, nil, objectNotFoundError(err)
 		}
 		w = &jobWatcher{
 			key: key, id: id, state: state, meta: meta,
@@ -185,13 +184,13 @@ func (h *waitHub) counts() (watchers, waiters int) {
 func waitBudget(p *proto.JobParams) (time.Duration, error) {
 	budget := p.WaitTimeoutSec
 	if budget < 0 {
-		return 0, errors.New("wait_timeout_sec must not be negative")
+		return 0, invalidRequestError("wait_timeout_sec must not be negative")
 	}
 	if budget == 0 {
 		budget = defaultWaitSec
 	}
 	if budget > maxWaitSec {
-		return 0, fmt.Errorf("wait_timeout_sec exceeds hard limit")
+		return 0, limitExceededError("wait_timeout_sec exceeds hard limit")
 	}
 	return time.Duration(budget) * time.Second, nil
 }
@@ -202,9 +201,12 @@ func jobWaitContext(ctx context.Context, hub *waitHub, p *proto.JobParams, state
 	}
 	budget, err := waitBudget(p)
 	if err != nil {
-		return nil, proto.NewError(proto.CodeLimitExceeded, "", proto.StateAccepted)
+		return nil, err
 	}
-	if p.TailOnExit < 0 || p.TailOnExit > hardLogTailLines {
+	if p.TailOnExit < 0 {
+		return nil, invalidRequestError("tail_on_exit must not be negative")
+	}
+	if p.TailOnExit > hardLogTailLines {
 		return nil, proto.NewError(proto.CodeLimitExceeded, "", proto.StateAccepted)
 	}
 	ids := p.IDs
@@ -222,6 +224,7 @@ func jobWaitContext(ctx context.Context, hub *waitHub, p *proto.JobParams, state
 		cancel func()
 		result *waitObservation
 		err    string
+		cause  error
 	}
 	subs := make([]*subscription, 0, len(ids))
 	for _, id := range ids {
@@ -240,13 +243,14 @@ func jobWaitContext(ctx context.Context, hub *waitHub, p *proto.JobParams, state
 				return nil, envelope
 			}
 			s.err = "job unavailable"
+			s.cause = subErr
 		} else {
 			defer cancel()
 		}
 		subs = append(subs, s)
 	}
 	if len(subs) == 0 {
-		return nil, errors.New("job_wait: no usable ids")
+		return nil, invalidRequestError("job_wait needs a usable id")
 	}
 
 	start := hub.clock.Now()
@@ -298,6 +302,7 @@ func jobWaitContext(ctx context.Context, hub *waitHub, p *proto.JobParams, state
 			w.Info = s.result.info
 			if s.result.err != nil {
 				w.Err = "job unavailable"
+				s.cause = s.result.err
 			}
 		} else if s.err == "" {
 			if meta, readErr := readMeta(jobDir(state, s.id)); readErr == nil {
@@ -318,7 +323,10 @@ func jobWaitContext(ctx context.Context, hub *waitHub, p *proto.JobParams, state
 	if len(p.IDs) == 0 {
 		w := res.Waited[0]
 		if w.Err != "" {
-			return nil, errors.New(w.Err)
+			if subs[0].cause != nil {
+				return nil, subs[0].cause
+			}
+			return nil, processStateError("job wait failed")
 		}
 		res.Info, res.Logs, res.LogsTruncation, res.Waited = w.Info, w.Logs, w.LogsTruncation, nil
 	}

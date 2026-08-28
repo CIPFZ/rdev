@@ -57,6 +57,58 @@ func TestCLIExecTruncationNoticePreservesByteAndTerminalMetadata(t *testing.T) {
 	}
 }
 
+func TestCLIErrorProjectionPreservesStableEnvelope(t *testing.T) {
+	c := client.New(func(string, string) (*transport.AgentBinary, error) { return nil, nil })
+	envelope := proto.NewError(proto.CodeObjectNotFound, "op_0123456789abcdef", proto.StateFailed)
+	line := cliErrorLine(c, envelope)
+	for _, wanted := range []string{
+		"code=object.not_found", "category=storage", "retry=never", "retryable=false",
+		"execution_state=failed", "operation_id=op_0123456789abcdef", "terminal=true",
+		"message=requested object was not found",
+	} {
+		if !strings.Contains(line, wanted) {
+			t.Fatalf("CLI error line %q missing %q", line, wanted)
+		}
+	}
+}
+
+func TestCLISyncTruncationNoticePreservesBothByteLedgers(t *testing.T) {
+	stdout, _ := proto.NewTruncation(4096, 128)
+	stderr, _ := proto.NewTruncation(512, 64)
+	notice := syncTruncationNotice(&client.SyncResult{
+		Truncated: true, StdoutTruncation: stdout, StderrTruncation: stderr,
+	})
+	for _, wanted := range []string{
+		"stdout_retained=128", "stdout_original=4096", "stdout_dropped=3968",
+		"stderr_retained=64", "stderr_original=512", "stderr_dropped=448",
+	} {
+		if !strings.Contains(notice, wanted) {
+			t.Fatalf("sync notice %q missing %q", notice, wanted)
+		}
+	}
+}
+
+func TestCLISyncLimitValidationUsesStableCodes(t *testing.T) {
+	c := client.New(func(string, string) (*transport.AgentBinary, error) { return nil, nil })
+	for _, tt := range []struct {
+		name string
+		raw  string
+		code proto.ErrorCode
+	}{
+		{name: "negative", raw: "-1", code: proto.CodeLimitExceeded},
+		{name: "above_hard_cap", raw: "600000", code: proto.CodeLimitExceeded},
+		{name: "integer_overflow", raw: "999999999999999999999999", code: proto.CodeInvalidRequest},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := cmdSync(t.Context(), c, []string{"dev", "push", "local", "remote", "-max-output-bytes", tt.raw})
+			var envelope *proto.ErrorEnvelope
+			if !errors.As(err, &envelope) || envelope.Code != tt.code || envelope.ExecutionState != proto.StateNotSent {
+				t.Fatalf("limit %q error = %v", tt.raw, err)
+			}
+		})
+	}
+}
+
 func TestProjectApprovalOutputKeepsAmbiguousFailure(t *testing.T) {
 	ambiguous := &session.ConfigWriteAmbiguousError{
 		Cause: errors.New("injected directory fsync failure"), Rollback: errors.New("injected rollback failure"),

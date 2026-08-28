@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
@@ -193,7 +192,7 @@ func TestConcurrentSweepAndRmDoNotDoubleCount(t *testing.T) {
 			if !r.OK {
 				// A filterless sweep is rejected by validation, which is a usage
 				// error rather than a race. Anything else is the bug under test.
-				if r.Job == nil && strings.Contains(r.Err, "needs an id") {
+				if r.Job == nil && r.Error != nil && r.Error.Code == proto.CodeInvalidRequest {
 					continue
 				}
 				t.Fatalf("round %d: a racer surfaced an error: %s", round, r.Err)

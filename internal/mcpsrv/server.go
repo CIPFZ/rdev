@@ -666,21 +666,27 @@ func registerFiles(s *mcp.Server, c *client.Client) {
 // ---------- sync ----------
 
 type SyncIn struct {
-	Host      string   `json:"host"`
-	Direction string   `json:"direction" jsonschema:"push sends local to remote; pull fetches remote to local."`
-	Local     string   `json:"local" jsonschema:"Local path. A trailing slash on a directory copies its contents rather than the directory itself."`
-	Remote    string   `json:"remote"`
-	Exclude   []string `json:"exclude,omitempty" jsonschema:"rsync exclude patterns, e.g. ['.git','*.pyc','.venv']."`
-	DryRun    bool     `json:"dry_run,omitempty" jsonschema:"Show what would transfer without changing anything."`
-	Delete    bool     `json:"delete,omitempty" jsonschema:"Delete destination files missing from the source. Destructive: prefer a dry_run first."`
+	Host           string   `json:"host"`
+	Direction      string   `json:"direction" jsonschema:"push sends local to remote; pull fetches remote to local."`
+	Local          string   `json:"local" jsonschema:"Local path. A trailing slash on a directory copies its contents rather than the directory itself."`
+	Remote         string   `json:"remote"`
+	Exclude        []string `json:"exclude,omitempty" jsonschema:"rsync exclude patterns, e.g. ['.git','*.pyc','.venv']."`
+	DryRun         bool     `json:"dry_run,omitempty" jsonschema:"Show what would transfer without changing anything."`
+	Delete         bool     `json:"delete,omitempty" jsonschema:"Delete destination files missing from the source. Destructive: prefer a dry_run first."`
+	MaxOutputBytes int64    `json:"max_output_bytes,omitempty" jsonschema:"Per-stream stdout/stderr retention cap. Zero uses the bounded default; values may only lower the hard cap."`
 }
 
 type SyncOut struct {
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr,omitempty"`
-	ExitCode int    `json:"exit_code"`
-	DryRun   bool   `json:"dry_run,omitempty"`
-	Command  string `json:"command"`
+	Stdout           string           `json:"stdout"`
+	Stderr           string           `json:"stderr,omitempty"`
+	StdoutB64        bool             `json:"stdout_b64,omitempty"`
+	StderrB64        bool             `json:"stderr_b64,omitempty"`
+	StdoutTruncation proto.Truncation `json:"stdout_truncation"`
+	StderrTruncation proto.Truncation `json:"stderr_truncation"`
+	Truncated        bool             `json:"truncated,omitempty"`
+	ExitCode         int              `json:"exit_code"`
+	DryRun           bool             `json:"dry_run,omitempty"`
+	Command          string           `json:"command"`
 }
 
 func registerSync(s *mcp.Server, c *client.Client) {
@@ -690,14 +696,16 @@ func registerSync(s *mcp.Server, c *client.Client) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SyncIn) (*mcp.CallToolResult, SyncOut, error) {
 		res, err := c.Sync(ctx, client.SyncOptions{
 			Host: in.Host, Direction: in.Direction, Local: in.Local, Remote: in.Remote,
-			Exclude: in.Exclude, DryRun: in.DryRun, Delete: in.Delete,
+			Exclude: in.Exclude, DryRun: in.DryRun, Delete: in.Delete, MaxOutputBytes: in.MaxOutputBytes,
 		})
 		if err != nil {
 			return nil, SyncOut{}, err
 		}
 		return nil, SyncOut{
 			Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode,
-			DryRun: res.DryRun, Command: res.Command,
+			StdoutB64: res.StdoutB64, StderrB64: res.StderrB64,
+			StdoutTruncation: res.StdoutTruncation, StderrTruncation: res.StderrTruncation,
+			Truncated: res.Truncated, DryRun: res.DryRun, Command: res.Command,
 		}, nil
 	})
 }

@@ -30,6 +30,7 @@ import (
 	"unicode"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
+	"github.com/CIPFZ/rdev/internal/framewriter"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -128,11 +129,18 @@ type Conn struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 	stderr *lockedBuilder
-	// writeMu serializes writes to the agent's stdin. Separate from mu on purpose:
-	// a write to a full pipe blocks until the agent drains it, and holding mu
-	// through that would stop readLoop from delivering the very replies that let
-	// the agent make progress.
-	writeMu sync.Mutex
+	// writer is the sole owner of stdin writes. Its bounded priority queues and
+	// fixed watchdog make request cancellation independent of a blocked earlier
+	// write, including ssh pipes that do not implement SetWriteDeadline.
+	writer       *framewriter.Writer
+	writeTimeout time.Duration
+	waitOnce     sync.Once
+	cmdDone      chan struct{}
+	admitOnce    sync.Once
+	admission    chan struct{}
+	doneOnce     sync.Once
+	signalOnce   sync.Once
+	done         chan struct{}
 
 	seq    int
 	closed bool
@@ -142,7 +150,9 @@ type Conn struct {
 	// streams tracks event ordering for v3 responses. Non-terminal frames are
 	// validated and consumed by readLoop; only the one terminal frame is handed
 	// to Do, so a slow caller cannot block response dispatch for other streams.
-	streams map[string]streamProgress
+	streams        map[string]streamProgress
+	completed      map[string]struct{}
+	completedOrder []string
 	// readErr records why the reader stopped, so a caller blocked on a reply
 	// learns the real cause instead of a bare timeout.
 	readErr error
@@ -165,15 +175,60 @@ type Conn struct {
 }
 
 type streamProgress struct {
-	state   proto.StreamState
-	lastSeq uint64
+	state       proto.StreamState
+	lastSeq     uint64
+	operationID string
+	typed       bool
+	streaming   bool
+	abandoned   bool
+	canceled    bool
 }
+
+const maxTrackedStreams = 256
 
 // agentStderrTailBytes bounds diagnostic output retained for the lifetime of an
 // SSH connection. A remote agent (or a noisy profile) controls this stream, so
 // keeping its complete history would let a long-lived connection grow without
 // bound.
 const agentStderrTailBytes = 64 << 10
+
+// Auxiliary SSH commands are expected to return a digest or a short platform
+// probe. Continue draining a hostile/noisy peer, but never retain an unbounded
+// stdout history while bootstrap is in progress.
+const auxiliaryStdoutBytes = 1 << 20
+
+type boundedHeadBuilder struct {
+	buf       []byte
+	limit     int
+	original  int64
+	truncated bool
+}
+
+func (b *boundedHeadBuilder) Write(p []byte) (int, error) {
+	n := len(p)
+	if int64(n) > int64(^uint64(0)>>1)-b.original {
+		b.original = int64(^uint64(0) >> 1)
+	} else {
+		b.original += int64(n)
+	}
+	limit := b.limit
+	if limit <= 0 || limit > auxiliaryStdoutBytes {
+		limit = auxiliaryStdoutBytes
+	}
+	if b.buf == nil {
+		b.buf = make([]byte, 0, limit)
+	}
+	if len(b.buf) < limit {
+		keep := min(n, limit-len(b.buf))
+		b.buf = append(b.buf, p[:keep]...)
+	}
+	if n > 0 && int64(len(b.buf)) < b.original {
+		b.truncated = true
+	}
+	return n, nil
+}
+
+func (b *boundedHeadBuilder) String() string { return string(b.buf) }
 
 // lockedBuilder is a fixed-capacity byte ring safe for concurrent append and
 // read. The historical name is retained because package tests construct it
@@ -259,11 +314,13 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	}
 
 	c := &Conn{
-		host:    host,
-		stderr:  &lockedBuilder{},
-		pending: make(map[string]chan *proto.Response),
-		streams: make(map[string]streamProgress),
+		host:      host,
+		stderr:    &lockedBuilder{},
+		pending:   make(map[string]chan *proto.Response),
+		streams:   make(map[string]streamProgress),
+		completed: make(map[string]struct{}),
 	}
+	c.ensureLifecycle()
 
 	ctl, err := controlPath(host)
 	if err != nil {
@@ -339,9 +396,11 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	}
 	c.protocolVersion = negotiated
 	c.features = make(map[proto.Feature]bool)
-	for _, feature := range resp.Ping.Features {
-		if proto.IsKnownFeature(feature) {
-			c.features[feature] = true
+	if negotiated >= 3 {
+		for _, feature := range resp.Ping.Features {
+			if proto.IsKnownFeature(feature) {
+				c.features[feature] = true
+			}
 		}
 	}
 	return c, nil
@@ -543,15 +602,19 @@ func (c *Conn) runSSH(ctx context.Context, argv ...string) (string, error) {
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, "ssh", args...)
-	var out, errBuf strings.Builder
+	var out boundedHeadBuilder
+	errBuf := &lockedBuilder{}
 	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
+	cmd.Stderr = errBuf
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(errBuf.String())
 		if msg == "" {
 			msg = err.Error()
 		}
 		return out.String(), errors.New(msg)
+	}
+	if out.truncated {
+		return "", fmt.Errorf("auxiliary ssh stdout exceeded %d-byte retention limit", auxiliaryStdoutBytes)
 	}
 	return out.String(), nil
 }
@@ -1093,8 +1156,8 @@ func (c *Conn) installAgent(ctx context.Context, data []byte, want string) error
 	// bytes.NewReader, not strings.NewReader(string(data)): the latter copies the
 	// whole embedded agent (~9 MB) for nothing.
 	cmd.Stdin = bytes.NewReader(data)
-	var errBuf strings.Builder
-	cmd.Stderr = &errBuf
+	errBuf := &lockedBuilder{}
+	cmd.Stderr = errBuf
 	if err := cmd.Run(); err != nil {
 		return agentInstallError(err, errBuf.String())
 	}
@@ -1128,6 +1191,15 @@ func (c *Conn) startAgent(ctx context.Context) error {
 	c.cmd = cmd
 	c.stdin = stdin
 	c.stdout = newBufReader(stdout)
+	c.cmdDone = make(chan struct{})
+	writeTimeout := c.writeTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = 2 * time.Second
+	}
+	c.writer = framewriter.New(stdin, stdin.Close, framewriter.Config{
+		MaxFrames: 64, MaxBytes: 2 * proto.AbsoluteRequestFrameBytes,
+		WriteTimeout: writeTimeout,
+	}, c.stopAfterWriteFailure)
 	// One goroutine owns the reader from here on, so callers never touch the pipe
 	// and cannot consume each other's replies.
 	go c.readLoop()
@@ -1141,6 +1213,15 @@ func (c *Conn) startAgent(ctx context.Context) error {
 // held only long enough to register the pending call. A minutes-long job_wait
 // therefore does not stall an exec on the same host.
 func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, error) {
+	c.ensureLifecycle()
+	select {
+	case c.admission <- struct{}{}:
+		defer func() { <-c.admission }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.done:
+		return nil, errors.New("connection closed")
+	}
 	c.mu.Lock()
 	if c.closed {
 		err := c.readErr
@@ -1150,6 +1231,10 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 		}
 		return nil, errors.New("connection closed")
 	}
+	if len(c.streams) >= maxTrackedStreams {
+		c.mu.Unlock()
+		return nil, proto.NewError(proto.CodeQueueFull, req.OperationID, proto.StateNotSent)
+	}
 	c.seq++
 	req.ID = fmt.Sprint(c.seq)
 	ch := make(chan *proto.Response, 1)
@@ -1157,42 +1242,39 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	if c.streams == nil {
 		c.streams = make(map[string]streamProgress)
 	}
-	c.streams[req.ID] = streamProgress{state: proto.StreamNew}
-	stdin := c.stdin
+	c.streams[req.ID] = streamProgress{
+		state: proto.StreamNew, operationID: req.OperationID,
+		typed: c.protocolVersion >= 3, streaming: c.features[proto.FeatureStreaming],
+	}
+	writer := c.writer
 	c.mu.Unlock()
 
 	line, err := json.Marshal(req)
 	if err != nil {
-		c.abandon(req.ID)
+		c.discard(req.ID)
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 	if len(line) > c.effectiveRequestFrameLimit() {
-		c.abandon(req.ID)
+		c.discard(req.ID)
 		return nil, fmt.Errorf("request frame: %w", errFrameTooLarge)
 	}
 
-	// Write under writeMu, not mu: a full pipe blocks here until the agent reads,
-	// and readLoop must stay free to deliver replies meanwhile.
-	c.writeMu.Lock()
-	writeErr := writeAll(stdin, append(line, '\n'))
-	c.writeMu.Unlock()
+	if writer == nil {
+		c.abandon(req.ID)
+		return nil, errors.New("connection writer is unavailable")
+	}
+	writeErr := writer.Write(ctx, append(line, '\n'), framewriter.Control)
 	if writeErr != nil {
+		if ctx.Err() != nil {
+			return nil, c.finishContextCancellation(req, ctx.Err())
+		}
 		c.abandon(req.ID)
 		return nil, fmt.Errorf("write request to agent: %w", writeErr)
 	}
 
 	select {
 	case <-ctx.Done():
-		// Best-effort protocol cancellation targets only this operation. The
-		// cancel frame has its own request identity and does not wait for a reply;
-		// the target's terminal frame is discarded after this caller returns.
-		c.sendCancel(req)
-		c.abandon(req.ID)
-		code := proto.CodeCanceled
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			code = proto.CodeDeadlineExceeded
-		}
-		return nil, fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), ctx.Err())
+		return nil, c.finishContextCancellation(req, ctx.Err())
 	case resp := <-ch:
 		if resp == nil {
 			c.mu.Lock()
@@ -1213,6 +1295,32 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	}
 }
 
+// finishContextCancellation applies the operation registry's disconnect
+// contract. Only foreground operations whose contract is cancel may receive a
+// protocol cancel. Losing interest in an already-sent mutation that completes
+// independently is an ambiguous outcome, not proof that it was canceled.
+func (c *Conn) finishContextCancellation(req *proto.Request, cause error) error {
+	descriptor, known := proto.LookupOperation(req.Op)
+	if known && descriptor.Disconnect == proto.DisconnectCancel && c.SupportsFeature(proto.FeatureCancel) {
+		c.sendCancel(req)
+		c.cancelAbandon(req.ID)
+		code := proto.CodeCanceled
+		if errors.Is(cause, context.DeadlineExceeded) {
+			code = proto.CodeDeadlineExceeded
+		}
+		return fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), cause)
+	}
+	c.abandon(req.ID)
+	if known && descriptor.Class == proto.ClassMutating {
+		return fmt.Errorf("%w: %w", proto.NewError(proto.CodeAmbiguousOutcome, req.OperationID, proto.StatePossiblyExecuted), cause)
+	}
+	code := proto.CodeCanceled
+	if errors.Is(cause, context.DeadlineExceeded) {
+		code = proto.CodeDeadlineExceeded
+	}
+	return fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), cause)
+}
+
 func (c *Conn) sendCancel(target *proto.Request) {
 	if target == nil || target.OperationID == "" || target.ClientID == "" || !c.SupportsFeature(proto.FeatureCancel) {
 		return
@@ -1222,41 +1330,35 @@ func (c *Conn) sendCancel(target *proto.Request) {
 		return
 	}
 	c.mu.Lock()
-	if c.closed {
+	if c.closed || len(c.streams) >= maxTrackedStreams {
 		c.mu.Unlock()
 		return
 	}
 	c.seq++
 	requestID := fmt.Sprint(c.seq)
-	stdin := c.stdin
+	writer := c.writer
+	if c.streams == nil {
+		c.streams = make(map[string]streamProgress)
+	}
+	c.streams[requestID] = streamProgress{
+		state: proto.StreamNew, operationID: cancelID, abandoned: true,
+		typed: c.protocolVersion >= 3, streaming: c.features[proto.FeatureStreaming],
+	}
 	c.mu.Unlock()
 	request := &proto.Request{
 		ID: requestID, OperationID: cancelID, ClientID: target.ClientID,
-		Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: target.OperationID},
+		Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: target.OperationID, TargetOp: target.Op},
 	}
 	line, err := json.Marshal(request)
 	if err != nil || len(line) > c.effectiveRequestFrameLimit() {
+		c.discard(requestID)
 		return
 	}
-	c.writeMu.Lock()
-	_ = writeAll(stdin, append(line, '\n'))
-	c.writeMu.Unlock()
-}
-
-// writeAll handles writers that legally accept only a prefix without returning
-// an error.
-func writeAll(w io.Writer, p []byte) error {
-	for len(p) > 0 {
-		n, err := w.Write(p)
-		if err != nil {
-			return err
+	if writer != nil {
+		if err := writer.Enqueue(append(line, '\n'), framewriter.Critical); err != nil {
+			c.abandon(requestID)
 		}
-		if n <= 0 || n > len(p) {
-			return io.ErrShortWrite
-		}
-		p = p[n:]
 	}
-	return nil
 }
 
 // abandon drops a pending entry whose caller gave up waiting.
@@ -1264,7 +1366,41 @@ func (c *Conn) abandon(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.pending, id)
+	if progress, ok := c.streams[id]; ok {
+		progress.abandoned = true
+		c.streams[id] = progress
+	}
+}
+
+// cancelAbandon records the semantic cancellation as well as the caller no
+// longer waiting. A peer must not turn that operation into a successful typed
+// terminal after the cancel boundary.
+func (c *Conn) cancelAbandon(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pending, id)
+	if progress, ok := c.streams[id]; ok {
+		progress.abandoned = true
+		progress.canceled = true
+		c.streams[id] = progress
+	}
+}
+
+func (c *Conn) discard(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pending, id)
 	delete(c.streams, id)
+}
+
+func (c *Conn) ensureLifecycle() {
+	c.admitOnce.Do(func() { c.admission = make(chan struct{}, 64) })
+	c.doneOnce.Do(func() { c.done = make(chan struct{}) })
+}
+
+func (c *Conn) signalClosed() {
+	c.ensureLifecycle()
+	c.signalOnce.Do(func() { close(c.done) })
 }
 
 // readLoop routes agent replies to waiting callers until the stream ends.
@@ -1290,24 +1426,37 @@ func (c *Conn) readLoop() {
 		}
 
 		c.mu.Lock()
-		ch, ok := c.pending[resp.ID]
-		terminal := resp.Type == "" || resp.Terminal || resp.Type == proto.EventFinal || resp.Type == proto.EventError
-		if ok && resp.Type != "" {
-			progress := c.streams[resp.ID]
+		ch, waiting := c.pending[resp.ID]
+		progress, tracked := c.streams[resp.ID]
+		_, duplicate := c.completed[resp.ID]
+		if duplicate || !tracked {
+			c.mu.Unlock()
+			c.stopAfterReadFailure(proto.NewError(proto.CodeInvalidEvent, resp.OperationID, proto.StateAccepted))
+			return
+		}
+		terminal, validateErr := validateResponseFrame(&resp, progress)
+		if validateErr != nil {
+			c.mu.Unlock()
+			c.stopAfterReadFailure(validateErr)
+			return
+		}
+		if progress.typed {
 			state, seq, stateErr := proto.AdvanceStreamState(progress.state, progress.lastSeq, resp.Type, resp.Seq)
 			if stateErr != nil {
 				c.mu.Unlock()
 				c.stopAfterReadFailure(proto.NewError(proto.CodeInvalidEvent, resp.OperationID, proto.StateAccepted))
 				return
 			}
-			c.streams[resp.ID] = streamProgress{state: state, lastSeq: seq}
+			progress.state, progress.lastSeq = state, seq
+			c.streams[resp.ID] = progress
 		}
-		if ok && terminal {
+		if terminal {
 			delete(c.pending, resp.ID)
 			delete(c.streams, resp.ID)
+			c.rememberCompletedLocked(resp.ID)
 		}
 		c.mu.Unlock()
-		if ok && terminal {
+		if waiting && terminal {
 			ch <- &resp
 			continue
 		}
@@ -1316,28 +1465,178 @@ func (c *Conn) readLoop() {
 	}
 }
 
+func validateResponseFrame(resp *proto.Response, progress streamProgress) (bool, error) {
+	invalid := func(state proto.ExecutionState) (bool, error) {
+		return false, proto.NewError(proto.CodeInvalidEvent, progress.operationID, state)
+	}
+	if resp == nil || resp.ID == "" {
+		return invalid(proto.StateAccepted)
+	}
+	if !progress.typed {
+		if resp.Type != "" {
+			return invalid(proto.StateAccepted)
+		}
+		return true, nil
+	}
+	if resp.Type == "" || resp.OperationID == "" || resp.OperationID != progress.operationID {
+		return invalid(proto.StateAccepted)
+	}
+	terminal := resp.Type == proto.EventFinal || resp.Type == proto.EventError
+	if resp.Terminal != terminal || !proto.ValidExecutionState(resp.Execution) {
+		return invalid(proto.StateAccepted)
+	}
+	if terminal {
+		switch resp.Type {
+		case proto.EventFinal:
+			if progress.canceled || !resp.OK || resp.Error != nil || resp.Err != "" || resp.Execution != proto.StateCompleted {
+				return invalid(proto.StateCompleted)
+			}
+			if !terminalMetadataMatches(resp) {
+				return invalid(proto.StateCompleted)
+			}
+		case proto.EventError:
+			if resp.OK || resp.Error == nil || resp.Error.Validate() != nil ||
+				resp.Error.OperationID != resp.OperationID || resp.Error.ExecutionState != resp.Execution ||
+				resp.Err != resp.Error.Message || !resp.Error.Terminal ||
+				!validTerminalErrorState(resp.Error.Code, resp.Execution, progress.state) || !terminalMetadataMatches(resp) {
+				return invalid(proto.StatePossiblyExecuted)
+			}
+		}
+		return true, nil
+	}
+	if !resp.OK || resp.Error != nil || resp.Execution != proto.StateAccepted {
+		return invalid(proto.StateAccepted)
+	}
+	if (resp.Type == proto.EventData || resp.Type == proto.EventProgress) && !progress.streaming {
+		return invalid(proto.StateAccepted)
+	}
+	if resp.Type == proto.EventData && resp.Data == nil {
+		return invalid(proto.StateAccepted)
+	}
+	if resp.Type == proto.EventProgress && resp.Progress == nil {
+		return invalid(proto.StateAccepted)
+	}
+	return false, nil
+}
+
+func validTerminalErrorState(code proto.ErrorCode, state proto.ExecutionState, phase proto.StreamState) bool {
+	switch code {
+	case proto.CodeCanceled, proto.CodeDeadlineExceeded:
+		return state == proto.StateCanceled
+	case proto.CodeAmbiguousOutcome:
+		return state == proto.StatePossiblyExecuted || state == proto.StateAmbiguous
+	}
+	if phase == proto.StreamNew {
+		return state == proto.StateNotSent
+	}
+	if code == proto.CodeInternalFailure || code == proto.CodeTransportUnavailable || code == proto.CodeFrameTooLarge {
+		return state == proto.StateFailed || state == proto.StatePossiblyExecuted || state == proto.StateAmbiguous
+	}
+	return state == proto.StateFailed
+}
+
+func terminalMetadataMatches(response *proto.Response) bool {
+	match := func(operationID string, terminal bool, state proto.ExecutionState) bool {
+		return operationID == response.OperationID && terminal == response.Terminal && state == response.Execution
+	}
+	if response.Exec != nil && !match(response.Exec.OperationID, response.Exec.Terminal, response.Exec.Execution) {
+		return false
+	}
+	if response.Read != nil && !match(response.Read.OperationID, response.Read.Terminal, response.Read.Execution) {
+		return false
+	}
+	if response.Cat != nil && !match(response.Cat.OperationID, response.Cat.Terminal, response.Cat.Execution) {
+		return false
+	}
+	if response.Job != nil && !match(response.Job.OperationID, response.Job.Terminal, response.Job.Execution) {
+		return false
+	}
+	if response.Job != nil {
+		checkInfo := func(info *proto.JobInfo) bool {
+			return info == nil || match(info.OperationID, info.Terminal, info.Execution)
+		}
+		if !checkInfo(response.Job.Info) {
+			return false
+		}
+		for _, info := range response.Job.List {
+			if !checkInfo(info) {
+				return false
+			}
+		}
+		for _, waited := range response.Job.Waited {
+			if waited != nil && !checkInfo(waited.Info) {
+				return false
+			}
+		}
+	}
+	if response.List != nil && !match(response.List.OperationID, response.List.Terminal, response.List.Execution) {
+		return false
+	}
+	return true
+}
+
+func (c *Conn) rememberCompletedLocked(id string) {
+	const terminalHistory = 256
+	if c.completed == nil {
+		c.completed = make(map[string]struct{})
+	}
+	c.completed[id] = struct{}{}
+	c.completedOrder = append(c.completedOrder, id)
+	if len(c.completedOrder) > terminalHistory {
+		delete(c.completed, c.completedOrder[0])
+		c.completedOrder = c.completedOrder[1:]
+	}
+}
+
 // stopAfterReadFailure both wakes callers and tears down the underlying stream.
 // Once a response frame is oversized or malformed its newline framing is no
 // longer trustworthy, so merely marking Conn closed would leak the SSH process:
 // Close observes the closed bit and deliberately becomes a no-op.
 func (c *Conn) stopAfterReadFailure(err error) {
-	c.failAllPending(err)
-
 	c.mu.Lock()
-	stdin := c.stdin
+	writer := c.writer
+	c.mu.Unlock()
+	if writer != nil {
+		writer.Fail(err)
+		return
+	}
+	c.stopAfterWriteFailure(err)
+}
+
+// stopAfterWriteFailure is invoked by the fixed writer watchdog. Publishing the
+// failure and waking pending calls happens before closing or waiting on process
+// resources, so an implementation whose Close is itself slow cannot pin Do.
+func (c *Conn) stopAfterWriteFailure(err error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
 	cmd := c.cmd
 	c.mu.Unlock()
-	if stdin != nil {
-		_ = stdin.Close()
-	}
+	c.failAllPending(err)
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
-		go cmd.Wait()
+		c.startCommandWait(cmd)
 	}
+}
+
+func (c *Conn) startCommandWait(cmd *exec.Cmd) <-chan struct{} {
+	c.waitOnce.Do(func() {
+		if c.cmdDone == nil {
+			c.cmdDone = make(chan struct{})
+		}
+		go func() {
+			_ = cmd.Wait()
+			close(c.cmdDone)
+		}()
+	})
+	return c.cmdDone
 }
 
 // failAllPending wakes every waiter after the reader stops.
 func (c *Conn) failAllPending(err error) {
+	c.signalClosed()
 	c.mu.Lock()
 	if c.readErr == nil {
 		c.readErr = err
@@ -1437,13 +1736,18 @@ func (c *Conn) SSHArgs() []string { return c.sshBase() }
 // Close terminates the agent session. The ControlMaster is left to expire on
 // its own ControlPersist timer, keeping reconnects fast.
 func (c *Conn) Close() error {
+	c.signalClosed()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closeLocked()
-}
-
-func (c *Conn) closeLocked() error {
 	if c.closed {
+		cmd := c.cmd
+		cmdDone := c.cmdDone
+		c.mu.Unlock()
+		if cmd != nil && cmd.Process != nil && cmdDone != nil {
+			select {
+			case <-cmdDone:
+			case <-time.After(2 * time.Second):
+			}
+		}
 		return nil
 	}
 	c.closed = true
@@ -1456,22 +1760,27 @@ func (c *Conn) closeLocked() error {
 	pending := c.pending
 	c.pending = make(map[string]chan *proto.Response)
 	c.streams = make(map[string]streamProgress)
+	writer := c.writer
+	stdin := c.stdin
+	cmd := c.cmd
+	c.mu.Unlock()
 	for _, ch := range pending {
 		select {
 		case ch <- nil:
 		default: // buffered channel already holds a reply
 		}
 	}
-	if c.stdin != nil {
-		c.stdin.Close() // EOF makes the agent exit its read loop cleanly
+	if writer != nil {
+		writer.Close()
+	} else if stdin != nil {
+		_ = stdin.Close() // EOF makes the agent exit its read loop cleanly
 	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		done := make(chan struct{})
-		go func() { c.cmd.Wait(); close(done) }()
+	if cmd != nil && cmd.Process != nil {
+		done := c.startCommandWait(cmd)
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			c.cmd.Process.Kill()
+			_ = cmd.Process.Kill()
 			<-done
 		}
 	}

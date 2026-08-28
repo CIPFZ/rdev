@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,7 +35,7 @@ const (
 
 func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.Spec == nil || len(p.Spec.Argv) == 0 {
-		return nil, errors.New("job spec with argv required")
+		return nil, invalidRequestError("job spec with argv required")
 	}
 
 	id := newJobID()
@@ -82,7 +81,7 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start job: %w", err)
+		return nil, processStartError(err)
 	}
 
 	meta := &jobMeta{
@@ -109,10 +108,10 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 
 func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.ID == "" {
-		return nil, errors.New("job id required")
+		return nil, invalidRequestError("job id required")
 	}
 	if p.GraceSec < 0 || p.GraceSec > hardExecTimeoutSec {
-		return nil, errors.New("grace_sec is outside the hard limit")
+		return nil, limitExceededError("grace_sec is outside the hard limit")
 	}
 	dir := jobDir(state, p.ID)
 	meta, err := readMeta(dir)
@@ -121,8 +120,12 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 
 	sig := syscall.SIGTERM
-	if strings.EqualFold(p.Signal, "KILL") {
+	switch {
+	case p.Signal == "", strings.EqualFold(p.Signal, "TERM"):
+	case strings.EqualFold(p.Signal, "KILL"):
 		sig = syscall.SIGKILL
+	default:
+		return nil, invalidRequestError("signal must be TERM or KILL")
 	}
 
 	// Signal the whole process group (negative pid). Because jobStart used
@@ -138,7 +141,7 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		if pidErr != nil {
 			child := readChildPID(dir)
 			if child <= 0 || syscall.Kill(child, sig) != nil {
-				return nil, fmt.Errorf("signal job %s (pid %d): %w", p.ID, meta.PID, groupErr)
+				return nil, processStateError("job process is unavailable")
 			}
 			// Also sweep the orphan's own group, in case it spawned children.
 			syscall.Kill(-child, sig)

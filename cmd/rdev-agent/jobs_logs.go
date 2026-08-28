@@ -9,7 +9,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,14 +28,14 @@ const maxLogLineLen = 1 << 20
 
 func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.ID == "" {
-		return nil, errors.New("job id required")
+		return nil, invalidRequestError("job id required")
 	}
 	stream := p.Stream
 	if stream == "" {
 		stream = "stdout"
 	}
 	if stream != "stdout" && stream != "stderr" {
-		return nil, fmt.Errorf("stream must be stdout or stderr, got %q", stream)
+		return nil, invalidRequestError("stream must be stdout or stderr")
 	}
 
 	path := filepath.Join(jobDir(state, p.ID), stream)
@@ -50,14 +49,12 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, err
 	}
 
-	// Clamp the offset to the file: a caller polling incrementally can hold a
-	// next_offset from before the log was rotated or truncated, and the
-	// resulting negative length would panic in make. Treat a stale offset as
-	// "nothing new to read" rather than an error, since the caller's next poll
-	// with the returned offset then recovers on its own.
+	// Clamp a positive stale offset to the file after rejecting a negative wire
+	// value. A rotated/truncated log is a legitimate race; a negative offset is
+	// an invalid request and must not silently change meaning.
 	since := p.SinceOffset
 	if since < 0 {
-		since = 0
+		return nil, invalidRequestError("since_offset must not be negative")
 	}
 	if since > info.Size() {
 		since = info.Size()
@@ -72,13 +69,13 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 
 	tail := p.TailLines
 	if tail < 0 || tail > hardLogTailLines {
-		return nil, errors.New("tail_lines is outside the hard limit")
+		return nil, limitExceededError("tail_lines is outside the hard limit")
 	}
 	if tail == 0 {
 		tail = defaultLogTail
 	}
 	if int64(len(p.Grep)) > proto.AbsoluteLineBytes {
-		return nil, errors.New("grep is outside the hard line limit")
+		return nil, limitExceededError("grep is outside the hard line limit")
 	}
 
 	// Fast path: plain "tail the last N lines". Seek backward from the end instead
