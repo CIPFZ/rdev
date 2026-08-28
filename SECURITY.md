@@ -123,6 +123,23 @@ The current release is a single-process client rather than the planned shared
 config approval, strict process-argument validation, SSH host-key verification,
 in-memory secret storage, and narrow file permissions are the present controls.
 
+Protocol-3 mutation deduplication is deliberately process-local, bounded by both
+capacity and TTL, and keyed by caller identity, operation ID, operation type, and
+request digest. It prevents duplicate execution while the accepting agent retains
+the record, but it is not a durable transaction log. After agent restart, cache
+eviction, or reconnect through a newly started SSH agent, an unprovable mutation
+outcome is returned as `ambiguous_outcome`; callers must reconcile state rather
+than retry with a new operation ID. Protocol-2 peers remain compatible for common
+unary operations but do not acquire protocol-3 cancel, streaming, deduplication,
+or structured truncation guarantees.
+
+Protocol cancellation and disconnect cleanup apply to attached foreground
+operations and target only their dedicated process groups. Detached jobs have an
+independent supervisor lifetime and intentionally survive the control connection;
+their durable storage budgets and cross-process ownership model remain Phase 4/5
+work. The current hard memory, frame, watcher, queue, and output limits do not cap
+the size of detached job log files on disk.
+
 Tier and capability claims are maintained in the README and the machine-readable
 support snapshot. Build-only platforms are not promoted to supported runtime
 tiers without isolated real-SSH and rsync certification.

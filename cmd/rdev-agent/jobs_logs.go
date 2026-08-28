@@ -20,6 +20,7 @@ import (
 )
 
 const defaultLogTail = 200
+const hardLogTailLines = 1000
 
 // maxLogLineLen bounds a single log line. A process emitting one enormous line
 // (a minified bundle, a base64 blob) should not be able to make the agent
@@ -70,8 +71,14 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	res := &proto.JobResult{LogSize: info.Size()}
 
 	tail := p.TailLines
-	if tail <= 0 {
+	if tail < 0 || tail > hardLogTailLines {
+		return nil, errors.New("tail_lines is outside the hard limit")
+	}
+	if tail == 0 {
 		tail = defaultLogTail
+	}
+	if int64(len(p.Grep)) > proto.AbsoluteLineBytes {
+		return nil, errors.New("grep is outside the hard line limit")
 	}
 
 	// Fast path: plain "tail the last N lines". Seek backward from the end instead
@@ -84,31 +91,31 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 			return nil, err
 		}
 		res.Logs = logs
+		res.LogsTruncation, _ = proto.NewTruncation(info.Size(), int64(len(logs)))
 		res.NextOffset = info.Size()
 		return res, nil
 	}
 
-	// Otherwise stream the region, keeping only the lines that will be returned.
+	// Otherwise stream a fixed snapshot of the region, keeping only the lines
+	// that will be returned. Limiting to the size observed above makes the byte
+	// accounting exact even if the running job appends while this call scans.
 	//
 	// Reading it whole would allocate the entire span: measured at 412 MB to
 	// return 1900 bytes from a 190 MB log, which is enough to OOM a shared dev box
 	// during a long batch. Grep and tail both reduce, so neither needs the full
 	// text in memory at once.
-	scanner := bufio.NewScanner(f)
+	regionBytes := info.Size() - since
+	scanner := bufio.NewScanner(io.LimitReader(f, regionBytes))
 	scanner.Buffer(make([]byte, 0, 64<<10), maxLogLineLen)
 
 	ring := newLineRing(tail)
 	grep := []byte(p.Grep)
-	var consumed int64
 	matched := 0
 	for scanner.Scan() {
 		// Bytes() reuses the scanner's buffer, so a filtered-out line costs no
 		// allocation at all. Converting every line to a string instead cost ~200 MB
 		// of garbage on a 190 MB log.
 		line := scanner.Bytes()
-		// +1 for the newline the scanner stripped. The last line may not have one,
-		// so the offset is clamped to the file size below.
-		consumed += int64(len(line)) + 1
 		if len(grep) > 0 {
 			if !bytes.Contains(line, grep) {
 				continue
@@ -121,17 +128,12 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, fmt.Errorf("read %s log: %w", stream, err)
 	}
 
-	// A line longer than the scanner buffer, or a final line without a newline,
-	// can leave the count slightly over; never report an offset past the end.
-	next := since + consumed
-	if next > info.Size() {
-		next = info.Size()
-	}
-	res.NextOffset = next
+	res.NextOffset = info.Size()
 	if p.Grep != "" {
 		res.Matched = matched
 	}
 	res.Logs = strings.Join(ring.lines(), "\n")
+	res.LogsTruncation, _ = proto.NewTruncation(regionBytes, int64(len(res.Logs)))
 	return res, nil
 }
 
@@ -159,7 +161,7 @@ func readTail(path string, n int) (string, error) {
 	// Cap the scan: a file whose last n lines are enormous should still not pull
 	// an unbounded amount into memory.
 	const chunk = 64 << 10
-	maxScan := int64(chunk) * 16
+	maxScan := proto.AbsoluteOutputBytes
 
 	var tail []byte
 	var pos = size
@@ -195,38 +197,48 @@ func readTail(path string, n int) (string, error) {
 // This is what makes tailing independent of log size: memory is bounded by the
 // number of lines actually returned rather than by the file.
 type lineRing struct {
-	buf   []string
-	next  int
-	full  bool
-	limit int
+	buf      []string
+	head     int
+	count    int
+	bytes    int
+	limit    int
+	maxBytes int
 }
 
 func newLineRing(limit int) *lineRing {
 	if limit < 1 {
 		limit = 1
 	}
-	return &lineRing{buf: make([]string, 0, limit), limit: limit}
+	if limit > hardLogTailLines {
+		limit = hardLogTailLines
+	}
+	return &lineRing{buf: make([]string, limit), limit: limit, maxBytes: int(proto.AbsoluteOutputBytes)}
 }
 
 // add copies line into the ring. The copy is required: callers pass the
 // scanner's reusable buffer, which the next Scan overwrites.
 func (r *lineRing) add(line []byte) {
-	s := string(line)
-	if len(r.buf) < r.limit {
-		r.buf = append(r.buf, s)
-		return
+	if len(line) > r.maxBytes {
+		line = line[len(line)-r.maxBytes:]
 	}
-	r.buf[r.next] = s
-	r.next = (r.next + 1) % r.limit
-	r.full = true
+	s := string(line)
+	for r.count > 0 && (r.count == r.limit || r.bytes+len(s) > r.maxBytes) {
+		r.bytes -= len(r.buf[r.head])
+		r.buf[r.head] = ""
+		r.head = (r.head + 1) % r.limit
+		r.count--
+	}
+	index := (r.head + r.count) % r.limit
+	r.buf[index] = s
+	r.count++
+	r.bytes += len(s)
 }
 
 // lines returns the retained lines in arrival order.
 func (r *lineRing) lines() []string {
-	if !r.full {
-		return r.buf
+	out := make([]string, 0, r.count)
+	for i := 0; i < r.count; i++ {
+		out = append(out, r.buf[(r.head+i)%r.limit])
 	}
-	out := make([]string, 0, len(r.buf))
-	out = append(out, r.buf[r.next:]...)
-	return append(out, r.buf[:r.next]...)
+	return out
 }

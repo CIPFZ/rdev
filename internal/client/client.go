@@ -60,6 +60,12 @@ type rsyncRunner func(context.Context, []string) (string, string, error)
 type Client struct {
 	Hosts   *session.Registry
 	Secrets *secrets.Store
+	// callerID is stable for the lifetime of this Client and scopes remote
+	// operation deduplication. Generation can fail only if the platform random
+	// source fails; retain that error and fail requests closed instead of falling
+	// back to a predictable identity that could collide with another caller.
+	callerID    string
+	callerIDErr error
 
 	lookup AgentLookup
 	dial   dialFunc
@@ -79,10 +85,16 @@ type Client struct {
 }
 
 func New(lookup AgentLookup) *Client {
+	callerID, callerIDErr := proto.NewOperationID()
+	if callerIDErr == nil {
+		callerID = "client_" + strings.TrimPrefix(callerID, "op_")
+	}
 	c := &Client{
-		Hosts:   session.NewRegistry(),
-		Secrets: secrets.New(),
-		lookup:  lookup,
+		Hosts:       session.NewRegistry(),
+		Secrets:     secrets.New(),
+		callerID:    callerID,
+		callerIDErr: callerIDErr,
+		lookup:      lookup,
 		dial: func(ctx context.Context, host transport.Host, lookup AgentLookup) (remoteConnection, error) {
 			return transport.Dial(ctx, host, lookup)
 		},
@@ -447,12 +459,15 @@ type builtRequest struct {
 	Echo    map[string]string
 }
 
-// do sends a request, retrying once on transport failure.
-//
-// A pooled connection can be dead for benign reasons: ControlPersist expired,
-// the network blipped, the remote rebooted. Retrying once turns that into a
-// hiccup instead of an error the caller has to interpret.
+// do sends a request according to the retry policy in proto's shared operation
+// registry. Unknown operations fail closed before any transport is acquired.
 func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*proto.Response, error) {
+	if req == nil {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	if _, err := proto.RequireOperation(req.Op); err != nil {
+		return nil, err
+	}
 	resp, _, err := c.doBuilt(ctx, hostName, func(identity operationIdentity) (*builtRequest, error) {
 		return &builtRequest{Request: req}, nil
 	})
@@ -465,8 +480,25 @@ func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*
 // for the same immutable identity; an alias redefinition aborts rather than
 // replaying argv, stdin, labels, paths, or content from host A to host B.
 func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operationIdentity) (*builtRequest, error)) (*proto.Response, map[string]string, error) {
+	if c.callerIDErr != nil || c.callerID == "" {
+		return nil, nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
+	}
+	operationID, err := proto.NewOperationID()
+	if err != nil {
+		return nil, nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
+	}
+
+	// A deadline is semantic request state, so capture it once. Rebuilding a
+	// request after reconnect must not silently extend its execution budget.
+	var deadlineUnixMilli int64
+	if deadline, ok := ctx.Deadline(); ok {
+		deadlineUnixMilli = deadline.UnixMilli()
+	}
+
 	var firstErr error
 	var firstIdentity secrets.HostIdentity
+	var descriptor proto.OperationDescriptor
+	var operationName string
 	for attempt := 0; attempt < 2; attempt++ {
 		redactionSnapshot := c.Secrets.Snapshot()
 		pooled, st, release, err := c.leasedConn(ctx, hostName)
@@ -489,10 +521,50 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 			release()
 			return nil, nil, redacted
 		}
+		if built == nil || built.Request == nil {
+			release()
+			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+		}
+		if attempt == 0 {
+			operationName = built.Request.Op
+			var descriptorErr error
+			descriptor, descriptorErr = proto.RequireOperation(operationName)
+			if descriptorErr != nil {
+				release()
+				return nil, nil, descriptorErr
+			}
+			// An explicit protocol deadline wins when the context has none, but it
+			// is still frozen here and reused verbatim on every attempt.
+			if deadlineUnixMilli == 0 {
+				deadlineUnixMilli = built.Request.DeadlineUnixMilli
+			}
+		} else if built.Request.Op != operationName {
+			release()
+			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+		}
+
+		built.Request.OperationID = operationID
+		built.Request.ClientID = c.callerID
+		built.Request.Replay = attempt > 0
+		built.Request.DeadlineUnixMilli = deadlineUnixMilli
+		if built.Request.StreamWindowBytes == 0 {
+			built.Request.StreamWindowBytes = 64 << 10
+		}
+		c.Hosts.RecordRequestEvent(observe.RequestQueued)
 		resp, doErr := pooled.conn.Do(ctx, built.Request)
 		var safeResp *proto.Response
 		if resp != nil {
 			safeResp = c.redactResponseWith(redactionSnapshot, resp)
+			if safeResp.OperationID == "" {
+				safeResp.OperationID = operationID
+			}
+			if safeResp.Type == "" {
+				safeResp.Terminal = true
+				if safeResp.Execution == "" {
+					safeResp.Execution = proto.StateCompleted
+				}
+			}
+			stampResponseMetadata(safeResp)
 		}
 		safeEcho := make(map[string]string, len(built.Echo))
 		for key, value := range built.Echo {
@@ -501,10 +573,16 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 		safeErr := c.redactErrWith(redactionSnapshot, doErr)
 		release()
 		if doErr == nil {
+			c.Hosts.RecordRequestEvent(observe.RequestCompleted)
 			return safeResp, safeEcho, nil
 		}
-		// A remote-reported error is a real answer, not a broken pipe.
+		// A remote-reported error is a real answer, not a broken pipe. Context
+		// cancellation is handled by protocol-level cancel in the transport and
+		// must never be converted into a transparent replay here.
 		if resp != nil || ctx.Err() != nil || attempt == 1 {
+			if ctx.Err() != nil {
+				c.Hosts.RecordRequestEvent(observe.RequestCanceled)
+			}
 			return safeResp, safeEcho, safeErr
 		}
 		firstErr = safeErr
@@ -512,8 +590,60 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 		c.detachAndCloseConnection(pooled.host.Alias, pooled, ConnectionSecurityStatus{
 			State: observe.SecurityCold, Generation: pooled.generation,
 		})
+
+		switch descriptor.Retry {
+		case proto.RetrySafe:
+			// Read-only and explicitly idempotent operations may reconnect once.
+			continue
+		case proto.RetryDeduplicated:
+			// A transport failure tears down this per-SSH-channel agent process.
+			// Its in-memory dedupe cache therefore cannot prove that a mutation
+			// did not already execute. Preserve the stable operation identity for
+			// diagnosis, but do not send it to a fresh process.
+			c.Hosts.RecordRequestEvent(observe.RequestAmbiguous)
+			return safeResp, safeEcho, proto.NewError(
+				proto.CodeAmbiguousOutcome, operationID, proto.StatePossiblyExecuted,
+			)
+		default:
+			return safeResp, safeEcho, safeErr
+		}
 	}
 	return nil, nil, firstErr
+}
+
+func stampResponseMetadata(response *proto.Response) {
+	if response == nil {
+		return
+	}
+	if response.Exec != nil {
+		response.Exec.OperationID, response.Exec.Terminal, response.Exec.Execution = response.OperationID, response.Terminal, response.Execution
+	}
+	if response.Read != nil {
+		response.Read.OperationID, response.Read.Terminal, response.Read.Execution = response.OperationID, response.Terminal, response.Execution
+	}
+	if response.Cat != nil {
+		response.Cat.OperationID, response.Cat.Terminal, response.Cat.Execution = response.OperationID, response.Terminal, response.Execution
+	}
+	if response.Job != nil {
+		response.Job.OperationID, response.Job.Terminal, response.Job.Execution = response.OperationID, response.Terminal, response.Execution
+		stampJobInfo := func(info *proto.JobInfo) {
+			if info != nil {
+				info.OperationID, info.Terminal, info.Execution = response.OperationID, response.Terminal, response.Execution
+			}
+		}
+		stampJobInfo(response.Job.Info)
+		for _, info := range response.Job.List {
+			stampJobInfo(info)
+		}
+		for _, waited := range response.Job.Waited {
+			if waited != nil {
+				stampJobInfo(waited.Info)
+			}
+		}
+	}
+	if response.List != nil {
+		response.List.OperationID, response.List.Terminal, response.List.Execution = response.OperationID, response.Terminal, response.Execution
+	}
 }
 
 func (c *Client) redactResponse(resp *proto.Response) *proto.Response {
@@ -794,18 +924,23 @@ type JobWaitOptions struct {
 
 // WaitedJob is one job's outcome in a multi-job wait.
 type WaitedJob struct {
-	ID   string
-	Info *proto.JobInfo
-	Err  string
-	Logs string
+	ID             string
+	Info           *proto.JobInfo
+	Err            string
+	Logs           string
+	LogsTruncation proto.Truncation
 }
 
 // JobWaitResult is a finished (or still-running) job plus wait bookkeeping.
 type JobWaitResult struct {
-	Info     *proto.JobInfo
-	TimedOut bool
-	WaitedMS int64
-	Logs     string
+	Info           *proto.JobInfo
+	TimedOut       bool
+	WaitedMS       int64
+	Logs           string
+	LogsTruncation proto.Truncation
+	OperationID    string
+	Terminal       bool
+	Execution      proto.ExecutionState
 	// Waited is populated instead of Info when several ids were requested.
 	Waited []WaitedJob
 }
@@ -841,17 +976,20 @@ func (c *Client) JobWait(ctx context.Context, opts JobWaitOptions) (*JobWaitResu
 	}
 
 	out := &JobWaitResult{
-		TimedOut: resp.Job.TimedOut,
-		WaitedMS: resp.Job.WaitedMS,
-		Logs:     c.Secrets.Redact(resp.Job.Logs),
+		TimedOut:       resp.Job.TimedOut,
+		WaitedMS:       resp.Job.WaitedMS,
+		Logs:           c.Secrets.Redact(resp.Job.Logs),
+		LogsTruncation: resp.Job.LogsTruncation,
+		OperationID:    resp.Job.OperationID, Terminal: resp.Job.Terminal, Execution: resp.Job.Execution,
 	}
 	if len(resp.Job.Waited) > 0 {
 		for _, w := range resp.Job.Waited {
 			out.Waited = append(out.Waited, WaitedJob{
-				ID:   w.ID,
-				Info: c.redactJob(w.Info),
-				Err:  c.Secrets.Redact(w.Err),
-				Logs: c.Secrets.Redact(w.Logs),
+				ID:             w.ID,
+				Info:           c.redactJob(w.Info),
+				Err:            c.Secrets.Redact(w.Err),
+				Logs:           c.Secrets.Redact(w.Logs),
+				LogsTruncation: w.LogsTruncation,
 			})
 		}
 		return out, nil

@@ -10,8 +10,10 @@ package proto
 // Version is the wire format this build speaks. It is bumped whenever the format
 // changes in a way an older peer cannot handle.
 //
-// 2 added job_rm, list, the -state flag, multi-id job_wait, and a job_list limit.
-const Version = 2
+// 3 adds stable operation identities, structured errors, protocol-level
+// cancellation/deadlines, feature negotiation, stream events, and explicit
+// truncation accounting.
+const Version = 3
 
 // MinVersion is the oldest wire format this build can still serve.
 //
@@ -24,7 +26,7 @@ const Version = 2
 //
 // Raise this only when support for an older format is genuinely dropped, which
 // forces the peer to upgrade instead of failing at an arbitrary later op.
-const MinVersion = 1
+const MinVersion = 2
 
 // Op names carried in Request.Op.
 const (
@@ -40,6 +42,7 @@ const (
 	OpJobWait   = "job_wait"
 	OpJobRm     = "job_rm"
 	OpList      = "list"
+	OpCancel    = "cancel"
 )
 
 // Job states reported by the agent.
@@ -52,13 +55,40 @@ const (
 
 // Request is one JSON-encoded line sent to the agent's stdin.
 type Request struct {
-	ID   string       `json:"id"`
-	Op   string       `json:"op"`
-	Exec *ExecParams  `json:"exec,omitempty"`
-	Read *ReadParams  `json:"read,omitempty"`
-	Cat  *WriteParams `json:"write,omitempty"`
-	Job  *JobParams   `json:"job,omitempty"`
-	List *ListParams  `json:"list,omitempty"`
+	// ID is a connection-local request identity. It may change on a transport
+	// retry and must never be used as the exactly-once identity of an operation.
+	ID string `json:"id"`
+	// OperationID is stable across reconnects and transport retries.
+	OperationID string `json:"operation_id,omitempty"`
+	// ClientID identifies the calling client session. Agent deduplication binds
+	// OperationID to this identity so unrelated clients cannot claim each
+	// other's cached result.
+	ClientID string `json:"client_id,omitempty"`
+	Op       string `json:"op"`
+	// Replay distinguishes a retry from a first attempt. A mutating replay whose
+	// deduplication record is missing must return ambiguous_outcome rather than
+	// silently execute again.
+	Replay bool `json:"replay,omitempty"`
+	// DeadlineUnixMilli is an absolute deadline. It is deliberately part of the
+	// canonical request digest and therefore cannot change across a retry.
+	DeadlineUnixMilli int64 `json:"deadline_unix_milli,omitempty"`
+	// StreamWindowBytes is the maximum total data-frame payload the agent may
+	// emit before the final frame. Zero disables data frames (accepted/progress/
+	// final still apply). It may only lower the shared hard window.
+	StreamWindowBytes int64         `json:"stream_window_bytes,omitempty"`
+	Hello             *HelloParams  `json:"hello,omitempty"`
+	Cancel            *CancelParams `json:"cancel,omitempty"`
+	Exec              *ExecParams   `json:"exec,omitempty"`
+	Read              *ReadParams   `json:"read,omitempty"`
+	Cat               *WriteParams  `json:"write,omitempty"`
+	Job               *JobParams    `json:"job,omitempty"`
+	List              *ListParams   `json:"list,omitempty"`
+}
+
+// CancelParams targets one foreground operation. Detached jobs are controlled
+// by job_stop and are never implicitly converted into foreground cancellation.
+type CancelParams struct {
+	OperationID string `json:"operation_id"`
 }
 
 // ExecParams describes a foreground command.
@@ -163,9 +193,19 @@ type JobParams struct {
 
 // Response is one JSON-encoded line read from the agent's stdout.
 type Response struct {
-	ID  string `json:"id"`
-	OK  bool   `json:"ok"`
-	Err string `json:"err,omitempty"`
+	ID          string         `json:"id"`
+	OperationID string         `json:"operation_id,omitempty"`
+	Type        EventKind      `json:"type,omitempty"`
+	StreamID    string         `json:"stream_id,omitempty"`
+	Seq         uint64         `json:"seq,omitempty"`
+	Terminal    bool           `json:"terminal,omitempty"`
+	Execution   ExecutionState `json:"execution_state,omitempty"`
+	OK          bool           `json:"ok"`
+	// Err is retained for protocol-2 compatibility. Protocol-3 peers use Error.
+	Err      string         `json:"err,omitempty"`
+	Error    *ErrorEnvelope `json:"error,omitempty"`
+	Data     *DataFrame     `json:"data,omitempty"`
+	Progress *ProgressFrame `json:"progress,omitempty"`
 
 	Ping *PingResult  `json:"ping,omitempty"`
 	Exec *ExecResult  `json:"exec,omitempty"`
@@ -173,6 +213,17 @@ type Response struct {
 	Cat  *WriteResult `json:"write,omitempty"`
 	Job  *JobResult   `json:"job,omitempty"`
 	List *ListResult  `json:"list,omitempty"`
+}
+
+type DataFrame struct {
+	Stream     string     `json:"stream"`
+	Content    string     `json:"content"`
+	ContentB64 bool       `json:"content_b64,omitempty"`
+	Truncation Truncation `json:"truncation"`
+}
+
+type ProgressFrame struct {
+	Phase string `json:"phase"`
 }
 
 // PingResult reports agent identity for the handshake.
@@ -193,16 +244,18 @@ type PingResult struct {
 	// binary am I actually talking to", which is what a bootstrap that keeps
 	// flipping between two builds needs.
 	Build string `json:"build,omitempty"`
+	// NegotiatedVersion is the highest version in the peer range intersection.
+	// Zero means this field came from a protocol-2 peer.
+	NegotiatedVersion int       `json:"negotiated_version,omitempty"`
+	Features          []Feature `json:"features,omitempty"`
 }
 
-// Compatible reports whether an agent advertising this ping can serve a host
-// speaking hostVersion.
+// Compatible reports whether an agent advertising this ping has a protocol
+// version in common with this build through hostVersion.
 //
-// An agent newer than the host is accepted as long as it still serves the host's
-// format: new ops are additive, so the host just does not use them. An agent older
-// than the host is rejected, because the host may issue an op it does not have --
-// which would otherwise surface as a confusing "unknown op" partway through a
-// session instead of at connect time.
+// Compatibility is only the first gate. Callers must also negotiate features and
+// refuse any operation whose required feature is absent; protocol overlap must
+// never be treated as permission for a dangerous semantic downgrade.
 func (p *PingResult) Compatible(hostVersion int) bool {
 	if p == nil {
 		return false
@@ -212,19 +265,32 @@ func (p *PingResult) Compatible(hostVersion int) bool {
 		// A build predating MinVersion serves exactly one format.
 		min = p.Version
 	}
-	return hostVersion >= min && hostVersion <= p.Version
+	_, ok := NegotiateVersion(
+		ProtocolRange{Min: MinVersion, Max: hostVersion},
+		ProtocolRange{Min: min, Max: p.Version},
+	)
+	return ok
 }
 
 // ExecResult reports the outcome of a foreground command.
 type ExecResult struct {
-	ExitCode int    `json:"exit_code"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
+	OperationID string         `json:"operation_id,omitempty"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	ExitCode    int            `json:"exit_code"`
+	Stdout      string         `json:"stdout"`
+	Stderr      string         `json:"stderr"`
+	StdoutB64   bool           `json:"stdout_b64,omitempty"`
+	StderrB64   bool           `json:"stderr_b64,omitempty"`
 	// StdoutBytes and StderrBytes are the true stream sizes before capping,
 	// so a caller seeing truncation knows the real volume.
 	StdoutBytes int64 `json:"stdout_bytes"`
 	StderrBytes int64 `json:"stderr_bytes"`
 	Truncated   bool  `json:"truncated,omitempty"`
+	// Per-stream metadata removes the ambiguity in the legacy combined flag and
+	// preserves exact retained/original/dropped byte counts.
+	StdoutTruncation Truncation `json:"stdout_truncation"`
+	StderrTruncation Truncation `json:"stderr_truncation"`
 	// TimedOut reports that the child was killed by TimeoutSec rather than
 	// exiting on its own. ExitCode is meaningless in that case.
 	//
@@ -237,25 +303,35 @@ type ExecResult struct {
 
 // ReadResult carries a slice of file content.
 type ReadResult struct {
-	Content    string `json:"content"`
-	ContentB64 bool   `json:"content_b64,omitempty"`
-	Size       int64  `json:"size"`
+	OperationID string         `json:"operation_id,omitempty"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	Content     string         `json:"content"`
+	ContentB64  bool           `json:"content_b64,omitempty"`
+	Size        int64          `json:"size"`
 	// EOF reports that the returned slice reaches the end of the file.
-	EOF bool `json:"eof"`
+	EOF        bool       `json:"eof"`
+	Truncation Truncation `json:"truncation"`
 }
 
 // WriteResult confirms a write.
 type WriteResult struct {
-	Path         string `json:"path"`
-	BytesWritten int    `json:"bytes_written"`
+	OperationID  string         `json:"operation_id,omitempty"`
+	Terminal     bool           `json:"terminal"`
+	Execution    ExecutionState `json:"execution_state"`
+	Path         string         `json:"path"`
+	BytesWritten int            `json:"bytes_written"`
 }
 
 // JobInfo is the persisted record of one job.
 type JobInfo struct {
-	ID    string   `json:"id"`
-	Label string   `json:"label,omitempty"`
-	Argv  []string `json:"argv"`
-	Cwd   string   `json:"cwd,omitempty"`
+	OperationID string         `json:"operation_id,omitempty"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	ID          string         `json:"id"`
+	Label       string         `json:"label,omitempty"`
+	Argv        []string       `json:"argv"`
+	Cwd         string         `json:"cwd,omitempty"`
 	// PID is the supervisor process, which is also the job's process group id.
 	PID   int    `json:"pid"`
 	State string `json:"state"`
@@ -273,15 +349,19 @@ type JobInfo struct {
 
 // JobResult is the union of replies for the job ops.
 type JobResult struct {
-	Info *JobInfo   `json:"info,omitempty"`
-	List []*JobInfo `json:"list,omitempty"`
+	OperationID string         `json:"operation_id,omitempty"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	Info        *JobInfo       `json:"info,omitempty"`
+	List        []*JobInfo     `json:"list,omitempty"`
 
 	// Waited holds one entry per requested job when job_wait was given IDs. Each
 	// carries the same Logs treatment as a single wait.
 	Waited []*WaitedJob `json:"waited,omitempty"`
 
 	// Logs fields, set for job_logs.
-	Logs string `json:"logs,omitempty"`
+	Logs           string     `json:"logs,omitempty"`
+	LogsTruncation Truncation `json:"logs_truncation"`
 	// NextOffset is the byte offset to pass as SinceOffset on the next poll.
 	NextOffset int64 `json:"next_offset,omitempty"`
 	// LogSize is the current total size of the selected stream.
@@ -325,7 +405,8 @@ type WaitedJob struct {
 	// still have useful answers.
 	Err string `json:"err,omitempty"`
 	// Logs is the trailing output when TailOnExit was requested.
-	Logs string `json:"logs,omitempty"`
+	Logs           string     `json:"logs,omitempty"`
+	LogsTruncation Truncation `json:"logs_truncation"`
 }
 
 // DirEntry is one item in a directory listing.
@@ -351,8 +432,11 @@ type ListParams struct {
 
 // ListResult carries a directory listing.
 type ListResult struct {
-	Path    string     `json:"path"`
-	Entries []DirEntry `json:"entries"`
+	OperationID string         `json:"operation_id,omitempty"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	Path        string         `json:"path"`
+	Entries     []DirEntry     `json:"entries"`
 	// Total is the full entry count before Limit was applied, so a caller can
 	// tell a listing was cut short.
 	Total     int  `json:"total"`

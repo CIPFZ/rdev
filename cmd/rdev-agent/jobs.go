@@ -11,11 +11,13 @@
 package main
 
 import (
+	"container/heap"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,21 +27,11 @@ import (
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
-// jobOps is the set of ops doJob handles. main's dispatcher consults this rather
-// than repeating the list, so a new job op cannot be added to one place and
-// forgotten in the other.
-var jobOps = map[string]bool{
-	proto.OpJobStart:  true,
-	proto.OpJobList:   true,
-	proto.OpJobStatus: true,
-	proto.OpJobLogs:   true,
-	proto.OpJobStop:   true,
-	proto.OpJobWait:   true,
-	proto.OpJobRm:     true,
-}
-
 // isJobOp reports whether op is dispatched by doJob.
-func isJobOp(op string) bool { return jobOps[op] }
+func isJobOp(op string) bool {
+	descriptor, ok := proto.LookupOperation(op)
+	return ok && descriptor.UsesJobParams
+}
 
 func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error) {
 	switch op {
@@ -240,30 +232,52 @@ func newJobID() string {
 // 5000 -- each of which is a stat plus a JSON parse plus liveness probes.
 func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	root := filepath.Join(state, "jobs")
-	entries, err := os.ReadDir(root)
+	dir, err := os.Open(root)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &proto.JobResult{List: nil}, nil
 		}
 		return nil, err
 	}
-
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-	// Descending, so the newest directories come first.
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	defer dir.Close()
 
 	limit := p.Limit
-	if limit <= 0 {
+	if limit < 0 || limit > 1000 {
+		return nil, errors.New("job list limit is outside the hard limit")
+	}
+	if limit == 0 {
 		limit = defaultJobListLimit
 	}
+	names := &stringMinHeap{}
+	heap.Init(names)
+	total := 0
+	for {
+		entries, readErr := dir.ReadDir(256)
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			total++
+			if names.Len() < limit {
+				heap.Push(names, entry.Name())
+			} else if entry.Name() > (*names)[0] {
+				(*names)[0] = entry.Name()
+				heap.Fix(names, 0)
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	selected := append([]string(nil), (*names)...)
+	// Descending, so the newest directories come first.
+	sort.Sort(sort.Reverse(sort.StringSlice(selected)))
 
-	list := make([]*proto.JobInfo, 0, min(limit, len(names)))
-	for _, name := range names {
+	list := make([]*proto.JobInfo, 0, len(selected))
+	for _, name := range selected {
 		if len(list) >= limit {
 			break
 		}
@@ -281,9 +295,22 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	sort.Slice(list, func(i, j int) bool { return list[i].StartedAt > list[j].StartedAt })
 
 	res := &proto.JobResult{List: list}
-	res.Total = len(names)
-	res.Truncated = len(names) > len(list)
+	res.Total = total
+	res.Truncated = total > len(selected)
 	return res, nil
+}
+
+type stringMinHeap []string
+
+func (h stringMinHeap) Len() int           { return len(h) }
+func (h stringMinHeap) Less(i, j int) bool { return h[i] < h[j] }
+func (h stringMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *stringMinHeap) Push(value any)    { *h = append(*h, value.(string)) }
+func (h *stringMinHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
 }
 
 // defaultJobListLimit bounds an unspecified listing. High enough to cover normal

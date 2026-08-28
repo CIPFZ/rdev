@@ -631,19 +631,15 @@ func TestJobWaitReturnsImmediatelyForFinishedJob(t *testing.T) {
 	}
 }
 
-func TestJobWaitClampsBudget(t *testing.T) {
+func TestJobWaitRejectsBudgetAboveHardLimit(t *testing.T) {
 	state := t.TempDir()
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
-	res, _ := jobStart(&proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"true"}}}, state)
 
-	// An absurd budget must be clamped rather than honored, so a request cannot
-	// be stranded indefinitely.
-	got, err := jobWait(&proto.JobParams{ID: res.Info.ID, WaitTimeoutSec: 999999}, state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Info == nil {
-		t.Fatal("expected job info")
+	// Callers may lower budgets but cannot silently raise them past the absolute
+	// ceiling. Validation happens before job lookup, so no detached child is
+	// needed (and the test cannot race TempDir cleanup with its supervisor).
+	if _, err := jobWait(&proto.JobParams{ID: "unused", WaitTimeoutSec: 999999}, state); err == nil {
+		t.Fatal("wait budget above the hard limit was accepted")
 	}
 }
 

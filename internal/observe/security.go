@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 type SecurityReason string
 
@@ -82,6 +82,10 @@ type Snapshot struct {
 	ConnectionSecurityTransitions map[string]uint64 `json:"connection_security_transitions"`
 	ProjectApprovals              uint64            `json:"project_approvals"`
 	RedactionHits                 uint64            `json:"redaction_hits"`
+	RequestEvents                 map[string]uint64 `json:"request_events"`
+	ProtocolEvents                map[string]uint64 `json:"protocol_events"`
+	ResourceEvents                map[string]uint64 `json:"resource_events"`
+	DedupeEvents                  map[string]uint64 `json:"dedupe_events"`
 }
 
 // Registry accepts only enumerated reasons. Target identity is hashed for logs
@@ -94,6 +98,10 @@ type Registry struct {
 	connectionSecurityStates map[ConnectionSecurityState]uint64
 	approvals                uint64
 	redactionHits            uint64
+	requestEvents            map[RequestEvent]uint64
+	protocolEvents           map[ProtocolEvent]uint64
+	resourceEvents           map[ResourceEvent]uint64
+	dedupeEvents             map[DedupeEvent]uint64
 	sink                     Sink
 }
 
@@ -103,6 +111,10 @@ func New(sink Sink) *Registry {
 		secretLoadFailures:       make(map[SecretReason]uint64),
 		secretRejections:         make(map[SecretReason]uint64),
 		connectionSecurityStates: make(map[ConnectionSecurityState]uint64),
+		requestEvents:            make(map[RequestEvent]uint64),
+		protocolEvents:           make(map[ProtocolEvent]uint64),
+		resourceEvents:           make(map[ResourceEvent]uint64),
+		dedupeEvents:             make(map[DedupeEvent]uint64),
 		sink:                     sink,
 	}
 }
@@ -226,6 +238,10 @@ func (r *Registry) Snapshot() Snapshot {
 		SecretLoadFailures:            make(map[string]uint64),
 		SecretRejections:              make(map[string]uint64),
 		ConnectionSecurityTransitions: make(map[string]uint64),
+		RequestEvents:                 make(map[string]uint64),
+		ProtocolEvents:                make(map[string]uint64),
+		ResourceEvents:                make(map[string]uint64),
+		DedupeEvents:                  make(map[string]uint64),
 	}
 	if r == nil {
 		return out
@@ -241,6 +257,18 @@ func (r *Registry) Snapshot() Snapshot {
 	}
 	for _, state := range connectionSecurityStates {
 		out.ConnectionSecurityTransitions[string(state)] = r.connectionSecurityStates[state]
+	}
+	for _, event := range requestEvents {
+		out.RequestEvents[string(event)] = r.requestEvents[event]
+	}
+	for _, event := range protocolEvents {
+		out.ProtocolEvents[string(event)] = r.protocolEvents[event]
+	}
+	for _, event := range resourceEvents {
+		out.ResourceEvents[string(event)] = r.resourceEvents[event]
+	}
+	for _, event := range dedupeEvents {
+		out.DedupeEvents[string(event)] = r.dedupeEvents[event]
 	}
 	out.ProjectApprovals = r.approvals
 	out.RedactionHits = r.redactionHits

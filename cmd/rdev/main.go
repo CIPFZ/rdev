@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/mcpsrv"
+	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/support"
 	"github.com/CIPFZ/rdev/internal/transport"
@@ -132,7 +134,15 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rdev: %s\n", c.Secrets.Redact(err.Error()))
+		var envelope *proto.ErrorEnvelope
+		if errors.As(err, &envelope) {
+			fmt.Fprintf(os.Stderr,
+				"rdev: code=%s retryable=%t execution_state=%s operation_id=%s terminal=%t message=%s\n",
+				envelope.Code, envelope.Retryable, envelope.ExecutionState,
+				envelope.OperationID, envelope.Terminal, c.Secrets.Redact(envelope.Message))
+		} else {
+			fmt.Fprintf(os.Stderr, "rdev: %s\n", c.Secrets.Redact(err.Error()))
+		}
 		os.Exit(1)
 	}
 }
@@ -284,8 +294,25 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	// Mirror the remote streams onto ours so rdev composes with local pipes.
-	fmt.Fprint(os.Stdout, res.Stdout)
-	fmt.Fprint(os.Stderr, res.Stderr)
+	stdout := []byte(res.Stdout)
+	stderr := []byte(res.Stderr)
+	if res.StdoutB64 {
+		stdout, err = base64.StdEncoding.DecodeString(res.Stdout)
+		if err != nil {
+			return proto.NewError(proto.CodeInvalidFrame, res.OperationID, proto.StateCompleted)
+		}
+	}
+	if res.StderrB64 {
+		stderr, err = base64.StdEncoding.DecodeString(res.Stderr)
+		if err != nil {
+			return proto.NewError(proto.CodeInvalidFrame, res.OperationID, proto.StateCompleted)
+		}
+	}
+	_, _ = os.Stdout.Write(stdout)
+	_, _ = os.Stderr.Write(stderr)
+	if res.StdoutTruncation.Truncated || res.StderrTruncation.Truncated {
+		fmt.Fprint(os.Stderr, execTruncationNotice(res))
+	}
 	if res.TimedOut {
 		return fmt.Errorf("timed out after %ds", opts.TimeoutSec)
 	}
@@ -293,6 +320,17 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 		os.Exit(res.ExitCode) // propagate so shell && / || behave as expected
 	}
 	return nil
+}
+
+func execTruncationNotice(res *client.ExecResult) string {
+	if res == nil || (!res.StdoutTruncation.Truncated && !res.StderrTruncation.Truncated) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\nrdev: output truncated operation_id=%s terminal=%t execution_state=%s stdout_retained=%d stdout_original=%d stdout_dropped=%d stderr_retained=%d stderr_original=%d stderr_dropped=%d\n",
+		res.OperationID, res.Terminal, res.Execution,
+		res.StdoutTruncation.RetainedBytes, res.StdoutTruncation.OriginalBytes, res.StdoutTruncation.DroppedBytes,
+		res.StderrTruncation.RetainedBytes, res.StderrTruncation.OriginalBytes, res.StderrTruncation.DroppedBytes)
 }
 
 // ---------- job ----------
@@ -369,6 +407,12 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		fmt.Println(res.Logs)
+		if res.LogsTruncation.Truncated {
+			fmt.Fprintf(os.Stderr,
+				"rdev: logs truncated operation_id=%s terminal=%t execution_state=%s retained=%d original=%d dropped=%d\n",
+				res.OperationID, res.Terminal, res.Execution,
+				res.LogsTruncation.RetainedBytes, res.LogsTruncation.OriginalBytes, res.LogsTruncation.DroppedBytes)
+		}
 		return nil
 
 	case "stop":
@@ -433,6 +477,12 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 
 		if res.Logs != "" {
 			fmt.Fprintln(os.Stderr, res.Logs)
+		}
+		if res.LogsTruncation.Truncated {
+			fmt.Fprintf(os.Stderr,
+				"rdev: wait logs truncated operation_id=%s terminal=%t execution_state=%s retained=%d original=%d dropped=%d\n",
+				res.OperationID, res.Terminal, res.Execution,
+				res.LogsTruncation.RetainedBytes, res.LogsTruncation.OriginalBytes, res.LogsTruncation.DroppedBytes)
 		}
 		if err := printJSON(c, res.Info); err != nil {
 			return err
@@ -505,9 +555,15 @@ func cmdRead(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if res.ContentB64 {
-		return fmt.Errorf("%s is binary; use rdev sync to fetch it", fs.pos[1])
+		return errors.New("remote file contains binary data; use rdev sync to fetch it")
 	}
 	fmt.Print(res.Content)
+	if res.Truncation.Truncated {
+		fmt.Fprintf(os.Stderr,
+			"\nrdev: read truncated operation_id=%s terminal=%t execution_state=%s retained=%d original=%d dropped=%d\n",
+			res.OperationID, res.Terminal, res.Execution,
+			res.Truncation.RetainedBytes, res.Truncation.OriginalBytes, res.Truncation.DroppedBytes)
+	}
 	return nil
 }
 
@@ -546,6 +602,9 @@ func readAllStdin() (string, error) {
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := os.Stdin.Read(buf)
+		if int64(sb.Len())+int64(n) > proto.AbsoluteRequestFrameBytes {
+			return "", proto.NewError(proto.CodeLimitExceeded, "", proto.StateNotSent)
+		}
 		sb.Write(buf[:n])
 		if err != nil {
 			if err.Error() == "EOF" || n == 0 {

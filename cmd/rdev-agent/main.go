@@ -18,6 +18,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -39,9 +41,10 @@ import (
 )
 
 const (
-	defaultReadLimit  = 1 << 20 // 1 MiB
-	defaultMaxOutput  = 1 << 20
-	maxRequestLineLen = 64 << 20 // room for large write_file payloads
+	defaultReadLimit   = 1 << 20 // 1 MiB
+	defaultMaxOutput   = 256 << 10
+	maxRequestLineLen  = int(proto.AbsoluteRequestFrameBytes)
+	hardExecTimeoutSec = 3600
 )
 
 func main() {
@@ -91,13 +94,7 @@ func main() {
 	// host relies on.
 	w := &respWriter{out: bufio.NewWriter(os.Stdout)}
 
-	// Handlers run concurrently. Requests are matched to replies by ID, so a slow
-	// exec no longer blocks unrelated calls to the same host -- previously one
-	// 60-second command stalled every other request, since both this loop and the
-	// host's connection were strictly serial.
-	var wg sync.WaitGroup
-	// Bound concurrency so a burst cannot fork unbounded work on a shared dev box.
-	sem := make(chan struct{}, maxConcurrentRequests)
+	server := newAgentServer(context.Background(), state, w)
 
 	for {
 		line, err := readLine(in)
@@ -110,43 +107,19 @@ func main() {
 
 		var req proto.Request
 		if err := json.Unmarshal(line, &req); err != nil {
-			w.write(&proto.Response{OK: false, Err: "malformed request: " + err.Error()})
+			envelope := proto.NewError(proto.CodeInvalidFrame, "", proto.StateNotSent)
+			w.write(&proto.Response{
+				Type: proto.EventError, Terminal: true, OK: false,
+				Err: envelope.Message, Error: envelope, Execution: envelope.ExecutionState,
+			})
 			continue
 		}
-
-		// job_wait blocks for minutes by design. Letting it hold a concurrency
-		// slot would let a few waits starve everything else, and it is cheap
-		// (a polling sleep), so it runs outside the limit.
-		bounded := req.Op != proto.OpJobWait
-
-		wg.Add(1)
-		go func(req proto.Request) {
-			defer wg.Done()
-			if bounded {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-			}
-			w.write(handleSafely(&req, state))
-		}(req)
+		server.submit(req)
 	}
 
-	// Drain briefly so a handler that is already nearly done still gets its reply
-	// out. The wait is bounded because a long op -- job_wait can be budgeted for an
-	// hour -- would otherwise keep this process alive long after the host went
-	// away, leaving an idle agent per dropped connection.
-	//
-	// Abandoning those handlers is safe: the host has closed the pipe, so their
-	// replies have nowhere to go, and jobs are detached with setsid, so no actual
-	// work is tied to this process's lifetime.
-	drained := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(drained)
-	}()
-	select {
-	case <-drained:
-	case <-time.After(shutdownDrainTimeout):
-	}
+	// EOF cancels every attached foreground operation and watcher. Detached jobs
+	// have an explicit independent lifecycle and continue under their supervisor.
+	server.close()
 	w.flush()
 }
 
@@ -162,20 +135,40 @@ const maxConcurrentRequests = 16
 
 // respWriter serializes replies onto the single stdout pipe.
 type respWriter struct {
-	mu  sync.Mutex
-	out *bufio.Writer
+	mu             sync.Mutex
+	controlWaiting atomic.Int32
+	out            *bufio.Writer
 }
 
-func (w *respWriter) write(resp *proto.Response) {
+func (w *respWriter) write(resp *proto.Response) bool {
 	b, err := json.Marshal(resp)
 	if err != nil {
-		b, _ = json.Marshal(&proto.Response{ID: resp.ID, OK: false, Err: "marshal failed: " + err.Error()})
+		envelope := proto.NewError(proto.CodeInternalFailure, resp.OperationID, proto.StatePossiblyExecuted)
+		b, _ = json.Marshal(errorResponse(&proto.Request{ID: resp.ID, OperationID: resp.OperationID}, envelope, max(resp.Seq, 1)))
 	}
-	w.mu.Lock()
+	if int64(len(b)) > proto.AbsoluteResponseFrameBytes {
+		envelope := proto.NewError(proto.CodeFrameTooLarge, resp.OperationID, proto.StatePossiblyExecuted)
+		truncation, _ := proto.NewTruncation(int64(len(b)), 0)
+		envelope.Truncation = &truncation
+		b, _ = json.Marshal(errorResponse(&proto.Request{ID: resp.ID, OperationID: resp.OperationID}, envelope, max(resp.Seq, 1)))
+	}
+	if resp.Type == proto.EventData {
+		if w.controlWaiting.Load() != 0 || !w.mu.TryLock() {
+			return false
+		}
+	} else {
+		w.controlWaiting.Add(1)
+		w.mu.Lock()
+		w.controlWaiting.Add(-1)
+	}
 	defer w.mu.Unlock()
-	w.out.Write(b)
-	w.out.WriteByte('\n')
-	w.out.Flush() // flush per reply: the host blocks waiting for this line
+	if _, err := w.out.Write(b); err != nil {
+		return false
+	}
+	if err := w.out.WriteByte('\n'); err != nil {
+		return false
+	}
+	return w.out.Flush() == nil // flush per reply: the host blocks waiting for this line
 }
 
 func (w *respWriter) flush() {
@@ -212,14 +205,29 @@ func handleSafely(req *proto.Request, state string) (resp *proto.Response) {
 func readLine(r *bufio.Reader) ([]byte, error) {
 	var buf []byte
 	for {
+		remaining := maxRequestLineLen - len(buf)
+		if remaining < 1<<20 {
+			b, err := r.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			if b == '\n' {
+				return buf, nil
+			}
+			if remaining == 0 {
+				return nil, errors.New("request too large")
+			}
+			buf = append(buf, b)
+			continue
+		}
 		chunk, isPrefix, err := r.ReadLine()
 		if err != nil {
 			return nil, err
 		}
-		buf = append(buf, chunk...)
-		if len(buf) > maxRequestLineLen {
+		if len(chunk) > remaining || len(buf) > maxRequestLineLen-len(chunk) {
 			return nil, errors.New("request too large")
 		}
+		buf = append(buf, chunk...)
 		if !isPrefix {
 			return buf, nil
 		}
@@ -371,15 +379,25 @@ type capWriter struct {
 	buf   []byte
 	total int64
 	cap   int
+	hook  func([]byte)
 }
 
 func (w *capWriter) Write(p []byte) (int, error) {
-	w.total += int64(len(p))
+	if int64(len(p)) > int64(^uint64(0)>>1)-w.total {
+		w.total = int64(^uint64(0) >> 1)
+	} else {
+		w.total += int64(len(p))
+	}
 	if room := w.cap - len(w.buf); room > 0 {
+		retained := p
 		if len(p) <= room {
 			w.buf = append(w.buf, p...)
 		} else {
-			w.buf = append(w.buf, p[:room]...)
+			retained = p[:room]
+			w.buf = append(w.buf, retained...)
+		}
+		if w.hook != nil && len(retained) > 0 {
+			w.hook(retained)
 		}
 	}
 	return len(p), nil // always report full write: we intentionally drop excess
@@ -400,6 +418,18 @@ func (w *capWriter) text() string {
 	return string(b)
 }
 
+func (w *capWriter) payload() (string, bool, int64) {
+	raw := w.buf
+	text := raw
+	if w.truncated() {
+		text = trimPartialRune(text)
+	}
+	if utf8.Valid(text) && !bytes.ContainsRune(text, 0) {
+		return string(text), false, int64(len(text))
+	}
+	return base64.StdEncoding.EncodeToString(raw), true, int64(len(raw))
+}
+
 // trimPartialRune removes an incomplete UTF-8 sequence from the end of b.
 func trimPartialRune(b []byte) []byte {
 	// A rune is at most 4 bytes, so an incomplete tail is within the last 3.
@@ -416,17 +446,34 @@ func trimPartialRune(b []byte) []byte {
 }
 
 func doExec(p *proto.ExecParams) (*proto.ExecResult, error) {
+	return doExecContext(context.Background(), p)
+}
+
+func doExecContext(ctx context.Context, p *proto.ExecParams) (*proto.ExecResult, error) {
+	return doExecContextStream(ctx, p, nil, nil)
+}
+
+func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, stderrHook func([]byte)) (*proto.ExecResult, error) {
 	cmd, err := buildCmd(p)
 	if err != nil {
 		return nil, err
 	}
 
 	limit := p.MaxOutputBytes
-	if limit <= 0 {
+	if limit < 0 || int64(limit) > proto.AbsoluteOutputBytes {
+		return nil, errors.New("max_output_bytes is outside the hard limit")
+	}
+	if limit == 0 {
 		limit = defaultMaxOutput
 	}
-	stdout := &capWriter{cap: limit}
-	stderr := &capWriter{cap: limit}
+	if p.TimeoutSec < 0 || p.TimeoutSec > hardExecTimeoutSec {
+		return nil, errors.New("timeout_sec is outside the hard limit")
+	}
+	if int64(len(p.Stdin)) > proto.AbsoluteRequestFrameBytes {
+		return nil, errors.New("stdin exceeds the hard limit")
+	}
+	stdout := &capWriter{cap: limit, hook: stdoutHook}
+	stderr := &capWriter{cap: limit, hook: stderrHook}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if p.Stdin != "" {
@@ -446,30 +493,47 @@ func doExec(p *proto.ExecParams) (*proto.ExecResult, error) {
 	go func() { done <- cmd.Wait() }()
 
 	var timedOut bool
+	var canceled bool
+	var timer <-chan time.Time
 	if p.TimeoutSec > 0 {
-		select {
-		case err = <-done:
-		case <-time.After(time.Duration(p.TimeoutSec) * time.Second):
-			timedOut = true
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			<-done // reap
-		}
-	} else {
-		err = <-done
+		timer = time.After(time.Duration(p.TimeoutSec) * time.Second)
+	}
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		canceled = true
+		terminateProcessGroup(cmd.Process.Pid, done)
+		err = ctx.Err()
+	case <-timer:
+		timedOut = true
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
 	}
 
+	stdoutText, stdoutB64, stdoutRetained := stdout.payload()
+	stderrText, stderrB64, stderrRetained := stderr.payload()
+	stdoutTruncation, _ := proto.NewTruncation(stdout.total, stdoutRetained)
+	stderrTruncation, _ := proto.NewTruncation(stderr.total, stderrRetained)
 	res := &proto.ExecResult{
-		Stdout:      stdout.text(),
-		Stderr:      stderr.text(),
-		StdoutBytes: stdout.total,
-		StderrBytes: stderr.total,
-		Truncated:   stdout.truncated() || stderr.truncated(),
-		TimedOut:    timedOut,
-		DurationMS:  time.Since(start).Milliseconds(),
+		Stdout:           stdoutText,
+		Stderr:           stderrText,
+		StdoutB64:        stdoutB64,
+		StderrB64:        stderrB64,
+		StdoutBytes:      stdout.total,
+		StderrBytes:      stderr.total,
+		Truncated:        stdout.truncated() || stderr.truncated(),
+		StdoutTruncation: stdoutTruncation,
+		StderrTruncation: stderrTruncation,
+		TimedOut:         timedOut,
+		DurationMS:       time.Since(start).Milliseconds(),
 	}
 	if timedOut {
 		res.ExitCode = -1
 		return res, nil
+	}
+	if canceled {
+		res.ExitCode = -1
+		return res, err
 	}
 	// A non-zero exit is data, not a transport error: report it in ExitCode
 	// and let the caller decide. Only failures to *run* the command error out.
@@ -482,7 +546,24 @@ func doExec(p *proto.ExecParams) (*proto.ExecResult, error) {
 	return res, nil
 }
 
+// terminateProcessGroup gives cooperative children a brief TERM window, then
+// kills and reaps the exact process group owned by this request. No process-name
+// matching is involved, so unrelated requests are unaffected.
+func terminateProcessGroup(pgid int, done <-chan error) {
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	select {
+	case <-done:
+		return
+	case <-time.After(250 * time.Millisecond):
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	<-done
+}
+
 func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
+	if p.Offset < 0 {
+		return nil, errors.New("read offset must not be negative")
+	}
 	path := expandHome(p.Path)
 	f, err := os.Open(path)
 	if err != nil {
@@ -499,7 +580,10 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 	}
 
 	limit := p.Limit
-	if limit <= 0 {
+	if limit < 0 || limit > proto.AbsoluteReadBytes {
+		return nil, errors.New("read limit is outside the hard limit")
+	}
+	if limit == 0 {
 		limit = defaultReadLimit
 	}
 	if p.Offset > 0 {
@@ -515,7 +599,19 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 	}
 	data := buf[:n]
 
-	res := &proto.ReadResult{Size: info.Size(), EOF: p.Offset+int64(n) >= info.Size()}
+	original := info.Size() - p.Offset
+	if original < 0 {
+		original = 0
+	}
+	truncation, _ := proto.NewTruncation(original, int64(n))
+	end, addErr := proto.CheckedAdd(p.Offset, int64(n))
+	if addErr != nil {
+		return nil, errors.New("read range overflows")
+	}
+	res := &proto.ReadResult{
+		Size: info.Size(), EOF: end >= info.Size(),
+		Truncation: truncation,
+	}
 	// Base64 anything that would not survive the JSON round-trip, so binary or
 	// non-UTF-8 content arrives intact instead of being mangled into
 	// replacement runes.
@@ -619,32 +715,46 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 	if path == "" {
 		path = "."
 	}
-	entries, err := os.ReadDir(path)
+	dir, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	defer dir.Close()
 
 	limit := p.Limit
-	if limit <= 0 {
+	if limit < 0 || limit > 10_000 {
+		return nil, errors.New("list limit is outside the hard limit")
+	}
+	if limit == 0 {
 		limit = defaultListLimit
 	}
 
-	res := &proto.ListResult{Path: path, Total: len(entries)}
-	for _, e := range entries {
-		if len(res.Entries) >= limit {
-			res.Truncated = true
+	res := &proto.ListResult{Path: path, Entries: make([]proto.DirEntry, 0, limit)}
+	for {
+		entries, readErr := dir.ReadDir(256)
+		for _, e := range entries {
+			res.Total++
+			if len(res.Entries) >= limit {
+				res.Truncated = true
+				continue
+			}
+			de := proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
+			// Report the link itself rather than its target: resolving it may dangle
+			// or cross a mount, and the caller can stat the target if it cares.
+			de.Symlink = e.Type()&os.ModeSymlink != 0
+			if info, infoErr := e.Info(); infoErr == nil {
+				de.Size = info.Size()
+				de.Mode = info.Mode().String()
+				de.ModTime = info.ModTime().UTC().Format(time.RFC3339)
+			}
+			res.Entries = append(res.Entries, de)
+		}
+		if errors.Is(readErr, io.EOF) {
 			break
 		}
-		de := proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
-		// Report the link itself rather than its target: resolving it may dangle
-		// or cross a mount, and the caller can stat the target if it cares.
-		de.Symlink = e.Type()&os.ModeSymlink != 0
-		if info, err := e.Info(); err == nil {
-			de.Size = info.Size()
-			de.Mode = info.Mode().String()
-			de.ModTime = info.ModTime().UTC().Format(time.RFC3339)
+		if readErr != nil {
+			return nil, readErr
 		}
-		res.Entries = append(res.Entries, de)
 	}
 	return res, nil
 }

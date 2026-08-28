@@ -229,11 +229,12 @@ Host 的地址/用户/端口/远端 state namespace/scope 身份变化时，旧 
 现在两侧都改了：
 
 - **host 侧**：单独一个 reader goroutine 按 `resp.ID` 派发到等待者，`Do` 只在注册 pending 时短暂持锁。
-- **agent 侧**：每个请求一个 goroutine，回复经加锁 writer 串行落到 stdout（回复是单行，交错写会毁掉分帧）；并发上限 16，`job_wait` 不占额度（它本来就是睡眠轮询，占额度会让几个 wait 饿死其他请求）。
+- **agent 侧**：普通请求进入固定 worker/queue，`job_wait` 进入独立的固定 worker/queue；队列满时返回结构化资源错误，不再为每个请求创建 goroutine。相同 job 的 waiter 共享一个底层 watcher，订阅数、watcher 数和 fan-out 都有硬上限，取消会移除订阅并停止最后一个无人使用的 watcher。
+- **控制面**：`cancel` 不排普通队列，按 caller identity + operation ID 精确命中前台进程组。writer 区分控制帧与 data 帧；data 在固定 stream window 内尽力发送，慢消费者只能丢弃有明确截断状态的数据，不能饿死 terminal/cancel 或其他 stream。
 
 两把锁是分开的，这点是必须的：**写锁不能和连接锁是同一把**。管道满时写会阻塞到 agent 读走，如果此时还持着连接锁，reader 就无法派发回复，而恰恰是这些回复才能让 agent 继续消费——直接死锁。这个 bug 在写测试时被 `TestConcurrentWritesStayFramed` 抓到了。
 
-副产品：取消一个请求不再需要关掉整条连接。ID 还留在 pending 表里，迟到的回复被丢弃，连接和其他在途请求都不受影响。
+取消一个请求不需要关掉整条连接。agent 对前台命令建立独立进程组，协议 deadline、显式 cancel 和附着连接断开只终止目标组；detached job 使用独立生命周期，不因控制连接断开而被误杀。每个 stream 只允许一个 terminal 事件。
 
 ### 8. 远端 job 记录需要回收
 
@@ -243,7 +244,7 @@ job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直�
 
 **运行中的 job 永不删除**，会出现在 `skipped` 里——删掉记录会让进程继续跑而无法观测和停止，比占磁盘更糟。
 
-**并发删除是幂等的。** job 记录有多个写者：每个 rdev 进程各起一个 agent，共享同一个 `~/.cache/rdev/jobs/`；而单个 agent 内部每个请求也各跑在自己的 goroutine 里（`maxConcurrentRequests`）。原先「读 meta 判断是否 running，再删目录」两步之间没有锁，产生两种错误答案：在删除之后才读到的那个调用会冒出裸的 `meta.json: no such file or directory`；而所有在删除之前读到的调用**都报成功**——`os.RemoveAll` 对已不存在的路径返回 `nil`，于是 6 个并发删除报 6 次删除、6 倍的 `freed_bytes`。后者更糟，因为它看起来是对的。
+**并发删除是幂等的。** job 记录有多个写者：每个 rdev 进程各起一个 agent，共享同一个 `~/.cache/rdev/jobs/`；而单个 agent 的固定 worker 也会并行处理请求（`maxConcurrentRequests`）。原先「读 meta 判断是否 running，再删目录」两步之间没有锁，产生两种错误答案：在删除之后才读到的那个调用会冒出裸的 `meta.json: no such file or directory`；而所有在删除之前读到的调用**都报成功**——`os.RemoveAll` 对已不存在的路径返回 `nil`，于是 6 个并发删除报 6 次删除、6 倍的 `freed_bytes`。后者更糟，因为它看起来是对的。
 
 现在每个 job 由 `<state>/.job-locks/<id>.lock` 上的 `flock` 保护，覆盖 `job_rm`（单个和 sweep）、`job_stop` 的状态写入、以及 supervisor 记录退出码的那一步。锁文件放在 `jobs/` **之外**：放在 job 目录里会被它自己序列化的那次 `RemoveAll` 删掉，而放在 `jobs/` 下又会被 `job_list` 的 `Total` 计数进去。
 
@@ -253,11 +254,11 @@ job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直�
 
 ### 9. 协议兼容是区间，不是精确相等
 
-`proto.Version` 现在是 2（`job_rm` / `list` / `-state` / 多 id `job_wait` / `job_list limit`），并且多了一个 `MinVersion`。
+`proto.Version` 现在是 3，`MinVersion` 是 2。握手交换双方的版本区间和 feature 集合，选择最高公共版本并取 feature 交集；未知 feature 被忽略，操作需要的 feature 缺失时 fail closed 或使用该操作显式声明的安全 fallback。
 
-握手不再要求两侧版本号相等，而是检查 **host 自己的 `Version` 落在 agent 的 `[MinVersion, Version]` 区间内**。因为新 op 是加法：agent 比 host 新完全可用，host 只是不去调那些新 op 而已。而「agent 比 host 新」恰恰是最常见的情况——两个人共用一台开发机，谁最后连上就由谁的 rdev 覆盖了远端二进制。要是坚持精确相等，另一个人立刻就连不上了。
+N/N-1 的共同基础仍可用；只有两端都声明时才启用 operation ID 去重、结构化错误、cancel/deadline、streaming/credit 和截断元数据。v2 peer 不会被误认为拥有 v3 安全保证，尤其不会在无法证明 mutation 未重复执行时静默重放。
 
-反过来 agent 比 host 旧才是真问题（新 op 会返回 `unknown op`），所以错误消息**分方向给结论**，而不是丢一个 `protocol N, want M` 让人猜该动哪边：
+完全没有公共版本才拒绝连接，错误消息**分方向给结论**，而不是丢一个 `protocol N, want M` 让人猜该动哪边：
 
 ```
 remote agent at ... speaks protocol 1 but this rdev needs 2;
@@ -420,7 +421,7 @@ If the builds are from different branches, or you mean to roll back, force it:
 
 **复查自己这轮改动时又抓到 3 个：**
 
-13. **`wg.Wait()` 让 agent 在断连后挂着不退**。为「冲刷在途回复」加的排空是无界的，而 `job_wait` 可以有 3600s 预算，于是每一条掉线的 ssh 都会留下一个空转 agent。实测断连后 15s 仍未退出 → 排空改为 2s 上界。放弃这些 handler 是安全的：管道已关，回复无处可去，而 job 是 `setsid` detach 的，不依赖此进程
+13. **`wg.Wait()` 让 agent 在断连后挂着不退**。为「冲刷在途回复」加的排空是无界的，而 `job_wait` 可以有 3600s 预算，于是每一条掉线的 ssh 都会留下一个空转 agent。Phase 3 将连接生命周期纳入请求状态机：断连立即取消附着的前台进程组和 wait 订阅，固定 worker 会回收；已经 detach 的 job 由独立 supervisor 生命周期继续运行。竞态测试同时断言目标进程消失、其他请求存活且每个操作只有一个 terminal
 14. **`JobOut` 丢掉了 `orphaned` / `child_pid`**。agent 算得出、CLI 直接打印 `proto.JobInfo` 所以能看到，但 MCP 侧结构体没这两个字段——于是**同一个孤儿 job，CLI 说 orphaned、MCP 说健康**，正是 `internal/client` 想防的前端漂移
 15. **`IsConnected` / `Disconnect` 经 `Hosts.Host` 解析会顺手注册主机**。该方法有意会把 ssh 形态的名字自动注册（为一次性机器提供便利），所以一次只读的状态查询就能在 `rdev_session` 列表里留下一个幽灵条目 → 这两处改为直接查连接池
 
@@ -553,27 +554,15 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 
 本轮完成：**job 记录并发安全**（决策 8，flock；实测过的两种错误答案里，「全员谎报删除成功」比裸 errno 更危险）、**拒绝静默降级 agent**（决策 10；hash 比不出新旧，所以最后连上的永远赢）、**构建标识 + `make check-agents`**（`rdev version` 现在能回答「我这个二进制带的什么 agent」）、**`secrets` CLI 面对齐**（`set` 不是漏了而是做不到，写下来了）。
 
-安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地；独立验证通过全量门禁、两个 bootstrap 边界测试各 100 轮，以及 Ubuntu 首次 bootstrap、最小 exec 和双重清理。Phase 2 已继续落地 host-scoped secret、初始化 lease、递归输出脱敏、截断/短值拒绝和 Host 重定义清理；完整完成记录见[演进规划](docs/rdev-evolution-security-plan.md)。Phase 0 尚缺的连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd harness 与 fuzz 基础设施仍按后续阶段实施；原生 `IdentityFile`/`IdentitiesOnly`、CLI 裸前导 dash operand和取消传播也仍属后续范围。
+安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地。Phase 2 已继续落地 host-scoped secret、初始化 lease、递归输出脱敏、截断/短值拒绝和 Host 重定义清理。Phase 3 已完成请求分类与安全重试、稳定 operation ID、agent 端有界去重、结构化错误、协议 cancel/deadline、双向 frame 硬限额、固定 stderr ring、统一资源上限、共享 wait watcher、流状态机/credit 和 CLI/MCP 截断投影；完整完成记录见[演进规划](docs/rdev-evolution-security-plan.md)。
 
-**P1 — `exec` 的流式输出。** 命令跑完(或超时)才返回,期间拿不到增量。
-实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,
-且 kill 走进程组、能覆盖孙进程(测过 `sh -c 'sleep 45' &` 不留孤儿)。所以「跑一下看看输出到哪了」用 `exec` + 短 `timeout_sec` 就够。
-真正的中间地带是**跑 30 秒的命令**:用 `exec` 得盲等,起 job 又要多两次往返——于是不确定要多久的命令倾向于起 job,简单任务也付了 job 的开销。
+**Phase 3 — 请求结果不再靠猜。** 所有操作来自唯一注册表并分为 read-only、idempotent、mutating；未知操作 fail closed。client 为一次逻辑调用生成稳定 operation ID，重连仍绑定同一 caller、operation、请求摘要和 Phase 2 identity/generation lease。agent 的 accepted/final 去重记录有容量、总字节预算和 TTL 上限；同 ID 不同操作或摘要会明确冲突。mutation 只有在同一 agent 的记录能证明安全时才返回已缓存 terminal，重连启动新 agent、agent 重启或安全记录已淘汰时返回 `ambiguous_outcome`，绝不静默再执行。
 
-**排在 P1 而非 P0，是因为它卡在一个前提上。这轮把前提查清了，结论是「按原方案做不通」。** 三处硬证据：
+前台 `exec` 在线协议上先发 `accepted`/`progress`，命令仍在运行时直接发出有界 `data`，结束时只发一个 `final`；每个 data stream 受 credit/window 和总输出预算约束。当前 CLI/MCP API 仍在调用结束时投影最终聚合结果：标准 MCP 增量通知需要客户端提供 progress token，因此没有 token 时不会伪造实时 UI。长任务持续观察仍使用 detached job + `job_logs`/`job_wait`。
 
-1. **线协议是一请求一回复。** `readLoop` 收到回复就 `delete(c.pending, resp.ID)`（`internal/transport/conn.go:597`），增量推送要么改成多回复分帧，要么另开一路 notification——都是动 `proto` 的破坏性改动。
-2. **MCP 的 `notifications/progress` 需要客户端先给 `progressToken`。** 服务端不能主动推：规范要求 token 来自请求方（SDK 里是 `CallToolParams.GetProgressToken`）。翻了本机 16 份 MCP 日志，**`progressToken` 出现 0 次**——Claude Code 调用工具时根本没带。没有 token，这条路在协议层就是关着的。
-3. **Claude Code 实际用的是另一套机制。** 日志里每次连接都留下一行：
-   ```
-   Channel notifications skipped: server did not declare claude/channel capability
-   ```
-   也就是说增量推送走的是 `claude/channel` 这个厂商扩展，而不是标准的 progress notification。MCP SDK v1.7.0 里没有它的任何实现（`grep claude/channel` 无命中），但 `ServerCapabilities` 有 `Extensions`（`{vendor}/{name}` 格式）和 `Experimental` 两个槽，所以**技术上可以自己声明**——前提是先搞清 `claude/channel` 的实际报文格式，而那是未公开的。
+协议 request/response frame 统一硬限制为 8 MiB，无换行超长帧在 `limit+1` 字节内失败并关闭污染连接；stderr 保留固定 64 KiB 尾部。read/output/line/wait/watcher/queue/stream window 都有绝对硬上限，调用方只能调低，负数和溢出会拒绝。输出截断会在 CLI/MCP 同时显示 retained/original/dropped bytes、terminal 和 execution state。
 
-所以现在的状态不是「没排上」，而是**原方案（progress notification）已被证伪，可行方案（`claude/channel`）依赖未公开的协议细节**。
-在拿到格式之前不动手：一个建立在猜测报文上的破坏性改动，代价和收益完全不对称。
-
-长任务的**持续**推送不算在这条里,那个场景本来就该用 job + `job_logs`。
+**残余边界：** 去重是单个 agent 进程内的短期安全缓存，不是 Phase 4 的磁盘事务日志。v2 peer 可继续使用共同的一元协议，但不具备 v3 cancel、streaming、去重或结构化截断保证；对 mutation 的 transport failure 仍按不确定结果处理。多机连接池、idle TTL、job 磁盘预算和 durable dedupe 保持在后续阶段。
 
 **P3 — Windows 远端 Tier 1。** 见上。等第一个真实用户。
 

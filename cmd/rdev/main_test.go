@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
@@ -35,6 +36,24 @@ func TestProjectApprovalOutputTreatsCommittedWarningAsSuccess(t *testing.T) {
 	}
 	if projected["approved"] != true || projected["warning"] == "" {
 		t.Fatalf("CLI JSON projection=%s", b)
+	}
+}
+
+func TestCLIExecTruncationNoticePreservesByteAndTerminalMetadata(t *testing.T) {
+	stdout, _ := proto.NewTruncation(100, 40)
+	stderr, _ := proto.NewTruncation(20, 15)
+	notice := execTruncationNotice(&client.ExecResult{ExecResult: &proto.ExecResult{
+		OperationID: "op_0123456789abcdef", Terminal: true, Execution: proto.StateCompleted,
+		StdoutTruncation: stdout, StderrTruncation: stderr,
+	}})
+	for _, wanted := range []string{
+		"operation_id=op_0123456789abcdef", "terminal=true", "execution_state=completed",
+		"stdout_retained=40", "stdout_original=100", "stdout_dropped=60",
+		"stderr_retained=15", "stderr_original=20", "stderr_dropped=5",
+	} {
+		if !strings.Contains(notice, wanted) {
+			t.Fatalf("notice %q missing %q", notice, wanted)
+		}
 	}
 }
 

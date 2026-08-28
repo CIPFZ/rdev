@@ -139,9 +139,20 @@ type Conn struct {
 	// pending maps a request ID to the channel awaiting its reply. The reader
 	// goroutine owns delivery; Do only registers and waits.
 	pending map[string]chan *proto.Response
+	// streams tracks event ordering for v3 responses. Non-terminal frames are
+	// validated and consumed by readLoop; only the one terminal frame is handed
+	// to Do, so a slow caller cannot block response dispatch for other streams.
+	streams map[string]streamProgress
 	// readErr records why the reader stopped, so a caller blocked on a reply
 	// learns the real cause instead of a bare timeout.
 	readErr error
+	// frameLimit may lower both protocol hard limits for a connection. It is
+	// unexported because callers must never be able to raise the wire budgets;
+	// zero selects the shared request/response absolute limits. Tests use a
+	// smaller value so boundary cases do not need multi-megabyte fixtures.
+	frameLimit      int
+	protocolVersion int
+	features        map[proto.Feature]bool
 
 	// ctlPath is the ssh ControlMaster socket, shared by aux commands so they
 	// skip a fresh TCP+auth handshake.
@@ -153,25 +164,82 @@ type Conn struct {
 	stateDir string
 }
 
-// lockedBuilder is a strings.Builder safe for concurrent append and read.
+type streamProgress struct {
+	state   proto.StreamState
+	lastSeq uint64
+}
+
+// agentStderrTailBytes bounds diagnostic output retained for the lifetime of an
+// SSH connection. A remote agent (or a noisy profile) controls this stream, so
+// keeping its complete history would let a long-lived connection grow without
+// bound.
+const agentStderrTailBytes = 64 << 10
+
+// lockedBuilder is a fixed-capacity byte ring safe for concurrent append and
+// read. The historical name is retained because package tests construct it
+// directly; unlike strings.Builder, its memory use is bounded and String returns
+// the most recent bytes in arrival order.
 //
 // The ssh process writes agent stderr from its own goroutine while callers read
 // it to explain failures, so the buffer needs its own lock.
 type lockedBuilder struct {
-	mu sync.Mutex
-	b  strings.Builder
+	mu    sync.Mutex
+	buf   []byte
+	start int
+	size  int
+	limit int
 }
 
 func (l *lockedBuilder) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.b.Write(p)
+
+	n := len(p)
+	if n == 0 {
+		return 0, nil
+	}
+	limit := l.limit
+	if limit <= 0 || limit > agentStderrTailBytes {
+		limit = agentStderrTailBytes
+	}
+	if len(l.buf) != limit {
+		l.buf = make([]byte, limit)
+		l.start = 0
+		l.size = 0
+	}
+
+	// A write at least as large as the ring supersedes everything retained so
+	// far. Copy only its suffix rather than cycling through discarded bytes.
+	if len(p) >= limit {
+		copy(l.buf, p[len(p)-limit:])
+		l.start = 0
+		l.size = limit
+		return n, nil
+	}
+
+	if overflow := l.size + len(p) - limit; overflow > 0 {
+		l.start = (l.start + overflow) % limit
+		l.size -= overflow
+	}
+	end := (l.start + l.size) % limit
+	first := min(len(p), limit-end)
+	copy(l.buf[end:], p[:first])
+	copy(l.buf, p[first:])
+	l.size += len(p)
+	return n, nil
 }
 
 func (l *lockedBuilder) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.b.String()
+	if l.size == 0 {
+		return ""
+	}
+	out := make([]byte, l.size)
+	first := min(l.size, len(l.buf)-l.start)
+	copy(out, l.buf[l.start:l.start+first])
+	copy(out[first:], l.buf[:l.size-first])
+	return string(out)
 }
 
 // AgentBinary supplies the locally built agent for a target platform. The MCP
@@ -194,6 +262,7 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		host:    host,
 		stderr:  &lockedBuilder{},
 		pending: make(map[string]chan *proto.Response),
+		streams: make(map[string]streamProgress),
 	}
 
 	ctl, err := controlPath(host)
@@ -229,16 +298,31 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	}
 
 	// Handshake: confirms the binary runs and speaks a format we can use.
-	resp, err := c.Do(ctx, &proto.Request{Op: proto.OpPing})
+	resp, err := c.Do(ctx, &proto.Request{
+		Op: proto.OpPing,
+		Hello: &proto.HelloParams{
+			MinVersion: proto.MinVersion, MaxVersion: proto.Version,
+			Features: proto.SupportedFeatures(),
+		},
+	})
 	if err != nil {
 		c.Close()
 		return nil, fmt.Errorf("agent handshake: %w", err)
 	}
-	if !resp.Ping.Compatible(proto.Version) {
+	if resp.Ping == nil {
 		c.Close()
-		if resp.Ping == nil {
-			return nil, errors.New("agent handshake returned no identity")
-		}
+		return nil, errors.New("agent handshake returned no identity")
+	}
+	remoteMin := resp.Ping.MinVersion
+	if remoteMin == 0 {
+		remoteMin = resp.Ping.Version
+	}
+	negotiated, compatible := proto.NegotiateVersion(
+		proto.ProtocolRange{Min: proto.MinVersion, Max: proto.Version},
+		proto.ProtocolRange{Min: remoteMin, Max: resp.Ping.Version},
+	)
+	if !compatible {
+		c.Close()
 		// Name the direction and the fix. An "agent protocol N, want M" alone leaves
 		// the caller guessing which side to update, and the answer is almost always
 		// the same: rebuild so the embedded agent matches.
@@ -252,6 +336,13 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 			"remote agent at %s speaks protocol %d-%d and cannot serve this rdev's %d; "+
 				"a newer rdev installed it -- update this rdev to match",
 			c.agentPath, resp.Ping.MinVersion, resp.Ping.Version, proto.Version)
+	}
+	c.protocolVersion = negotiated
+	c.features = make(map[proto.Feature]bool)
+	for _, feature := range resp.Ping.Features {
+		if proto.IsKnownFeature(feature) {
+			c.features[feature] = true
+		}
 	}
 	return c, nil
 }
@@ -495,8 +586,35 @@ func mapPlatform(unameOut string) (goos, goarch string, err error) {
 	return goos, goarch, nil
 }
 
+const (
+	// streamReadBufferBytes is also the point at which boundedReadLine switches
+	// to exact byte reads. That makes a delimiter-free frame fail on byte
+	// limit+1 instead of waiting for another whole bufio buffer.
+	streamReadBufferBytes = 1 << 20
+)
+
+var errFrameTooLarge = errors.New("NDJSON frame exceeds hard limit")
+
 // newBufReader wraps a reader with the buffer size the agent stream uses.
-func newBufReader(r io.Reader) *bufio.Reader { return bufio.NewReaderSize(r, 1<<20) }
+func newBufReader(r io.Reader) *bufio.Reader {
+	return bufio.NewReaderSize(r, streamReadBufferBytes)
+}
+
+func (c *Conn) effectiveRequestFrameLimit() int {
+	hard := int(proto.AbsoluteRequestFrameBytes)
+	if c.frameLimit > 0 && c.frameLimit < hard {
+		return c.frameLimit
+	}
+	return hard
+}
+
+func (c *Conn) effectiveResponseFrameLimit() int {
+	hard := int(proto.AbsoluteResponseFrameBytes)
+	if c.frameLimit > 0 && c.frameLimit < hard {
+		return c.frameLimit
+	}
+	return hard
+}
 
 // ensureAgent uploads the agent when the remote copy is missing or stale.
 //
@@ -1009,7 +1127,7 @@ func (c *Conn) startAgent(ctx context.Context) error {
 	}
 	c.cmd = cmd
 	c.stdin = stdin
-	c.stdout = bufio.NewReaderSize(stdout, 1<<20)
+	c.stdout = newBufReader(stdout)
 	// One goroutine owns the reader from here on, so callers never touch the pipe
 	// and cannot consume each other's replies.
 	go c.readLoop()
@@ -1036,6 +1154,10 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	req.ID = fmt.Sprint(c.seq)
 	ch := make(chan *proto.Response, 1)
 	c.pending[req.ID] = ch
+	if c.streams == nil {
+		c.streams = make(map[string]streamProgress)
+	}
+	c.streams[req.ID] = streamProgress{state: proto.StreamNew}
 	stdin := c.stdin
 	c.mu.Unlock()
 
@@ -1044,11 +1166,15 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 		c.abandon(req.ID)
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	if len(line) > c.effectiveRequestFrameLimit() {
+		c.abandon(req.ID)
+		return nil, fmt.Errorf("request frame: %w", errFrameTooLarge)
+	}
 
 	// Write under writeMu, not mu: a full pipe blocks here until the agent reads,
 	// and readLoop must stay free to deliver replies meanwhile.
 	c.writeMu.Lock()
-	_, writeErr := stdin.Write(append(line, '\n'))
+	writeErr := writeAll(stdin, append(line, '\n'))
 	c.writeMu.Unlock()
 	if writeErr != nil {
 		c.abandon(req.ID)
@@ -1057,12 +1183,16 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 
 	select {
 	case <-ctx.Done():
-		// Stop waiting, but leave the ID registered so the reader can discard the
-		// reply when it arrives. Unlike the previous serial design, an abandoned
-		// request no longer desynchronizes the stream, so the connection survives
-		// and other in-flight calls are unaffected.
+		// Best-effort protocol cancellation targets only this operation. The
+		// cancel frame has its own request identity and does not wait for a reply;
+		// the target's terminal frame is discarded after this caller returns.
+		c.sendCancel(req)
 		c.abandon(req.ID)
-		return nil, ctx.Err()
+		code := proto.CodeCanceled
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			code = proto.CodeDeadlineExceeded
+		}
+		return nil, fmt.Errorf("%w: %w", proto.NewError(code, req.OperationID, proto.StateCanceled), ctx.Err())
 	case resp := <-ch:
 		if resp == nil {
 			c.mu.Lock()
@@ -1074,10 +1204,59 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 			return nil, fmt.Errorf("read response from agent: %w", err)
 		}
 		if !resp.OK {
-			return resp, fmt.Errorf("remote: %s", resp.Err)
+			if resp.Error != nil && resp.Error.Validate() == nil {
+				return resp, resp.Error
+			}
+			return resp, fmt.Errorf("remote operation failed")
 		}
 		return resp, nil
 	}
+}
+
+func (c *Conn) sendCancel(target *proto.Request) {
+	if target == nil || target.OperationID == "" || target.ClientID == "" || !c.SupportsFeature(proto.FeatureCancel) {
+		return
+	}
+	cancelID, err := proto.NewOperationID()
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.seq++
+	requestID := fmt.Sprint(c.seq)
+	stdin := c.stdin
+	c.mu.Unlock()
+	request := &proto.Request{
+		ID: requestID, OperationID: cancelID, ClientID: target.ClientID,
+		Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: target.OperationID},
+	}
+	line, err := json.Marshal(request)
+	if err != nil || len(line) > c.effectiveRequestFrameLimit() {
+		return
+	}
+	c.writeMu.Lock()
+	_ = writeAll(stdin, append(line, '\n'))
+	c.writeMu.Unlock()
+}
+
+// writeAll handles writers that legally accept only a prefix without returning
+// an error.
+func writeAll(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(p) {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }
 
 // abandon drops a pending entry whose caller gave up waiting.
@@ -1085,6 +1264,7 @@ func (c *Conn) abandon(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.pending, id)
+	delete(c.streams, id)
 }
 
 // readLoop routes agent replies to waiting callers until the stream ends.
@@ -1093,9 +1273,9 @@ func (c *Conn) abandon(id string) {
 // ever reads the pipe, so no caller can consume another's reply.
 func (c *Conn) readLoop() {
 	for {
-		raw, err := readLine(c.stdout)
+		raw, err := readLineLimit(c.stdout, c.effectiveResponseFrameLimit())
 		if err != nil {
-			c.failAllPending(err)
+			c.stopAfterReadFailure(err)
 			return
 		}
 		var resp proto.Response
@@ -1105,22 +1285,54 @@ func (c *Conn) readLoop() {
 			// Raw frames are remote-controlled and may contain a credential in a
 			// noncanonical escaped spelling. Do not embed them in an error that can
 			// reach CLI/MCP output before a matching redactor exists.
-			c.failAllPending(fmt.Errorf("decode agent response: %w", err))
+			c.stopAfterReadFailure(fmt.Errorf("decode agent response: %w", err))
 			return
 		}
 
 		c.mu.Lock()
 		ch, ok := c.pending[resp.ID]
-		if ok {
+		terminal := resp.Type == "" || resp.Terminal || resp.Type == proto.EventFinal || resp.Type == proto.EventError
+		if ok && resp.Type != "" {
+			progress := c.streams[resp.ID]
+			state, seq, stateErr := proto.AdvanceStreamState(progress.state, progress.lastSeq, resp.Type, resp.Seq)
+			if stateErr != nil {
+				c.mu.Unlock()
+				c.stopAfterReadFailure(proto.NewError(proto.CodeInvalidEvent, resp.OperationID, proto.StateAccepted))
+				return
+			}
+			c.streams[resp.ID] = streamProgress{state: state, lastSeq: seq}
+		}
+		if ok && terminal {
 			delete(c.pending, resp.ID)
+			delete(c.streams, resp.ID)
 		}
 		c.mu.Unlock()
-		if ok {
+		if ok && terminal {
 			ch <- &resp
 			continue
 		}
 		// No waiter: the caller timed out and abandoned this ID. Dropping the
 		// reply is correct and, unlike a serial stream, harmless.
+	}
+}
+
+// stopAfterReadFailure both wakes callers and tears down the underlying stream.
+// Once a response frame is oversized or malformed its newline framing is no
+// longer trustworthy, so merely marking Conn closed would leak the SSH process:
+// Close observes the closed bit and deliberately becomes a no-op.
+func (c *Conn) stopAfterReadFailure(err error) {
+	c.failAllPending(err)
+
+	c.mu.Lock()
+	stdin := c.stdin
+	cmd := c.cmd
+	c.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		go cmd.Wait()
 	}
 }
 
@@ -1132,6 +1344,7 @@ func (c *Conn) failAllPending(err error) {
 	}
 	pending := c.pending
 	c.pending = make(map[string]chan *proto.Response)
+	c.streams = make(map[string]streamProgress)
 	c.closed = true
 	c.mu.Unlock()
 
@@ -1141,13 +1354,48 @@ func (c *Conn) failAllPending(err error) {
 	}
 }
 
-// readLine reads one NDJSON record of arbitrary length.
+// readLine reads one NDJSON record under the protocol hard limit.
 func readLine(r *bufio.Reader) ([]byte, error) {
+	return readLineLimit(r, int(proto.AbsoluteResponseFrameBytes))
+}
+
+// readLineLimit reads one newline-terminated NDJSON record without ever
+// retaining more than limit bytes. Near the boundary it switches from ReadLine
+// to ReadByte: bufio.ReadLine otherwise waits for its whole internal buffer to
+// fill, so a peer that sends exactly limit+1 bytes and stalls could evade prompt
+// rejection until it sent substantially more data.
+func readLineLimit(r *bufio.Reader, limit int) ([]byte, error) {
+	absoluteMax := int(proto.AbsoluteRequestFrameBytes)
+	if int(proto.AbsoluteResponseFrameBytes) > absoluteMax {
+		absoluteMax = int(proto.AbsoluteResponseFrameBytes)
+	}
+	if limit <= 0 || limit > absoluteMax {
+		limit = absoluteMax
+	}
 	var buf []byte
 	for {
+		remaining := limit - len(buf)
+		if remaining < streamReadBufferBytes {
+			b, err := r.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			if b == '\n' {
+				return buf, nil
+			}
+			if remaining == 0 {
+				return nil, errFrameTooLarge
+			}
+			buf = append(buf, b)
+			continue
+		}
+
 		chunk, isPrefix, err := r.ReadLine()
 		if err != nil {
 			return nil, err
+		}
+		if len(chunk) > remaining {
+			return nil, errFrameTooLarge
 		}
 		buf = append(buf, chunk...)
 		if !isPrefix {
@@ -1171,6 +1419,16 @@ func (c *Conn) AgentPath() string { return c.agentPath }
 
 // Host returns the connection's host descriptor.
 func (c *Conn) Host() Host { return c.host }
+
+// NegotiatedVersion and SupportsFeature expose the handshake result without
+// allowing callers to mutate it.
+func (c *Conn) NegotiatedVersion() int { return c.protocolVersion }
+
+func (c *Conn) SupportsFeature(feature proto.Feature) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.features[feature]
+}
 
 // SSHArgs returns the base ssh options, so helpers like rsync can reuse the
 // same multiplexed connection.
@@ -1197,6 +1455,7 @@ func (c *Conn) closeLocked() error {
 	// that race: an unwoken waiter would hang until its context expired.
 	pending := c.pending
 	c.pending = make(map[string]chan *proto.Response)
+	c.streams = make(map[string]streamProgress)
 	for _, ch := range pending {
 		select {
 		case ch <- nil:

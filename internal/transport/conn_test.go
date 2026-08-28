@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -29,17 +30,26 @@ import (
 // testing, and it is unreachable through the public Dial path without a live
 // machine.
 func newTestConn(t *testing.T) (c *Conn, requests *json.Decoder, replies io.Writer, killAgent func()) {
+	return newTestConnWithFrameLimit(t, 0)
+}
+
+func newTestConnWithFrameLimit(t *testing.T, frameLimit int) (c *Conn, requests *json.Decoder, replies io.Writer, killAgent func()) {
 	t.Helper()
 
 	reqR, reqW := io.Pipe()
 	respR, respW := io.Pipe()
+	readerSize := streamReadBufferBytes
+	if frameLimit > 0 && frameLimit < readerSize {
+		readerSize = frameLimit
+	}
 
 	c = &Conn{
-		host:    Host{Name: "test", Addr: "u@h"},
-		stderr:  &lockedBuilder{},
-		pending: make(map[string]chan *proto.Response),
-		stdin:   reqW,
-		stdout:  newBufReader(respR),
+		host:       Host{Name: "test", Addr: "u@h"},
+		stderr:     &lockedBuilder{},
+		pending:    make(map[string]chan *proto.Response),
+		stdin:      reqW,
+		stdout:     bufio.NewReaderSize(respR, readerSize),
+		frameLimit: frameLimit,
 	}
 	go c.readLoop()
 	t.Cleanup(func() {
@@ -47,6 +57,47 @@ func newTestConn(t *testing.T) (c *Conn, requests *json.Decoder, replies io.Writ
 		reqR.Close()
 	})
 	return c, json.NewDecoder(reqR), respW, func() { respW.Close() }
+}
+
+func TestLockedBuilderRetainsFixedTail(t *testing.T) {
+	w := &lockedBuilder{limit: 5}
+	if n, err := w.Write([]byte("abc")); err != nil || n != 3 {
+		t.Fatalf("first Write = %d, %v", n, err)
+	}
+	if n, err := w.Write([]byte("def")); err != nil || n != 3 {
+		t.Fatalf("second Write = %d, %v", n, err)
+	}
+	if got := w.String(); got != "bcdef" {
+		t.Fatalf("tail after wrap = %q, want bcdef", got)
+	}
+
+	// A single oversized write should retain only its suffix while still
+	// reporting the complete input consumed to os/exec.
+	if n, err := w.Write([]byte("0123456789")); err != nil || n != 10 {
+		t.Fatalf("oversized Write = %d, %v", n, err)
+	}
+	if got := w.String(); got != "56789" {
+		t.Fatalf("tail after oversized write = %q, want 56789", got)
+	}
+}
+
+func TestLockedBuilderConcurrentWritesStayBounded(t *testing.T) {
+	w := &lockedBuilder{limit: 128}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p := []byte(strings.Repeat(fmt.Sprintf("%02d", i), 10))
+			if n, err := w.Write(p); err != nil || n != len(p) {
+				t.Errorf("Write = %d, %v, want %d, nil", n, err, len(p))
+			}
+		}(i)
+	}
+	wg.Wait()
+	if got := len(w.String()); got != 128 {
+		t.Fatalf("retained %d bytes, want fixed capacity 128", got)
+	}
 }
 
 func sendReply(t *testing.T, w io.Writer, resp *proto.Response) {
@@ -59,6 +110,95 @@ func sendReply(t *testing.T, w io.Writer, resp *proto.Response) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadLineLimitAcceptsBoundaryAndRejectsNextByte(t *testing.T) {
+	const limit = 32
+	line := strings.Repeat("x", limit)
+	got, err := readLineLimit(bufio.NewReader(strings.NewReader(line+"\n")), limit)
+	if err != nil {
+		t.Fatalf("boundary frame rejected: %v", err)
+	}
+	if string(got) != line {
+		t.Fatalf("boundary frame = %q, want %q", got, line)
+	}
+
+	_, err = readLineLimit(bufio.NewReader(strings.NewReader(line+"x")), limit)
+	if !errors.Is(err, errFrameTooLarge) {
+		t.Fatalf("delimiter-free overlimit error = %v, want errFrameTooLarge", err)
+	}
+}
+
+func TestOversizedResponseFrameClosesConnection(t *testing.T) {
+	const limit = 64
+	c, requests, replies, _ := newTestConnWithFrameLimit(t, limit)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		done <- err
+	}()
+
+	var req proto.Request
+	if err := requests.Decode(&req); err != nil {
+		t.Fatal(err)
+	}
+	// No delimiter is sent. The reader must reject on byte limit+1 rather than
+	// waiting for a newline or accumulating an arbitrary response.
+	if _, err := replies.Write([]byte(strings.Repeat("x", limit+1))); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errFrameTooLarge) {
+			t.Fatalf("Do error = %v, want errFrameTooLarge", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("oversized response did not fail promptly")
+	}
+
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if !closed {
+		t.Fatal("connection remained usable after oversized response polluted framing")
+	}
+	if _, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing}); err == nil {
+		t.Fatal("Do succeeded after oversized response closed the connection")
+	}
+}
+
+func TestDoRejectsOversizedRequestBeforeWrite(t *testing.T) {
+	var dst bytes.Buffer
+	c := &Conn{
+		stderr:     &lockedBuilder{},
+		pending:    make(map[string]chan *proto.Response),
+		stdin:      nopWriteCloser{Writer: &dst},
+		frameLimit: 128,
+	}
+	_, err := c.Do(context.Background(), &proto.Request{
+		Op: proto.OpWriteFile,
+		Cat: &proto.WriteParams{
+			Path:    "synthetic",
+			Content: strings.Repeat("x", 256),
+		},
+	})
+	if !errors.Is(err, errFrameTooLarge) {
+		t.Fatalf("Do error = %v, want errFrameTooLarge", err)
+	}
+	if dst.Len() != 0 {
+		t.Fatalf("wrote %d bytes before rejecting oversized request", dst.Len())
+	}
+	c.mu.Lock()
+	pending := len(c.pending)
+	c.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("oversized request left %d pending entries", pending)
+	}
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 // The core of the multiplexing change: a reply that arrives second must still
 // reach the caller that is waiting for it. Under the previous serial design the
@@ -121,6 +261,103 @@ func TestDoRoutesRepliesOutOfOrder(t *testing.T) {
 	}
 	if !got["first"] || !got["second"] {
 		t.Errorf("got %v, want both callers to receive their own reply", got)
+	}
+}
+
+func TestDoValidatesStreamingAndReturnsOnlyTerminal(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	done := make(chan *proto.Response, 1)
+	go func() {
+		response, err := c.Do(context.Background(), &proto.Request{
+			Op: proto.OpExec, OperationID: "op_0123456789abcdef", ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		if err != nil {
+			t.Errorf("Do: %v", err)
+		}
+		done <- response
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	frames := []*proto.Response{
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventAccepted, Seq: 1, OK: true},
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventData, Seq: 2, OK: true, Data: &proto.DataFrame{Stream: "stdout", Content: "eA==", ContentB64: true}},
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventProgress, Seq: 3, OK: true, Progress: &proto.ProgressFrame{Phase: "running"}},
+		{ID: request.ID, OperationID: request.OperationID, Type: proto.EventFinal, Seq: 4, Terminal: true, OK: true, Exec: &proto.ExecResult{Stdout: "x"}},
+	}
+	for _, frame := range frames {
+		sendReply(t, replies, frame)
+	}
+	select {
+	case response := <-done:
+		if response == nil || !response.Terminal || response.Type != proto.EventFinal || response.Exec.Stdout != "x" {
+			t.Fatalf("Do returned non-terminal frame: %+v", response)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Do did not return terminal frame")
+	}
+}
+
+func TestInvalidStreamOrderingClosesConnection(t *testing.T) {
+	c, requests, replies, _ := newTestConn(t)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.Do(context.Background(), &proto.Request{Op: proto.OpPing})
+		errCh <- err
+	}()
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, Type: proto.EventData, Seq: 1, OK: true,
+		Data: &proto.DataFrame{Stream: "stdout", Content: "eA==", ContentB64: true},
+	})
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("data-before-accepted was not rejected")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("invalid stream did not fail the waiter")
+	}
+}
+
+func TestContextCancelWritesExactProtocolCancel(t *testing.T) {
+	c, requests, _, _ := newTestConn(t)
+	c.features = map[proto.Feature]bool{proto.FeatureCancel: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Do(ctx, &proto.Request{
+			Op: proto.OpExec, OperationID: "op_0123456789abcdef", ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		done <- err
+	}()
+	var original proto.Request
+	if err := requests.Decode(&original); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	var cancelRequest proto.Request
+	if err := requests.Decode(&cancelRequest); err != nil {
+		t.Fatal(err)
+	}
+	if cancelRequest.Op != proto.OpCancel || cancelRequest.ClientID != original.ClientID ||
+		cancelRequest.Cancel == nil || cancelRequest.Cancel.OperationID != original.OperationID {
+		t.Fatalf("cancel request = %+v", cancelRequest)
+	}
+	select {
+	case err := <-done:
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) || envelope.Code != proto.CodeCanceled {
+			t.Fatalf("cancel error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled Do did not return")
 	}
 }
 

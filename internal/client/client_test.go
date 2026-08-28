@@ -1141,7 +1141,7 @@ func TestRetrySlowCloseCannotOverwriteReplacementReadyPublication(t *testing.T) 
 
 	retryDone := make(chan error, 1)
 	go func() {
-		_, err := c.Exec(context.Background(), ExecOptions{Host: "dev", Argv: []string{"true"}})
+		_, err := c.ReadFile(context.Background(), "dev", "status", 0, 1)
 		retryDone <- err
 	}()
 	<-closeEntered
@@ -1224,11 +1224,144 @@ func TestFixedRequestRetryRefusesRedefinedAlias(t *testing.T) {
 		}}, nil
 	}
 	_, err := c.WriteFile(t.Context(), WriteFileOptions{Host: "dev", Path: "/tmp/x", Content: "host-a-only-data"})
-	if err == nil || !strings.Contains(err.Error(), "identity changed") {
-		t.Fatalf("cross-identity retry error = %v", err)
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeAmbiguousOutcome || envelope.ExecutionState != proto.StatePossiblyExecuted {
+		t.Fatalf("cross-identity mutation error = %#v, want ambiguous_outcome", err)
 	}
 	if requestsOnB != 0 {
 		t.Fatalf("host A request was replayed to host B %d times", requestsOnB)
+	}
+}
+
+func TestResponseLossRetrySemanticsByOperationClass(t *testing.T) {
+	t.Run("read-only reconnects with stable operation identity", func(t *testing.T) {
+		c := newTestClient()
+		if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+			t.Fatal(err)
+		}
+		type seenRequest struct {
+			operationID string
+			clientID    string
+			replay      bool
+		}
+		var seen []seenRequest
+		dials := 0
+		c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+			dials++
+			thisDial := dials
+			return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+				seen = append(seen, seenRequest{req.OperationID, req.ClientID, req.Replay})
+				if thisDial == 1 {
+					// Model a completed read whose final response was lost with the
+					// transport. Repeating a read is explicitly safe.
+					return nil, errors.New("injected response loss")
+				}
+				return &proto.Response{OK: true, Read: &proto.ReadResult{Content: "ok", EOF: true}}, nil
+			}}, nil
+		}
+
+		res, err := c.ReadFile(t.Context(), "dev", "synthetic", 0, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Content != "ok" || dials != 2 || len(seen) != 2 {
+			t.Fatalf("result=%+v dials=%d seen=%+v", res, dials, seen)
+		}
+		if seen[0].operationID == "" || seen[0].operationID != seen[1].operationID {
+			t.Fatalf("operation IDs changed across retry: %+v", seen)
+		}
+		if seen[0].clientID == "" || seen[0].clientID != seen[1].clientID || seen[0].clientID != c.callerID {
+			t.Fatalf("caller IDs changed across retry: %+v caller=%q", seen, c.callerID)
+		}
+		if seen[0].replay || !seen[1].replay {
+			t.Fatalf("replay markers = %+v, want false then true", seen)
+		}
+	})
+
+	t.Run("idempotent reconnects with stable operation identity", func(t *testing.T) {
+		c := newTestClient()
+		if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+			t.Fatal(err)
+		}
+		var operationIDs, clientIDs []string
+		var replays []bool
+		dials := 0
+		c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+			dials++
+			thisDial := dials
+			return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+				operationIDs = append(operationIDs, req.OperationID)
+				clientIDs = append(clientIDs, req.ClientID)
+				replays = append(replays, req.Replay)
+				if thisDial == 1 {
+					return nil, errors.New("injected response loss")
+				}
+				return &proto.Response{OK: true}, nil
+			}}, nil
+		}
+
+		_, err := c.do(t.Context(), "dev", &proto.Request{
+			Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: "op_synthetic_target"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dials != 2 || len(operationIDs) != 2 || operationIDs[0] == "" || operationIDs[0] != operationIDs[1] {
+			t.Fatalf("dials=%d operation IDs=%v", dials, operationIDs)
+		}
+		if clientIDs[0] == "" || clientIDs[0] != clientIDs[1] || replays[0] || !replays[1] {
+			t.Fatalf("client IDs=%v replay=%v", clientIDs, replays)
+		}
+	})
+
+	t.Run("mutation is not replayed without dedupe proof", func(t *testing.T) {
+		c := newTestClient()
+		if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+			t.Fatal(err)
+		}
+		executions := 0
+		var operationID, clientID string
+		c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+			return &fakeRemoteConn{host: h, handler: func(req *proto.Request) (*proto.Response, error) {
+				executions++
+				operationID, clientID = req.OperationID, req.ClientID
+				// The mutation completed, but its final response was lost.
+				return nil, errors.New("injected response loss")
+			}}, nil
+		}
+
+		_, err := c.WriteFile(t.Context(), WriteFileOptions{Host: "dev", Path: "synthetic", Content: "value"})
+		var envelope *proto.ErrorEnvelope
+		if !errors.As(err, &envelope) {
+			t.Fatalf("error = %#v, want structured envelope", err)
+		}
+		if envelope.Code != proto.CodeAmbiguousOutcome || envelope.ExecutionState != proto.StatePossiblyExecuted || envelope.OperationID != operationID {
+			t.Fatalf("envelope = %+v operationID=%q", envelope, operationID)
+		}
+		if executions != 1 || operationID == "" || clientID != c.callerID {
+			t.Fatalf("executions=%d operationID=%q clientID=%q caller=%q", executions, operationID, clientID, c.callerID)
+		}
+	})
+}
+
+func TestUnknownOperationFailsClosedBeforeDial(t *testing.T) {
+	c := newTestClient()
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+		t.Fatal(err)
+	}
+	dials := 0
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		dials++
+		return &fakeRemoteConn{host: h}, nil
+	}
+
+	_, err := c.do(t.Context(), "dev", &proto.Request{Op: "synthetic_unknown"})
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeUnknownOperation || envelope.ExecutionState != proto.StateNotSent {
+		t.Fatalf("error = %#v, want unknown-operation envelope", err)
+	}
+	if dials != 0 {
+		t.Fatalf("unknown operation dialed %d times", dials)
 	}
 }
 

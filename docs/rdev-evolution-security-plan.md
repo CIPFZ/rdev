@@ -759,8 +759,8 @@ effective profile 由 global/host/project/request 合并，并生成 profile dig
 | SEC-003 | High | secret Store 只有全局名称，没有 host scope | [`internal/secrets/secrets.go:27`](../internal/secrets/secrets.go#L27) | 主机 A 的凭据可能被注入主机 B | Phase 2 |
 | SEC-004 | Medium | JSON 序列化后才做字面脱敏 | [`internal/mcpsrv/server.go:99`](../internal/mcpsrv/server.go#L99) | 含特殊字符的秘密可绕过脱敏 | Phase 2 |
 | SEC-005 | Medium | 连接先发布，随后才加载声明密钥 | [`internal/client/client.go:115`](../internal/client/client.go#L115) | 首次并发请求可能输出未脱敏秘密 | Phase 2 |
-| SEC-006 | Medium | 传输失败后无差别重放非幂等请求 | [`internal/client/client.go:191`](../internal/client/client.go#L191) | 重复命令、job、追加或删除 | Phase 3 |
-| SEC-007 | Medium | 远端响应帧和 stderr 缓冲无硬上限 | [`internal/transport/conn.go:714`](../internal/transport/conn.go#L714) | 恶意远端 agent 可造成本机 OOM | Phase 3 |
+| SEC-006 | Medium | 传输失败后无差别重放非幂等请求 | [`internal/client/client.go:191`](../internal/client/client.go#L191) | 重复命令、job、追加或删除 | Phase 3（已完成） |
+| SEC-007 | Medium | 远端响应帧和 stderr 缓冲无硬上限 | [`internal/transport/conn.go:714`](../internal/transport/conn.go#L714) | 恶意远端 agent 可造成本机 OOM | Phase 3（已完成） |
 | SEC-008 | Low | 陈旧 job PID 复用时可能误杀无关进程 | [`cmd/rdev-agent/jobs_run.go:128`](../cmd/rdev-agent/jobs_run.go#L128) | 终止同账号的无关进程组 | Phase 4 |
 | SEC-009 | Low | 超过 64 KiB 的远端密钥被静默截断并登记 | [`internal/client/client.go:525`](../internal/client/client.go#L525) | 错误凭据或不完整脱敏 | Phase 2 |
 | SEC-010 | Low | 1–5 字节密钥可注入但不会脱敏 | [`internal/secrets/secrets.go:124`](../internal/secrets/secrets.go#L124) | PIN/短口令进入工具结果 | Phase 2 |
@@ -780,12 +780,12 @@ effective profile 由 global/host/project/request 合并，并生成 profile dig
 | --- | --- | --- | --- | --- |
 | ENG-001 | P0 | 项目配置自动覆盖同名全局 host，没有 trust/approve | 打开恶意仓库即可改变连接目标和 bootstrap 数据 | Phase 1 |
 | ENG-002 | P0 | Host 重定义保留旧 sticky env 和 secret 状态 | 状态污染和跨主机凭据混用 | Phase 2 |
-| ENG-003 | P0 | context cancel 只停止本机等待，没有协议级 cancel | 远端前台命令可能继续运行 | Phase 3 |
+| ENG-003 | P0 | context cancel 只停止本机等待，没有协议级 cancel | 远端前台命令可能继续运行 | Phase 3（已完成） |
 | ENG-004 | P0 | `job_start` 先启动 supervisor 再写 metadata | 写入失败会产生不可管理的孤儿任务 | Phase 4 |
 | ENG-005 | P0 | job 日志无限增长且只有手动回收 | 远端磁盘耗尽 | Phase 4 |
 | ENG-006 | P1 | job ID 没有 grammar/containment 检查 | job 操作可越出 `state/jobs` | Phase 4 |
-| ENG-007 | P1 | `job_wait` 不占普通并发 slot，数量无上限 | goroutine 和文件轮询耗尽 | Phase 3 |
-| ENG-008 | P1 | read、output、line、request frame 缺少统一硬上限 | 本地或远端内存压力 | Phase 3 |
+| ENG-007 | P1 | `job_wait` 不占普通并发 slot，数量无上限 | goroutine 和文件轮询耗尽 | Phase 3（已完成） |
+| ENG-008 | P1 | read、output、line、request frame 缺少统一硬上限 | 本地或远端内存压力 | Phase 3（已完成） |
 | ENG-009 | P1 | `doList`、`jobList` 先读取完整目录再应用 limit | 超大目录延迟和内存不可控 | Phase 4 |
 | ENG-010 | P1 | 文件写入直接 `O_TRUNC`，`chmod` 错误被忽略 | 中断留下半文件，模式承诺不可靠 | Phase 4 |
 | ENG-011 | P1 | host 配置保存不是原子写，既有模式不修复 | 崩溃损坏配置或保留宽权限 | Phase 1 |
@@ -809,8 +809,8 @@ effective profile 由 global/host/project/request 合并，并生成 profile dig
 | ENG-029 | P1 | job 没有 CPU、内存、PID、FD 和数量 envelope | 多 Agent 可争抢或耗尽远端计算资源 | Phase 4 |
 | ENG-030 | P0 | 持久 state 没有 schema、migration、quarantine 和 repair | 升级或损坏记录可能让 job 状态不可恢复 | Phase 4 |
 | ENG-031 | P1 | 文件传输缺少分块、resume、digest、原子提交和冲突语义 | 大文件中断、并发覆盖和部分同步不可安全恢复 | Phase 4 |
-| ENG-032 | P1 | 一请求一回复协议缺少 streaming、progress 和背压 | 大输出和慢 client 会造成延迟、轮询或内存压力 | Phase 3 |
-| ENG-033 | P0 | 错误主要依赖字符串，没有稳定 retry/execution-state 语义 | Agent 可能错误重试或误判已执行状态 | Phase 3 |
+| ENG-032 | P1 | 一请求一回复协议缺少 streaming、progress 和背压 | 大输出和慢 client 会造成延迟、轮询或内存压力 | Phase 3（已完成） |
+| ENG-033 | P0 | 错误主要依赖字符串，没有稳定 retry/execution-state 语义 | Agent 可能错误重试或误判已执行状态 | Phase 3（已完成） |
 | ENG-034 | P1 | `rdevd` 的安装、single-instance、reload、drain 和升级未定义 | broker 难以作为长期用户服务可靠运行 | Phase 5 |
 | ENG-035 | P1 | 发布缺少签名、SBOM、provenance、升级回滚和兼容矩阵 | 供应链和远端 agent 升级不可审计 | Phase 8 |
 | ENG-036 | P1 | 缺少正式支持矩阵和非目标 | 用户会把未测试的 PTY、Windows、ACL 等行为当作承诺 | Phase 0/6 |
@@ -894,7 +894,7 @@ Batch A 新增的负向与竞态覆盖包括：项目配置未批准/摘要变�
 
 第一轮独立验证已在隔离的 Ubuntu amd64 目录中通过真实 SSH bootstrap、exec、read/write 与 rsync，并由本地 Claude Code 通过 rdev MCP 完成一次只读远端调用；精确测试目录已清理且二次确认无目录、symlink 或进程残留。第二轮发现 GNU `stat` 空文件类型文本回归后已改为 numeric metadata + `test -f` + fd/inode 绑定。最终代码 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 已由独立 review 将两个 bootstrap 顺序窗口均判定为 fixed；独立测试通过全量门禁、两个边界测试各 100 轮，以及 Ubuntu 首次 bootstrap、最小 exec 和双重清理验证。rdev 当前没有原生 `IdentityFile`/`IdentitiesOnly` 字段，测试使用隔离 SSH wrapper 注入认证参数，此能力纳入 P4-01/P6 支持验收。
 
-独立验证同时确认：底层/MCP 可安全同步裸 `-leading-local`，但 CLI parser 不能直接表达该 operand（`./-leading-local` 可用）；输出被截断时协议有状态而 CLI 不展示；本地 context cancel 不传播到远端进程。这三项分别进入 P6-09、P3-12 和既有 P3-04，不在本批提前实现 Phase 3。
+独立验证同时确认：底层/MCP 可安全同步裸 `-leading-local`，但 CLI parser 不能直接表达该 operand（`./-leading-local` 可用）；当时输出被截断时 CLI 不展示、本地 context cancel 不传播到远端进程。这三项分别进入 P6-09、P3-12 和既有 P3-04；后两项现已由 Phase 3 完成，前一项仍保留在 Phase 6。
 
 Batch A 已验收：最终代码 SHA 为 `c9a796cc8ea57aee2afbca13671d27b360baaee5`；本地与独立验证的 `gofmt`、`make clean && make all`、`go test ./...`、`go test -race ./...`、`go vet ./...` 和 `make check-agents` 全部通过，独立针对性复验也通过两个 bootstrap 边界测试各 100 轮及 Ubuntu 实机链路。此结论只验收 Phase 0–1 当前批次，不把尚缺的 P0-02/P0-06/P0-07/P0-09/P0-10 伪装成已完成。维护者审查归档见 [`docs/security/phase0-1-codex-security-review.md`](security/phase0-1-codex-security-review.md)。
 
@@ -941,7 +941,7 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 
 本阶段明确未覆盖：
 
-- 尚未引入 Phase 3 的幂等请求分类、协议级 cancel、frame/output 统一硬上限或结构化 error envelope；现有一次 transport retry 未扩大，并新增 immutable identity 检查，alias 在重试间重定义时拒绝把旧请求重放到新目标。
+- Phase 3 已在其独立完成批次中补齐操作分类、安全重试、协议级 cancel/deadline、frame/output 硬上限、结构化 error envelope 与流状态机；Phase 2 的 immutable identity/generation/operation lease 继续贯穿这些路径。
 - 尚未引入 Phase 4 的完整连接池、LRU/TTL、`IdentityFile`/`IdentitiesOnly` execution profile 或历史 secret rotation archive；Phase 2 只实现每 alias 的安全初始化与 operation/mutation lease。
 - 多 principal capability 和共享 broker secret authority 仍属于 Phase 5；当前 scope 是单进程 registry 的 global/project scope，并以 alias-local identity 隔离。
 - 显式的两步跨 scope 文件操作本身不是跨文件原子事务；进程在两步之间崩溃时需要调用方继续第二步或恢复旧文件。本阶段刻意不伪装成拥有不存在的崩溃一致性，自动 `persist=true` 路径保持 fail-closed。若未来要求单命令原子迁移，需要引入可恢复 journal/transaction manifest，并在每次 Load/写入前完成恢复。
@@ -954,19 +954,32 @@ Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 
 | Task | 内容 | 依赖 | 验收条件 |
 | --- | --- | --- | --- |
-| P3-01 | 为每个 op 声明 `read-only/idempotent/mutating` | P0-04 | 自动重试仅适用于安全类别 |
-| P3-02 | 增加稳定 operation ID 和 agent 端有界去重 | P3-01 | “执行后响应丢失”故障注入不会重复 mutation |
-| P3-03 | 引入 `ambiguous_outcome` | P3-01 | 无法证明未执行时不谎报失败或重试成功 |
-| P3-04 | 增加协议级 cancel/deadline | P3-01 | 本地取消能终止对应远端前台进程组，不影响其他请求 |
-| P3-05 | 限制 NDJSON request/response frame | P0-03 | 超限在常量内存内失败并关闭坏连接 |
-| P3-06 | stderr 改固定 ring buffer | P0-03 | 长期连接内存不随 stderr 总量增长 |
-| P3-07 | 为 read/output/line/wait/queue 定义绝对上限 | P0-01 | 任意协议字段不能绕过上限造成大分配 |
-| P3-08 | 单独限制 job wait watchers | P3-07 | 同 job 多个 waiter 可 fan-out，goroutine 数有界 |
-| P3-09 | 建立共享 error code registry 和 envelope | P3-01 | CLI/MCP/broker/agent 对 retry 和 execution_state 使用同一语义 |
-| P3-10 | 定义 accepted/data/progress/final 流状态机和 feature negotiation | P3-05、P3-09 | 单 stream 只有一个 terminal event，N/N-1 能协商是否支持 streaming |
-| P3-11 | 实现 frame budget、stream window/credit 和慢 client 策略 | P3-10 | 慢 stream 不造成其他 stream 饥饿或无界缓冲 |
-| P3-12 | CLI/MCP 明确投影输出截断状态与原始字节计数 | P3-07 | 发生截断时人和 Agent 都不会误判为完整输出 |
-| P3-12 | 将 cancel、final、disconnect 和 detach 竞态纳入协议测试 | P3-04、P3-10 | 每种竞态得到确定且可恢复的 terminal state |
+| [x] P3-01 | 为每个 op 声明 `read-only/idempotent/mutating` | P0-04 | 自动重试仅适用于安全类别 |
+| [x] P3-02 | 增加稳定 operation ID 和 agent 端有界去重 | P3-01 | “执行后响应丢失”故障注入不会重复 mutation |
+| [x] P3-03 | 引入 `ambiguous_outcome` | P3-01 | 无法证明未执行时不谎报失败或重试成功 |
+| [x] P3-04 | 增加协议级 cancel/deadline | P3-01 | 本地取消能终止对应远端前台进程组，不影响其他请求 |
+| [x] P3-05 | 限制 NDJSON request/response frame | P0-03 | 超限在常量内存内失败并关闭坏连接 |
+| [x] P3-06 | stderr 改固定 ring buffer | P0-03 | 长期连接内存不随 stderr 总量增长 |
+| [x] P3-07 | 为 read/output/line/wait/queue 定义绝对上限 | P0-01 | 任意协议字段不能绕过上限造成大分配 |
+| [x] P3-08 | 单独限制 job wait watchers | P3-07 | 同 job 多个 waiter 可 fan-out，goroutine 数有界 |
+| [x] P3-09 | 建立共享 error code registry 和 envelope | P3-01 | CLI/MCP/broker/agent 对 retry 和 execution_state 使用同一语义 |
+| [x] P3-10 | 定义 accepted/data/progress/final 流状态机和 feature negotiation | P3-05、P3-09 | 单 stream 只有一个 terminal event，N/N-1 能协商是否支持 streaming |
+| [x] P3-11 | 实现 frame budget、stream window/credit 和慢 client 策略 | P3-10 | 慢 stream 不造成其他 stream 饥饿或无界缓冲 |
+| [x] P3-12 | CLI/MCP 明确投影输出截断状态与原始字节计数 | P3-07 | 发生截断时人和 Agent 都不会误判为完整输出 |
+| [x] P3-13 | 将 cancel、final、disconnect 和 detach 竞态纳入协议测试 | P3-04、P3-10 | 每种竞态得到确定且可恢复的 terminal state |
+
+Phase 3 完成记录：
+
+- `internal/proto` 是 operation descriptor、error code、execution state、feature、stream event 和 hard limit 的唯一注册来源。client、agent、CLI 和 MCP 都消费同一组类型；未知 operation 和未知安全语义 fail closed。
+- client 为每个逻辑调用固定 caller/operation ID、deadline 和请求摘要。read-only/idempotent 只按注册策略受控重试；mutation 在 agent 内存去重仍能证明相同请求时复用 accepted/final，跨新 agent、重启或记录淘汰则返回 `ambiguous_outcome`。同 operation ID 的 op/digest 冲突明确拒绝。
+- agent 的去重表同时受 TTL、条目容量和 64 MiB 结果字节预算约束，运行中 accepted 记录不被淘汰；超出结果预算的 mutation 保留 compact ambiguous tombstone，不能退化成重新执行。该表是进程内故障窗口保护，不宣称跨重启 exactly-once；durable mutation journal 不借本阶段提前实现。
+- 前台命令拥有独立进程组。cancel/deadline/attached disconnect 精确终止目标组，detach job 保持独立；控制请求不进入普通队列。状态机执行 `accepted → progress/data* → final`，并在取消、终态、断连和 detach 竞态下保持唯一 terminal。
+- request/response NDJSON frame 使用共同 8 MiB 绝对上限；无换行超帧只读取 `limit+1` 即关闭污染连接。stderr 使用固定 64 KiB ring。read/output/line/wait/watcher/queue/window 参数经防负数和防溢出的绝对上限校验，调用方只能调低。
+- `job_wait` 使用独立 worker/queue 和共享 watcher hub；相同 job fan-out 一个观察循环，waiter/watcher 都有上限，取消会解除订阅并在无人使用时回收。目录和 job list 改为增量有界选择，避免为列表预载全部 metadata。
+- streaming 通过 N/N-1 版本区间与 feature 交集协商。exec 的 data chunk 在进程仍运行时由 stdout/stderr copy 路径直接发出，受 frame budget、stream credit 和输出预算约束；writer 优先 terminal/cancel 等控制帧，慢 data consumer 不制造无界缓冲或阻塞其他流。CLI/MCP 最终投影明确带 `truncated`、retained/original/dropped bytes、operation ID、terminal 与 execution state。
+- 新增的观测词汇是固定低基数枚举；secret、argv、stdout/stderr 和远端路径不进入 label。测试使用临时目录、合成数据、fault injection/barrier，并覆盖响应丢失三种操作分类、restart/eviction/conflict、取消竞态、超大/无换行/二进制/无限输出、watcher fan-out/queue、N/N-1、唯一 terminal、慢消费者与 CLI/MCP 元数据。
+
+兼容与残余边界：协议 3 的最低兼容版本是 2；v2 共同操作保留一元 fallback，但只有双方协商到对应 feature 才启用 v3 cancel、streaming、dedupe 和结构化截断。标准 MCP progress 仍依赖调用方提供 progress token，未提供时 MCP 返回最终聚合结果而不伪造实时通知。Phase 4 的百机连接池、idle TTL、job 磁盘预算、持久去重/事务日志和 job durable ownership 未在本阶段扩大范围。
 
 ### Phase 4：单进程百机 Connection Manager 与 job 耐久性
 

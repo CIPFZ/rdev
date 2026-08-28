@@ -85,3 +85,28 @@ func TestSecretAndConnectionEventsHaveFixedVocabularyAndNoSensitiveLabels(t *tes
 		}
 	}
 }
+
+func TestPhase3MetricsHaveFixedLowCardinalityVocabulary(t *testing.T) {
+	r := New(nil)
+	for i := 0; i < 1000; i++ {
+		r.Request(RequestQueued)
+		r.Protocol(ProtocolFrameRejected)
+		r.Resource(ResourceQueueRejected)
+		r.Dedupe(DedupeHit)
+		r.Request(RequestEvent(fmt.Sprintf("request.%d", i)))
+		r.Protocol(ProtocolEvent(fmt.Sprintf("protocol.%d", i)))
+		r.Resource(ResourceEvent(fmt.Sprintf("resource.%d", i)))
+		r.Dedupe(DedupeEvent(fmt.Sprintf("dedupe.%d", i)))
+	}
+	s := r.Snapshot()
+	if len(s.RequestEvents) != len(requestEvents) || len(s.ProtocolEvents) != len(protocolEvents) ||
+		len(s.ResourceEvents) != len(resourceEvents) || len(s.DedupeEvents) != len(dedupeEvents) {
+		t.Fatalf("unexpected metric cardinality: %+v", s)
+	}
+	if s.RequestEvents[string(RequestQueued)] != 1000 ||
+		s.ProtocolEvents[string(ProtocolFrameRejected)] != 1000 ||
+		s.ResourceEvents[string(ResourceQueueRejected)] != 1000 ||
+		s.DedupeEvents[string(DedupeHit)] != 1000 {
+		t.Fatalf("fixed event counters were not retained: %+v", s)
+	}
+}

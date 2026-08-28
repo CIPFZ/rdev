@@ -144,6 +144,60 @@ func TestEveryToolHasADescription(t *testing.T) {
 	}
 }
 
+func TestPhase3OutputProjectionPreservesTruncationAndTerminalMetadata(t *testing.T) {
+	stdout, _ := proto.NewTruncation(100, 40)
+	stderr, _ := proto.NewTruncation(20, 20)
+	exec := toExecOut(&client.ExecResult{ExecResult: &proto.ExecResult{
+		OperationID: "op_0123456789abcdef", Terminal: true, Execution: proto.StateCompleted,
+		Stdout: "kept", StdoutBytes: 100, StderrBytes: 20,
+		StdoutTruncation: stdout, StderrTruncation: stderr, Truncated: true,
+	}})
+	if exec.OperationID == "" || !exec.Terminal || exec.ExecutionState != proto.StateCompleted ||
+		exec.StdoutTruncation.OriginalBytes != 100 || exec.StdoutTruncation.RetainedBytes != 40 || exec.StdoutTruncation.DroppedBytes != 60 {
+		t.Fatalf("exec projection lost phase3 metadata: %+v", exec)
+	}
+	logs := toJobLogsOut(&proto.JobResult{
+		OperationID: "op_1123456789abcdef", Terminal: true, Execution: proto.StateCompleted,
+		Logs: "a\nb", LogsTruncation: stdout,
+	})
+	if logs.Returned != 2 || logs.Truncation.DroppedBytes != 60 || !logs.Terminal || logs.ExecutionState != proto.StateCompleted {
+		t.Fatalf("log projection lost phase3 metadata: %+v", logs)
+	}
+}
+
+func TestMCPStructuredErrorEnvelopeIsPreserved(t *testing.T) {
+	c := newTestClient()
+	srv := New(c)
+	type errorIn struct{}
+	type errorOut struct{}
+	mcp.AddTool(srv, &mcp.Tool{Name: "test_phase3_error", Description: "test"},
+		func(context.Context, *mcp.CallToolRequest, errorIn) (*mcp.CallToolResult, errorOut, error) {
+			return nil, errorOut{}, proto.NewError(
+				proto.CodeAmbiguousOutcome, "op_0123456789abcdef", proto.StatePossiblyExecuted,
+			)
+		})
+	cs := connectServer(t, srv)
+	result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "test_phase3_error", Arguments: errorIn{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("structured error was not marked IsError: %+v", result)
+	}
+	raw, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope proto.ErrorEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Code != proto.CodeAmbiguousOutcome || envelope.Retryable ||
+		envelope.ExecutionState != proto.StatePossiblyExecuted || envelope.OperationID != "op_0123456789abcdef" || !envelope.Terminal {
+		t.Fatalf("MCP envelope lost fields: %+v", envelope)
+	}
+}
+
 // argv must be an array in the schema. If it were a string, the model could pass
 // a shell command and the no-shell guarantee would be gone at the API boundary.
 func TestExecArgvIsAnArrayInSchema(t *testing.T) {

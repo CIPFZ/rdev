@@ -78,13 +78,37 @@ func redactResults(c *client.Client) mcp.Middleware {
 			if method != "tools/call" {
 				return res, err
 			}
-			// Errors travel to the caller as text too, so they need the same scrub.
+			// Stable rdev errors are tool results, not opaque MCP protocol errors.
+			// This preserves code/retry/execution/operation/terminal fields so an
+			// Agent can make the same decision as the CLI.
 			if err != nil {
+				var envelope *proto.ErrorEnvelope
+				if errors.As(err, &envelope) {
+					copy := *envelope
+					ctr := &mcp.CallToolResult{
+						IsError: true, StructuredContent: &copy,
+						Content: []mcp.Content{&mcp.TextContent{Text: copy.Message}},
+					}
+					redactCallToolResult(c, ctr)
+					return ctr, nil
+				}
 				err = errors.New(c.Secrets.Redact(err.Error()))
 			}
 			ctr, ok := res.(*mcp.CallToolResult)
 			if !ok || ctr == nil {
 				return res, err
+			}
+			// AddTool converts ordinary handler errors into CallToolResult before
+			// receiving middleware runs. GetError retains the original typed error
+			// specifically for middleware, so recover the stable envelope here.
+			if underlying := ctr.GetError(); underlying != nil {
+				var envelope *proto.ErrorEnvelope
+				if errors.As(underlying, &envelope) {
+					copy := *envelope
+					ctr.IsError = true
+					ctr.StructuredContent = &copy
+					ctr.Content = []mcp.Content{&mcp.TextContent{Text: copy.Message}}
+				}
 			}
 			redactCallToolResult(c, ctr)
 			return ctr, err
@@ -163,15 +187,22 @@ type ExecIn struct {
 }
 
 type ExecOut struct {
-	ExitCode    int    `json:"exit_code"`
-	Stdout      string `json:"stdout"`
-	Stderr      string `json:"stderr"`
-	StdoutBytes int64  `json:"stdout_bytes"`
-	StderrBytes int64  `json:"stderr_bytes"`
-	Truncated   bool   `json:"truncated,omitempty"`
-	TimedOut    bool   `json:"timed_out,omitempty"`
-	DurationMS  int64  `json:"duration_ms"`
-	Cwd         string `json:"cwd,omitempty"`
+	ExitCode         int                  `json:"exit_code"`
+	Stdout           string               `json:"stdout"`
+	Stderr           string               `json:"stderr"`
+	StdoutB64        bool                 `json:"stdout_b64,omitempty"`
+	StderrB64        bool                 `json:"stderr_b64,omitempty"`
+	StdoutBytes      int64                `json:"stdout_bytes"`
+	StderrBytes      int64                `json:"stderr_bytes"`
+	Truncated        bool                 `json:"truncated,omitempty"`
+	TimedOut         bool                 `json:"timed_out,omitempty"`
+	DurationMS       int64                `json:"duration_ms"`
+	Cwd              string               `json:"cwd,omitempty"`
+	StdoutTruncation proto.Truncation     `json:"stdout_truncation"`
+	StderrTruncation proto.Truncation     `json:"stderr_truncation"`
+	OperationID      string               `json:"operation_id"`
+	Terminal         bool                 `json:"terminal"`
+	ExecutionState   proto.ExecutionState `json:"execution_state"`
 }
 
 const (
@@ -211,18 +242,22 @@ func registerExec(s *mcp.Server, c *client.Client) {
 		if err != nil {
 			return nil, ExecOut{}, err
 		}
-		return nil, ExecOut{
-			ExitCode:    res.ExitCode,
-			Stdout:      res.Stdout,
-			Stderr:      res.Stderr,
-			StdoutBytes: res.StdoutBytes,
-			StderrBytes: res.StderrBytes,
-			Truncated:   res.Truncated,
-			TimedOut:    res.TimedOut,
-			DurationMS:  res.DurationMS,
-			Cwd:         res.Cwd,
-		}, nil
+		return nil, toExecOut(res), nil
 	})
+}
+
+func toExecOut(res *client.ExecResult) ExecOut {
+	if res == nil {
+		return ExecOut{}
+	}
+	return ExecOut{
+		ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr,
+		StdoutB64: res.StdoutB64, StderrB64: res.StderrB64,
+		StdoutBytes: res.StdoutBytes, StderrBytes: res.StderrBytes,
+		Truncated: res.Truncated, TimedOut: res.TimedOut, DurationMS: res.DurationMS, Cwd: res.Cwd,
+		StdoutTruncation: res.StdoutTruncation, StderrTruncation: res.StderrTruncation,
+		OperationID: res.OperationID, Terminal: res.Terminal, ExecutionState: res.Execution,
+	}
 }
 
 // ---------- jobs ----------
@@ -249,8 +284,11 @@ type JobOut struct {
 	// Orphaned and ChildPID surface a job whose supervisor died while the work
 	// kept running. Without them an orphaned job is indistinguishable from a
 	// healthy one here, even though no exit code will ever be recorded for it.
-	Orphaned bool `json:"orphaned,omitempty" jsonschema:"The supervisor died but the command is still running. The job is observable and stoppable, but its exit code is lost."`
-	ChildPID int  `json:"child_pid,omitempty" jsonschema:"The surviving command's pid, reported only when the job is orphaned."`
+	Orphaned       bool                 `json:"orphaned,omitempty" jsonschema:"The supervisor died but the command is still running. The job is observable and stoppable, but its exit code is lost."`
+	ChildPID       int                  `json:"child_pid,omitempty" jsonschema:"The surviving command's pid, reported only when the job is orphaned."`
+	OperationID    string               `json:"operation_id,omitempty"`
+	Terminal       bool                 `json:"terminal"`
+	ExecutionState proto.ExecutionState `json:"execution_state"`
 }
 
 func toJobOut(j *proto.JobInfo) JobOut {
@@ -261,6 +299,7 @@ func toJobOut(j *proto.JobInfo) JobOut {
 		ID: j.ID, Label: j.Label, Argv: j.Argv, Cwd: j.Cwd, PID: j.PID,
 		State: j.State, ExitCode: j.ExitCode, StartedAt: j.StartedAt, EndedAt: j.EndedAt,
 		Orphaned: j.Orphaned, ChildPID: j.ChildPID,
+		OperationID: j.OperationID, Terminal: j.Terminal, ExecutionState: j.Execution,
 	}
 }
 
@@ -290,11 +329,15 @@ type JobLogsIn struct {
 }
 
 type JobLogsOut struct {
-	Logs       string `json:"logs"`
-	NextOffset int64  `json:"next_offset"`
-	LogSize    int64  `json:"log_size"`
-	Matched    int    `json:"matched,omitempty" jsonschema:"How many lines matched grep in total. tail_lines is applied afterwards, so logs may contain fewer lines than this."`
-	Returned   int    `json:"returned" jsonschema:"How many lines are actually in logs."`
+	Logs           string               `json:"logs"`
+	NextOffset     int64                `json:"next_offset"`
+	LogSize        int64                `json:"log_size"`
+	Matched        int                  `json:"matched,omitempty" jsonschema:"How many lines matched grep in total. tail_lines is applied afterwards, so logs may contain fewer lines than this."`
+	Returned       int                  `json:"returned" jsonschema:"How many lines are actually in logs."`
+	Truncation     proto.Truncation     `json:"truncation"`
+	OperationID    string               `json:"operation_id"`
+	Terminal       bool                 `json:"terminal"`
+	ExecutionState proto.ExecutionState `json:"execution_state"`
 }
 
 type JobStopIn struct {
@@ -314,19 +357,24 @@ type JobWaitIn struct {
 }
 
 type WaitedJobOut struct {
-	ID   string `json:"id"`
-	Job  JobOut `json:"job"`
-	Err  string `json:"err,omitempty" jsonschema:"Why this job could not be waited on, usually an unknown id. Other jobs in the same call still report normally."`
-	Logs string `json:"logs,omitempty"`
+	ID             string           `json:"id"`
+	Job            JobOut           `json:"job"`
+	Err            string           `json:"err,omitempty" jsonschema:"Why this job could not be waited on, usually an unknown id. Other jobs in the same call still report normally."`
+	Logs           string           `json:"logs,omitempty"`
+	LogsTruncation proto.Truncation `json:"logs_truncation"`
 }
 
 type JobWaitOut struct {
 	Job JobOut `json:"job,omitempty" jsonschema:"Set when waiting on a single id."`
 	// Waited is set when ids was used.
-	Waited   []WaitedJobOut `json:"waited,omitempty"`
-	TimedOut bool           `json:"timed_out,omitempty" jsonschema:"True when the wait budget expired while a job was still running. The jobs are unaffected."`
-	WaitedMS int64          `json:"waited_ms"`
-	Logs     string         `json:"logs,omitempty"`
+	Waited         []WaitedJobOut       `json:"waited,omitempty"`
+	TimedOut       bool                 `json:"timed_out,omitempty" jsonschema:"True when the wait budget expired while a job was still running. The jobs are unaffected."`
+	WaitedMS       int64                `json:"waited_ms"`
+	Logs           string               `json:"logs,omitempty"`
+	LogsTruncation proto.Truncation     `json:"logs_truncation"`
+	OperationID    string               `json:"operation_id"`
+	Terminal       bool                 `json:"terminal"`
+	ExecutionState proto.ExecutionState `json:"execution_state"`
 }
 
 type JobRmIn struct {
@@ -406,14 +454,7 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 		if err != nil {
 			return nil, JobLogsOut{}, err
 		}
-		returned := 0
-		if res.Logs != "" {
-			returned = strings.Count(res.Logs, "\n") + 1
-		}
-		return nil, JobLogsOut{
-			Logs: res.Logs, NextOffset: res.NextOffset,
-			LogSize: res.LogSize, Matched: res.Matched, Returned: returned,
-		}, nil
+		return nil, toJobLogsOut(res), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -444,13 +485,16 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 			return nil, JobWaitOut{}, err
 		}
 		out := JobWaitOut{
-			TimedOut: res.TimedOut,
-			WaitedMS: res.WaitedMS,
-			Logs:     res.Logs,
+			TimedOut:       res.TimedOut,
+			WaitedMS:       res.WaitedMS,
+			Logs:           res.Logs,
+			LogsTruncation: res.LogsTruncation, OperationID: res.OperationID,
+			Terminal: res.Terminal, ExecutionState: res.Execution,
 		}
 		for _, w := range res.Waited {
 			out.Waited = append(out.Waited, WaitedJobOut{
 				ID: w.ID, Job: toJobOut(w.Info), Err: w.Err, Logs: w.Logs,
+				LogsTruncation: w.LogsTruncation,
 			})
 		}
 		if res.Info != nil {
@@ -479,6 +523,22 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 	})
 }
 
+func toJobLogsOut(res *proto.JobResult) JobLogsOut {
+	if res == nil {
+		return JobLogsOut{}
+	}
+	returned := 0
+	if res.Logs != "" {
+		returned = strings.Count(res.Logs, "\n") + 1
+	}
+	return JobLogsOut{
+		Logs: res.Logs, NextOffset: res.NextOffset,
+		LogSize: res.LogSize, Matched: res.Matched, Returned: returned,
+		Truncation: res.LogsTruncation, OperationID: res.OperationID,
+		Terminal: res.Terminal, ExecutionState: res.Execution,
+	}
+}
+
 // ---------- files ----------
 type ReadIn struct {
 	Host   string `json:"host"`
@@ -488,10 +548,14 @@ type ReadIn struct {
 }
 
 type ReadOut struct {
-	Content string `json:"content"`
-	Base64  bool   `json:"base64,omitempty" jsonschema:"True when the content is binary and base64-encoded."`
-	Size    int64  `json:"size"`
-	EOF     bool   `json:"eof"`
+	Content        string               `json:"content"`
+	Base64         bool                 `json:"base64,omitempty" jsonschema:"True when the content is binary and base64-encoded."`
+	Size           int64                `json:"size"`
+	EOF            bool                 `json:"eof"`
+	Truncation     proto.Truncation     `json:"truncation"`
+	OperationID    string               `json:"operation_id"`
+	Terminal       bool                 `json:"terminal"`
+	ExecutionState proto.ExecutionState `json:"execution_state"`
 }
 
 type WriteIn struct {
@@ -503,8 +567,11 @@ type WriteIn struct {
 }
 
 type WriteOut struct {
-	Path         string `json:"path"`
-	BytesWritten int    `json:"bytes_written"`
+	Path           string               `json:"path"`
+	BytesWritten   int                  `json:"bytes_written"`
+	OperationID    string               `json:"operation_id"`
+	Terminal       bool                 `json:"terminal"`
+	ExecutionState proto.ExecutionState `json:"execution_state"`
 }
 
 type ListIn struct {
@@ -523,10 +590,13 @@ type EntryOut struct {
 }
 
 type ListOut struct {
-	Path      string     `json:"path"`
-	Entries   []EntryOut `json:"entries"`
-	Total     int        `json:"total" jsonschema:"Entry count before limit was applied."`
-	Truncated bool       `json:"truncated,omitempty"`
+	Path           string               `json:"path"`
+	Entries        []EntryOut           `json:"entries"`
+	Total          int                  `json:"total" jsonschema:"Entry count before limit was applied."`
+	Truncated      bool                 `json:"truncated,omitempty"`
+	OperationID    string               `json:"operation_id"`
+	Terminal       bool                 `json:"terminal"`
+	ExecutionState proto.ExecutionState `json:"execution_state"`
 }
 
 const defaultReadLimit = 65536
@@ -544,7 +614,11 @@ func registerFiles(s *mcp.Server, c *client.Client) {
 		if err != nil {
 			return nil, ReadOut{}, err
 		}
-		return nil, ReadOut{Content: res.Content, Base64: res.ContentB64, Size: res.Size, EOF: res.EOF}, nil
+		return nil, ReadOut{
+			Content: res.Content, Base64: res.ContentB64, Size: res.Size, EOF: res.EOF,
+			Truncation: res.Truncation, OperationID: res.OperationID,
+			Terminal: res.Terminal, ExecutionState: res.Execution,
+		}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -558,7 +632,10 @@ func registerFiles(s *mcp.Server, c *client.Client) {
 		if err != nil {
 			return nil, WriteOut{}, err
 		}
-		return nil, WriteOut{Path: res.Path, BytesWritten: res.BytesWritten}, nil
+		return nil, WriteOut{
+			Path: res.Path, BytesWritten: res.BytesWritten, OperationID: res.OperationID,
+			Terminal: res.Terminal, ExecutionState: res.Execution,
+		}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -573,6 +650,7 @@ func registerFiles(s *mcp.Server, c *client.Client) {
 		}
 		out := ListOut{
 			Path: res.Path, Total: res.Total, Truncated: res.Truncated,
+			OperationID: res.OperationID, Terminal: res.Terminal, ExecutionState: res.Execution,
 			Entries: make([]EntryOut, 0, len(res.Entries)),
 		}
 		for _, e := range res.Entries {
