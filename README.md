@@ -165,14 +165,13 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 ### 6. 凭据在边界统一脱敏
 
 注册过的值在**所有**返回值里被替换成 `<redacted:name>`（stdout/stderr/日志/错误消息/job argv/rsync 命令行/cwd）。
-用 `env: {"TOKEN":"secret:name"}` 可以把明文注入远端环境，而值从不出现在调用或结果里。
+可注入 secret 的完整键是 `registry scope + immutable host identity + name`；用 `env: {"TOKEN":"secret:name"}` 只会解析当前 host 身份下的精确同名值，不会回退到其他 host 或 output-only 值。
 
 **两道防线，因为逐字段脱敏被证明会漏。** `SyncResult.Command` 漏过一轮（见 bug 17），
 而它和已脱敏的 `Stdout` 在同一个结构体字面量里——漏掉不会有任何报错，代价是明文凭据进对话记录。
 
-1. **逐字段 `Redact`**（各 handler 内）。CLI 直接用 `internal/client`、不走 MCP，所以这层必须留着。
-2. **MCP 边界兜底**（`AddReceivingMiddleware`）。跑在**已序列化**的 `structuredContent` 和文本 fallback 上，
-   所以「新加一个字段」甚至「新加一个工具」都自动覆盖，不依赖谁记得。
+1. **client 请求边界递归脱敏**。identity lease 覆盖请求构造、secret 展开、远端响应、结构化递归脱敏和错误脱敏，完成后才释放；CLI 直接消费这里的结果。
+2. **MCP 边界兜底**（`AddReceivingMiddleware`）。SDK 给出 JSON 时先解码回原始字符串、递归脱敏、再序列化；文本 fallback 同理。这样含引号、反斜杠、换行、Unicode escape 的 secret 不会因 JSON 转义而绕过。
 
 第 2 层是实测出来的，不是推的：`rdev_session` 的 `cwd` **本来就没有**逐字段脱敏，
 关掉中间件后测试立刻在真实 MCP 往返里抓到明文（`TestMiddlewareRedactsUnscrubbedResultField`）。
@@ -183,7 +182,7 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 {"action":"set_from_file", "name":"apptoken", "host":"dev", "path":"~/.config/myapp/token"}
 ```
 值经 agent 连接读取，直接进 store —— 不落本地磁盘、不进对话记录。
-不带 `host` 则读本地文件；**注意两侧凭据可能不同**，注册错的值会导致远端明文不被脱敏（假通过）。
+不带 `host` 的 inline/local-file 注册为兼容保留的 **output-only** 值：参与全局输出脱敏，但永远不能注入任何远端。需要注入时必须显式提供 `host`，因此两台主机的同名 secret 可以安全并存。
 
 **声明式注册**（免去每个会话手动重注册）：store 是内存态的（有意为之，明文不落盘），
 但那意味着每开一个新 MCP 会话都得重新注册一遍——而**忘记注册的凭据就是会原样进对话记录的凭据**。
@@ -193,9 +192,14 @@ profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv �
 {"name":"dev", "addr":"user@h", "secrets":{"apptoken":"~/.config/myapp/token"}}
 ```
 
-首次连接该主机时经 agent 读取并注册,**在第一条命令执行之前**完成——延迟注册会留下一个明文可外泄的窗口。
-存的是路径不是值,所以本地磁盘上依然没有任何凭据。已显式注册过的同名 secret 不会被覆盖(手动调用优先)。
-读取失败只在 stderr 警告、不阻断连接:一个凭据文件缺失不该让整台机器不可用。
+首次连接进入 `cold → initializing → ready|failed`：连接持有该 alias 的 identity/generation lease，原子加载全部声明 secret 后才进入 pool 并服务并发请求。`rdev_session.connection_security` 会显示状态和固定 reason。
+存的是路径不是值，所以本地磁盘上依然没有任何凭据。已在同一精确 host identity 下显式注册的同名 secret 不会被覆盖（手动调用优先）。任一声明读取失败、二进制、空值、短值或截断都会令初始化 **fail closed**；连接不会伪装成已保护。
+
+所有入口统一拒绝小于 **6 bytes** 的值。远端 secret 最大 64 KiB；恰好边界且 `EOF=true` 可接受，`EOF=false`（包括多一字节）拒绝且 Store 保持不变。
+
+Host 的地址/用户/端口/远端 state namespace/scope 身份变化时，旧 sticky state 和该 alias 的所有 scoped secret 会被清理并推进 generation；不会把旧凭据迁移到新目标。只改变 `force_agent_upload` 会重建连接和重载 secret，但保留非身份性的 sticky 配置。
+
+声明式值带有 `declarative` provenance，安全重连时会原子重读；同一 exact key 的手工值带 `manual` provenance，继续保持显式优先。每次输出同时用“操作开始时的不可变脱敏快照”和返回时的当前 Store 处理，因此轮换/删除不会让在途旧响应失去 redactor，新注册值也会被覆盖，且不会把不同 host 的长操作全局串行化。远端声称 `content_b64=true` 也不是绕过许可：若编码字符串命中已注册值，该片段会 fail closed 地改为普通脱敏文本，而不是返回看似有效但已被篡改的 base64。
 
 按长度降序替换：当一个 secret 是另一个的子串时，先替换短的会让长的漏出片段。
 
@@ -463,7 +467,7 @@ rdev hosts add dev user@h -secret apptoken='~/.config/myapp/token' -save   # 只
 # CLI 这三条只用来验证凭据路径解析正确、且脱敏真的覆盖了远端的值：
 rdev secrets set-from-file apptoken ~/.config/myapp/token -host dev   # 只打印长度，不打印值
 rdev secrets check dev apptoken -path ~/.config/myapp/token -- env    # → {"redacted": true}
-rdev secrets list                                                     # 本进程已注册的名字
+rdev secrets list                                                     # 本进程已注册的 scope/host identity/name 描述符
 ```
 
 **CLI 故意没有 `secrets set <name> <value>`**，尽管 MCP 侧有 `action=set`。理由不是「避免密钥进 shell history」（那是个次要顾虑），而是它**做不到**：CLI 会注册、打印长度、然后进程退出，store 随之消失 —— 看起来提供了 MCP 的能力，实际什么也没做。MCP 侧有意义是因为 `rdev serve` 是长生命周期进程，注册完还会接着用那个值。
@@ -549,7 +553,7 @@ Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**—�
 
 本轮完成：**job 记录并发安全**（决策 8，flock；实测过的两种错误答案里，「全员谎报删除成功」比裸 errno 更危险）、**拒绝静默降级 agent**（决策 10；hash 比不出新旧，所以最后连上的永远赢）、**构建标识 + `make check-agents`**（`rdev version` 现在能回答「我这个二进制带的什么 agent」）、**`secrets` CLI 面对齐**（`set` 不是漏了而是做不到，写下来了）。
 
-安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地；独立验证通过全量门禁、两个 bootstrap 边界测试各 100 轮，以及 Ubuntu 首次 bootstrap、最小 exec 和双重清理。Phase 0 只落了本批需要的 `SECURITY.md`、安全事件/低基数指标 seam、characterization/race 测试和支持矩阵基础；连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd harness 与 fuzz 基础设施仍按[演进规划](docs/rdev-evolution-security-plan.md)后续实施。原生 `IdentityFile`/`IdentitiesOnly`、host-scoped secret 初始化 lease、CLI 裸前导 dash operand、truncation 可见性和取消传播仍是后续阶段验收项。
+安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地；独立验证通过全量门禁、两个 bootstrap 边界测试各 100 轮，以及 Ubuntu 首次 bootstrap、最小 exec 和双重清理。Phase 2 已继续落地 host-scoped secret、初始化 lease、递归输出脱敏、截断/短值拒绝和 Host 重定义清理；完整完成记录见[演进规划](docs/rdev-evolution-security-plan.md)。Phase 0 尚缺的连接 simulator、完整 doctor/trace、storage fixture、隔离 sshd harness 与 fuzz 基础设施仍按后续阶段实施；原生 `IdentityFile`/`IdentitiesOnly`、CLI 裸前导 dash operand和取消传播也仍属后续范围。
 
 **P1 — `exec` 的流式输出。** 命令跑完(或超时)才返回,期间拿不到增量。
 实测确认:**超时会保留被 kill 之前已产生的 stdout/stderr**,`timed_out=true`、`truncated`/`stdout_bytes` 计数照旧准确,

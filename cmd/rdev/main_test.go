@@ -3,10 +3,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/session"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 func TestProjectApprovalOutputTreatsCommittedWarningAsSuccess(t *testing.T) {
@@ -38,5 +43,36 @@ func TestProjectApprovalOutputKeepsAmbiguousFailure(t *testing.T) {
 	}
 	if _, err := projectApprovalOutput(session.ProjectTrust{}, ambiguous); !errors.Is(err, ambiguous) {
 		t.Fatalf("ambiguous approval error=%v", err)
+	}
+}
+
+func TestPrintJSONRecursivelyRedactsSpecialCharacterSecret(t *testing.T) {
+	c := client.New(func(string, string) (*transport.AgentBinary, error) { return nil, nil })
+	token := "quote\"slash\\line\n雪界-token"
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), token); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	t.Cleanup(func() { os.Stdout = original })
+	if err := printJSON(c, map[string]any{"nested": []any{map[string]string{"value": "prefix " + token}}}); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	os.Stdout = original
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "雪界") || strings.Contains(string(raw), "quote") || !strings.Contains(string(raw), "redacted:tok") {
+		t.Fatalf("CLI JSON boundary leaked or lost placeholder: %s", raw)
 	}
 }

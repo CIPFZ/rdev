@@ -1,15 +1,22 @@
 package secrets
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func testKey(name string) Key { return OutputKey(name) }
+
+var testHost = HostIdentity{Alias: "dev", Fingerprint: "fingerprint", Generation: 1}
 
 func TestRedactReplacesValue(t *testing.T) {
 	s := New()
-	if err := s.Set("tok", "82d9b49359b262b40bdbbfa844891b5e"); err != nil {
+	if err := s.Set(testKey("tok"), "82d9b49359b262b40bdbbfa844891b5e"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -22,7 +29,7 @@ func TestRedactReplacesValue(t *testing.T) {
 
 func TestRedactAllOccurrences(t *testing.T) {
 	s := New()
-	s.Set("k", "supersecret")
+	s.Set(testKey("k"), "supersecret")
 	got := s.Redact("supersecret and supersecret again")
 	if strings.Contains(got, "supersecret") {
 		t.Errorf("plaintext survived redaction: %q", got)
@@ -36,8 +43,8 @@ func TestRedactAllOccurrences(t *testing.T) {
 // leaks a fragment. Longest-first ordering is what prevents that.
 func TestRedactLongestFirst(t *testing.T) {
 	s := New()
-	s.Set("short", "abc123")
-	s.Set("long", "abc123456789")
+	s.Set(testKey("short"), "abc123")
+	s.Set(testKey("long"), "abc123456789")
 
 	got := s.Redact("value=abc123456789")
 	if got != "value=<redacted:long>" {
@@ -45,23 +52,28 @@ func TestRedactLongestFirst(t *testing.T) {
 	}
 }
 
-// Very short values would match constantly and mangle unrelated output, so they
-// are deliberately not redacted.
-func TestRedactSkipsShortValues(t *testing.T) {
+// Short values must be rejected at registration so injection can never succeed
+// without a matching redaction guarantee.
+func TestSetRejectsShortValuesAndPreservesExisting(t *testing.T) {
 	s := New()
-	s.Set("tiny", "ab")
-	got := s.Redact("ab cd ab")
-	if got != "ab cd ab" {
-		t.Errorf("short secret should not be redacted, got %q", got)
+	key := testKey("tiny")
+	if err := s.Set(key, "abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set(key, "ab"); err == nil {
+		t.Fatal("short secret was accepted")
+	}
+	if got, _ := s.Get(key); got != "abcdef" {
+		t.Errorf("rejected update changed Store to %q", got)
 	}
 }
 
 func TestSetRejectsEmpty(t *testing.T) {
 	s := New()
-	if err := s.Set("", "v"); err == nil {
+	if err := s.Set(testKey(""), "value1"); err == nil {
 		t.Error("expected error for empty name")
 	}
-	if err := s.Set("n", ""); err == nil {
+	if err := s.Set(testKey("n"), ""); err == nil {
 		t.Error("expected error for empty value")
 	}
 }
@@ -76,10 +88,10 @@ func TestSetFromFileTrimsNewline(t *testing.T) {
 	}
 
 	s := New()
-	if err := s.SetFromFile("k", path); err != nil {
+	if err := s.SetFromFile(testKey("k"), path); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := s.Get("k")
+	got, ok := s.Get(testKey("k"))
 	if !ok {
 		t.Fatal("secret not registered")
 	}
@@ -94,16 +106,16 @@ func TestSetFromFileRejectsEmpty(t *testing.T) {
 	os.WriteFile(path, []byte("   \n"), 0o600)
 
 	s := New()
-	if err := s.SetFromFile("k", path); err == nil {
+	if err := s.SetFromFile(testKey("k"), path); err == nil {
 		t.Error("expected error for whitespace-only secret file")
 	}
 }
 
 func TestResolveEnvExpandsReference(t *testing.T) {
 	s := New()
-	s.Set("gongfeng", "realtokenvalue")
+	s.Set(HostKey("project", testHost, "gongfeng"), "realtokenvalue")
 
-	out, err := s.ResolveEnv(map[string]string{
+	out, err := s.ResolveEnv("project", testHost, map[string]string{
 		"GONGFENG_TOKEN": "secret:gongfeng",
 		"PLAIN":          "literal",
 	})
@@ -120,7 +132,7 @@ func TestResolveEnvExpandsReference(t *testing.T) {
 
 func TestResolveEnvUnknownSecret(t *testing.T) {
 	s := New()
-	_, err := s.ResolveEnv(map[string]string{"V": "secret:nope"})
+	_, err := s.ResolveEnv("project", testHost, map[string]string{"V": "secret:nope"})
 	if err == nil {
 		t.Fatal("expected error for unknown secret")
 	}
@@ -131,16 +143,16 @@ func TestResolveEnvUnknownSecret(t *testing.T) {
 
 func TestDeleteAndNames(t *testing.T) {
 	s := New()
-	s.Set("b", "value-b")
-	s.Set("a", "value-a")
+	s.Set(testKey("b"), "value-b")
+	s.Set(testKey("a"), "value-a")
 
 	if got := s.Names(); len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("Names() = %v, want sorted [a b]", got)
 	}
-	if !s.Delete("a") {
+	if !s.Delete(testKey("a")) {
 		t.Error("Delete() should report true for an existing secret")
 	}
-	if s.Delete("a") {
+	if s.Delete(testKey("a")) {
 		t.Error("Delete() should report false for a missing secret")
 	}
 	if got := s.Names(); len(got) != 1 {
@@ -153,7 +165,7 @@ func TestDeleteAndNames(t *testing.T) {
 // accident (a credential echoed or dumped verbatim), not against transformation.
 func TestRedactDoesNotCatchFragments(t *testing.T) {
 	s := New()
-	s.Set("tok", "82d9b49359b262b40bdbbfa844891b5e")
+	s.Set(testKey("tok"), "82d9b49359b262b40bdbbfa844891b5e")
 
 	got := s.Redact("prefix=82d9")
 	if got != "prefix=82d9" {
@@ -167,7 +179,7 @@ func TestRedactDoesNotCatchFragments(t *testing.T) {
 func TestRedactMasksWrappedValue(t *testing.T) {
 	const tok = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 	s := New()
-	s.Set("tok", tok)
+	s.Set(testKey("tok"), tok)
 
 	cases := map[string]string{
 		"wrapped at 20":  tok[:20] + "\n" + tok[20:],
@@ -193,7 +205,7 @@ func TestRedactMasksWrappedValue(t *testing.T) {
 // merely start with the same byte are not a match.
 func TestRedactWrapToleranceDoesNotOverMatch(t *testing.T) {
 	s := New()
-	s.Set("tok", "abcdefghijklmnop") // 16 chars, at the tolerance threshold
+	s.Set(testKey("tok"), "abcdefghijklmnop") // 16 chars, at the tolerance threshold
 
 	cases := []struct{ in, wantContains string }{
 		// Unrelated text with the same first byte must survive.
@@ -215,9 +227,119 @@ func TestRedactWrapToleranceDoesNotOverMatch(t *testing.T) {
 // pattern could plausibly occur in unrelated output.
 func TestRedactShortValuesAreNotWrapTolerant(t *testing.T) {
 	s := New()
-	s.Set("short", "abcdef") // 6 chars, below the threshold
+	s.Set(testKey("short"), "abcdef") // 6 chars, below the threshold
 	got := s.Redact("a b c d e f")
 	if !strings.Contains(got, "a b c d e f") {
 		t.Errorf("a short value should not match scattered characters: %q", got)
+	}
+}
+
+func TestHostScopedSameNameNeverCrossResolves(t *testing.T) {
+	s := New()
+	a := HostIdentity{Alias: "a", Fingerprint: "fa", Generation: 1}
+	b := HostIdentity{Alias: "b", Fingerprint: "fb", Generation: 1}
+	if err := s.Set(HostKey("project", a, "tok"), "secret-a-value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set(HostKey("project", b, "tok"), "secret-b-value"); err != nil {
+		t.Fatal(err)
+	}
+	gotA, err := s.ResolveEnv("project", a, map[string]string{"T": "secret:tok"})
+	if err != nil || gotA["T"] != "secret-a-value" {
+		t.Fatalf("host A resolution = %q, %v", gotA["T"], err)
+	}
+	gotB, err := s.ResolveEnv("project", b, map[string]string{"T": "secret:tok"})
+	if err != nil || gotB["T"] != "secret-b-value" {
+		t.Fatalf("host B resolution = %q, %v", gotB["T"], err)
+	}
+}
+
+func TestOutputOnlySecretNeverFallsBackForInjection(t *testing.T) {
+	s := New()
+	if err := s.Set(OutputKey("tok"), "redaction-only-value"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveEnv("project", testHost, map[string]string{"T": "secret:tok"}); err == nil {
+		t.Fatal("output-only value silently fell back during host injection")
+	}
+}
+
+func TestRedactValueBeforeJSONSerializationHandlesEscapesAndUnicode(t *testing.T) {
+	s := New()
+	secret := "quo\"te\\line\n雪界"
+	if err := s.Set(OutputKey("tok"), secret); err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]any{"nested": []any{map[string]string{"value": "prefix " + secret + " suffix"}}}
+	out := s.RedactValue(in)
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "quo") || strings.Contains(string(raw), "雪界") {
+		t.Fatalf("special-character secret survived structured redaction: %s", raw)
+	}
+	if !strings.Contains(string(raw), "redacted:tok") {
+		t.Fatalf("placeholder missing: %s", raw)
+	}
+}
+
+func TestRedactValuePreservesOpaqueStructState(t *testing.T) {
+	s := New()
+	if err := s.Set(OutputKey("tok"), "secret-value"); err != nil {
+		t.Fatal(err)
+	}
+	wantTime := time.Date(2026, 8, 28, 12, 34, 56, 0, time.UTC)
+	type result struct {
+		When time.Time `json:"when"`
+		Text string    `json:"text"`
+	}
+	got := s.RedactValue(result{When: wantTime, Text: "secret-value"}).(result)
+	if !got.When.Equal(wantTime) {
+		t.Fatalf("recursive redaction corrupted opaque struct state: got %s want %s", got.When, wantTime)
+	}
+	if got.Text != "<redacted:tok>" {
+		t.Fatalf("exported string was not redacted: %q", got.Text)
+	}
+}
+
+func TestRedactMatchesGoAndJSONEscapedErrorForms(t *testing.T) {
+	s := New()
+	secret := "quo\"te\\line\n雪界\u2028end"
+	if err := s.Set(OutputKey("tok"), secret); err != nil {
+		t.Fatal(err)
+	}
+	goQuoted := fmt.Sprintf("transport stderr=%q", secret)
+	jsonQuoted, err := json.Marshal(map[string]string{"error": secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{goQuoted, string(jsonQuoted), fmt.Sprintf("outer=%q", goQuoted)} {
+		got := s.Redact(text)
+		if strings.Contains(got, "quo") || strings.Contains(got, "雪界") || !strings.Contains(got, "<redacted:tok>") {
+			t.Fatalf("escaped secret survived redaction: in=%q out=%q", text, got)
+		}
+	}
+}
+
+func TestRedactValuePreservesMapEntriesOnKeyCollision(t *testing.T) {
+	s := New()
+	if err := s.Set(OutputKey("tok"), "SECRETK"); err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]string{"SECRETK": "first", "<redacted:tok>": "second"}
+	out := s.RedactValue(in).(map[string]string)
+	if len(out) != 2 {
+		t.Fatalf("redacted key collision dropped an entry: %+v", out)
+	}
+	values := map[string]bool{}
+	for key, value := range out {
+		if strings.Contains(key, "SECRETK") {
+			t.Fatalf("secret-bearing map key survived: %q", key)
+		}
+		values[value] = true
+	}
+	if !values["first"] || !values["second"] {
+		t.Fatalf("map values changed across collision: %+v", out)
 	}
 }

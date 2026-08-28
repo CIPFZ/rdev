@@ -59,9 +59,11 @@ host's SSH account; rdev does not sandbox commands within that account.
   fingerprint and Registry generation. Alias replacement atomically publishes
   approval/config state and invalidates old connections used by the public
   exec/read/write/sync sinks. Their operation leases are per alias, so one
-  host's long operation does not block unrelated host updates. Pre-publication
-  host-secret initialization remains a Phase 2 boundary and is not covered by
-  this Batch A lease guarantee.
+  host's long operation does not block unrelated host updates. Host-secret
+  initialization holds the same immutable identity/generation lease, atomically
+  loads every declaration before pool publication, and fails closed; request
+  construction, secret resolution, remote I/O, recursive output/error redaction,
+  and secret rotation remain inside the corresponding read/write lease.
 - Agent bootstrap writes only through an exclusively-created unpredictable
   staging object. Regular-file type is checked without localized `stat` text;
   owner, link count, inode, and digest stay bound to open descriptors and a

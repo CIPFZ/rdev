@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -279,7 +281,7 @@ func TestSessionProjectApprovalIsDigestBound(t *testing.T) {
 	if pending.ProjectTrust.Approved || pending.ProjectTrust.Digest == "" {
 		t.Fatalf("project trust = %+v", pending.ProjectTrust)
 	}
-	if pending.Security.SchemaVersion != 1 || pending.Security.SecurityRejects["project_untrusted"] != 1 {
+	if pending.Security.SchemaVersion != observe.SchemaVersion || pending.Security.SecurityRejects["project_untrusted"] != 1 {
 		t.Fatalf("security snapshot = %+v", pending.Security)
 	}
 	if isErr, _ := callTool(t, cs, "rdev_session", SessionIn{ApproveProjectDigest: strings.Repeat("0", 64)}, nil); !isErr {
@@ -477,6 +479,24 @@ func TestSecretsDeleteReportsChange(t *testing.T) {
 	}
 }
 
+func TestSecretsRejectShortValuesAtInlineAndFileEntrypoints(t *testing.T) {
+	c := newTestClient()
+	cs := connect(t, c)
+	if isErr, _ := callTool(t, cs, "rdev_secrets", SecretsIn{Action: "set", Name: "pin", Value: "12345"}, nil); !isErr {
+		t.Fatal("inline short secret was accepted")
+	}
+	path := filepath.Join(t.TempDir(), "pin")
+	if err := os.WriteFile(path, []byte("12345\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if isErr, _ := callTool(t, cs, "rdev_secrets", SecretsIn{Action: "set_from_file", Name: "pin", Path: path}, nil); !isErr {
+		t.Fatal("file short secret was accepted")
+	}
+	if len(c.Secrets.Descriptors()) != 0 {
+		t.Fatalf("rejected short secret changed store: %+v", c.Secrets.Descriptors())
+	}
+}
+
 // ---------- input validation ----------
 
 // argv is required, and an empty one must be refused before anything is dialed.
@@ -600,10 +620,9 @@ func TestJobWaitSchemaExposesIDsArray(t *testing.T) {
 	t.Fatal("rdev_job_wait not found")
 }
 
-// The middleware backstop must scrub a secret that no handler remembered to
-// redact. This is the whole point of it: per-field scrubbing already failed once
-// (SyncResult.Command), and the next omission should be caught by the boundary
-// rather than by someone noticing a credential in a transcript.
+// The typed session snapshot and middleware backstop must both scrub a secret.
+// The latter still protects newly added tools/fields, while the former closes
+// the lease-to-middleware purge window for identity-bound state.
 //
 // Driven through a real MCP round trip -- the value has to survive handler,
 // serialization, middleware, and transport to prove the interception point is real
@@ -611,7 +630,7 @@ func TestJobWaitSchemaExposesIDsArray(t *testing.T) {
 func TestMiddlewareRedactsUnscrubbedResultField(t *testing.T) {
 	c := newTestClient()
 	const token = "unscrubbed-credential-value-1234"
-	if err := c.Secrets.Set("tok", token); err != nil {
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), token); err != nil {
 		t.Fatal(err)
 	}
 	cs := connect(t, c)
@@ -657,11 +676,49 @@ func TestMiddlewareRedactsUnscrubbedResultField(t *testing.T) {
 	}
 }
 
+func TestSessionSnapshotRedactsBeforeIdentityPurge(t *testing.T) {
+	c := newTestClient()
+	_ = c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@old"})
+	const token = "old-session-snapshot-token"
+	if err := c.SetSecret("dev", "tok", token); err != nil {
+		t.Fatal(err)
+	}
+	c.Hosts.Update("dev", func(st *session.State) {
+		st.Cwd = "/data/" + token
+		st.Env = map[string]string{"ECHO": token}
+	})
+	out := secureSessionSnapshot(c, SessionOut{}, "dev", c.Secrets.Snapshot())
+	if err := c.Hosts.Add(transport.Host{Name: "dev", Addr: "u@new"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), token) || !strings.Contains(string(raw), "redacted:tok") {
+		t.Fatalf("typed session snapshot was not safely redacted before purge: %s", raw)
+	}
+}
+
+func TestSessionRejectsInvalidSecretDeclarationBeforeHostPublication(t *testing.T) {
+	c := newTestClient()
+	cs := connect(t, c)
+	isErr, message := callTool(t, cs, "rdev_session", SessionIn{
+		Host: "dev", Addr: "u@h", Secrets: map[string]string{"tok": ""}, Persist: true,
+	}, nil)
+	if !isErr || !strings.Contains(message, "nonempty name and path") {
+		t.Fatalf("invalid declaration result: isErr=%v message=%q", isErr, message)
+	}
+	if names := c.Hosts.Names(); len(names) != 0 {
+		t.Fatalf("invalid declaration published host state: %v", names)
+	}
+}
+
 // Non-tool methods must pass through untouched. Scanning list responses would cost
 // bytes on every schema fetch and they carry no remote output.
 func TestMiddlewareLeavesToolListIntact(t *testing.T) {
 	c := newTestClient()
-	if err := c.Secrets.Set("tok", "irrelevant-value-here-0987"); err != nil {
+	if err := c.Secrets.Set(secrets.OutputKey("tok"), "irrelevant-value-here-0987"); err != nil {
 		t.Fatal(err)
 	}
 	cs := connect(t, c)
@@ -679,5 +736,80 @@ func TestMiddlewareLeavesToolListIntact(t *testing.T) {
 		if tool.Name == "" || tool.InputSchema == nil {
 			t.Errorf("tool %+v lost its name or schema passing through middleware", tool)
 		}
+	}
+}
+
+func containsString(value any, needle string) bool {
+	switch v := value.(type) {
+	case string:
+		return strings.Contains(v, needle)
+	case []any:
+		for _, item := range v {
+			if containsString(item, needle) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range v {
+			if strings.Contains(key, needle) || containsString(item, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestMiddlewareRedactsSpecialCharacterSecretsAcrossStructuredTextAndError(t *testing.T) {
+	for _, token := range []string{
+		"quote\"slash\\token",
+		"line-one\nline-two",
+		"雪界-token-\u2028-end",
+	} {
+		t.Run(strings.ReplaceAll(token[:min(len(token), 6)], "\n", "newline"), func(t *testing.T) {
+			c := newTestClient()
+			if err := c.Secrets.Set(secrets.OutputKey("tok"), token); err != nil {
+				t.Fatal(err)
+			}
+			srv := newServer(c, c.Hosts.ApproveProject)
+			type errorIn struct{}
+			type errorOut struct {
+				Value string `json:"value"`
+			}
+			mcp.AddTool(srv, &mcp.Tool{Name: "test_secret_error", Description: "test"},
+				func(context.Context, *mcp.CallToolRequest, errorIn) (*mcp.CallToolResult, errorOut, error) {
+					return nil, errorOut{}, errors.New("remote failed: " + token)
+				})
+			cs := connectServer(t, srv)
+
+			if isErr, msg := callTool(t, cs, "rdev_session", SessionIn{Host: "dev", Addr: "u@h", Cwd: "/data/" + token}, nil); isErr {
+				t.Fatal(msg)
+			}
+			res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "rdev_session", Arguments: SessionIn{Host: "dev"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(res.StructuredContent)
+			var structured any
+			if err := json.Unmarshal(raw, &structured); err != nil {
+				t.Fatal(err)
+			}
+			if containsString(structured, token) {
+				t.Fatalf("structured content leaked %q: %s", token, raw)
+			}
+			for _, content := range res.Content {
+				tc, ok := content.(*mcp.TextContent)
+				if !ok {
+					continue
+				}
+				var textValue any
+				if json.Unmarshal([]byte(tc.Text), &textValue) == nil && containsString(textValue, token) {
+					t.Fatalf("text fallback leaked %q: %s", token, tc.Text)
+				}
+			}
+			isErr, message := callTool(t, cs, "test_secret_error", errorIn{}, nil)
+			if !isErr || strings.Contains(message, token) || !strings.Contains(message, "redacted:tok") {
+				t.Fatalf("error redaction failed: isErr=%v message=%q", isErr, message)
+			}
+		})
 	}
 }

@@ -53,3 +53,35 @@ func TestUnknownMetricReasonIsIgnored(t *testing.T) {
 		}
 	}
 }
+
+func TestSecretAndConnectionEventsHaveFixedVocabularyAndNoSensitiveLabels(t *testing.T) {
+	sink := &eventSink{}
+	r := New(sink)
+	for i := 0; i < 100; i++ {
+		target := fmt.Sprintf("host-with-secret-path-%d", i)
+		r.SecretLoadFailed(ReasonSecretTruncated, target)
+		r.SecretRejected(ReasonSecretTooShort, target)
+		r.ConnectionSecurityStateChanged(SecurityFailed, target)
+		r.RedactionHit(1)
+	}
+	snapshot := r.Snapshot()
+	if len(snapshot.SecretLoadFailures) != len(secretReasons) || len(snapshot.SecretRejections) != len(secretReasons) {
+		t.Fatalf("secret metric cardinality changed: %+v", snapshot)
+	}
+	if len(snapshot.ConnectionSecurityTransitions) != len(connectionSecurityStates) {
+		t.Fatalf("connection state cardinality = %d", len(snapshot.ConnectionSecurityTransitions))
+	}
+	if snapshot.SecretLoadFailures[string(ReasonSecretTruncated)] != 100 ||
+		snapshot.SecretRejections[string(ReasonSecretTooShort)] != 100 ||
+		snapshot.ConnectionSecurityTransitions[string(SecurityFailed)] != 100 || snapshot.RedactionHits != 100 {
+		t.Fatalf("snapshot counts = %+v", snapshot)
+	}
+	for _, event := range sink.events {
+		if len(event.TargetHash) != 16 || strings.Contains(event.TargetHash, "secret") {
+			t.Fatalf("event leaked a target: %+v", event)
+		}
+		if event.Name != "security.secret_load_failed" && event.Name != "security.secret_rejected" && event.Name != "connection.security_state_changed" {
+			t.Fatalf("unexpected event vocabulary: %+v", event)
+		}
+	}
+}

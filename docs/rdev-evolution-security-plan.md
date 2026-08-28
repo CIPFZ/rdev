@@ -913,6 +913,32 @@ Batch A 已验收：最终代码 SHA 为 `c9a796cc8ea57aee2afbca13671d27b360baae
 
 Gate：共享 broker 不得在 secret 尚未 host-scoped 时上线。
 
+#### Phase 2 实施记录（2026-08-28）
+
+实现状态：
+
+- [x] P2-01：`internal/secrets.Key` 由 registry `scope`、immutable host identity（alias、canonical fingerprint、monotonic generation）和 `name` 组成。`ResolveEnv` 只接受完整精确键；两台 host 的同名值可并存。为兼容既有 hostless MCP/local-file 调用，保留 `scope=output`，但该值只参与输出脱敏，永远不能作为远端 env 的回退来源。
+- [x] P2-02 / ENG-002：地址/用户（包含在 `Addr`）、端口、`RemoteDir` 或 registry scope 变化会推进 generation、清空旧 sticky state，并由 host-change hook 关闭连接及清除该 alias 的 scoped Store 条目。配置 entry 按权威 snapshot 替换而不是 merge，删除的 env/secret 不会在 reload 后残留。仅 `force_agent_upload` 变化会重建连接和重载 secret，但不会误清非身份 sticky 配置。
+- [x] P2-03：连接使用显式 `cold → initializing → ready|failed` 安全初始化状态；状态、声明数、加载数和固定失败 reason 通过 `rdev_session.connection_security` 暴露。identity/generation read lease 覆盖 state snapshot、secret 展开、请求构造、远端 I/O、递归响应/错误脱敏和返回；声明 secret 带 `declarative` provenance，通过临时 batch 全部验证后原子写入 Store，随后连接才发布，重连会刷新声明值而不覆盖 `manual` 值。失败保持 fail-closed 且同一未变化 generation 不反复拨号伪装成 ready。secret rotation/delete 使用 identity write lease；输出另持有操作起点的不可变 redaction snapshot 并与返回时 Store 合并，旧值删除/轮换不会击穿在途响应，也不跨 alias 阻塞。
+- [x] P2-04：Store 对 struct、pointer/interface、slice/array 和 map key/value 做 pre-serialization recursive redaction；map key 脱敏碰撞保留所有 entry。MCP SDK 已生成 `json.RawMessage`/JSON text fallback 时先 decode 为原始字符串、递归处理、再 serialize；CLI `printJSON`、stdout/stderr client result、最终 error 和安全事件使用同一 Store redactor。远端受控 probe/stderr/raw frame 不再拼入 transport error，未知 prospective secret 的初始化/读取错误只返回固定分类。测试覆盖引号、反斜杠、换行、Unicode、嵌套 JSON、纯文本和 error。`content_b64` 是不可信元数据：编码字符串若命中注册值会清除该标志并返回脱敏文本，选择 fail closed 而不是允许 agent 借标志绕过。
+- [x] P2-05：远端 secret 请求 `64 KiB + 1 byte`，接受条件包含 `EOF=true`、`Size <= 64 KiB`、实际返回内容不超过上限且为 text；恰好 64 KiB 接受，观测到额外一字节或 `EOF=false` 均拒绝，失败前不修改 Store。
+- [x] P2-06：所有 Store set/batch/file/remote/inline 入口统一拒绝 `<6 bytes`；验证失败保持旧值不变，不再存在“注入成功但不会脱敏”的状态。
+- [x] Phase 2 观测：security snapshot schema 升为 v2，增加固定 reason 的 secret load/reject 计数、连接安全状态 transition 计数和无标签 redaction hit 计数；事件只带固定 vocabulary 和 host target hash，不携带 secret name/value、路径、argv、远端输出或错误原文。
+
+兼容与迁移：
+
+- 现有 hosts.json schema 不变，声明式 `secrets: {name:path}` 继续可用；行为从“读取失败只 warning、连接仍可用”收紧为 fail-closed。修复错误路径或用带 `host` 的显式注册提供同一 exact identity 的值后可重新初始化。
+- 既有 `rdev_secrets action=set` / 本地 `set_from_file` 若省略 `host` 仍成功，但现在是明确的 redaction-only registration；需要 `secret:name` 注入时必须提供 host。`list` 保留去重后的 `names` 字段，并新增无值的完整 `secrets` descriptor 列表。
+- Host identity/scope 重定义不迁移旧凭据。调用方需要在新 identity 下重新注册；声明式路径会在新连接初始化时重新读取。
+
+本阶段明确未覆盖：
+
+- 尚未引入 Phase 3 的幂等请求分类、协议级 cancel、frame/output 统一硬上限或结构化 error envelope；现有一次 transport retry 未扩大，并新增 immutable identity 检查，alias 在重试间重定义时拒绝把旧请求重放到新目标。
+- 尚未引入 Phase 4 的完整连接池、LRU/TTL、`IdentityFile`/`IdentitiesOnly` execution profile 或历史 secret rotation archive；Phase 2 只实现每 alias 的安全初始化与 operation/mutation lease。
+- 多 principal capability 和共享 broker secret authority 仍属于 Phase 5；当前 scope 是单进程 registry 的 global/project scope，并以 alias-local identity 隔离。
+
+验证覆盖包括：跨 host 同名 secret、output-only 禁止注入、Host/Scope/config override 清理、并发首请求、初始化失败与状态可见、初始化期间 alias redefinition、请求构造/响应脱敏/secret rotation lease、特殊字符的 structured/text/error/CLI 路径、64 KiB 边界与超一字节、短值、Store 不变性、低基数 metrics/event 以及 race。完整门禁结果记录在本次提交说明中。
+
 ### Phase 3：请求语义、取消和资源硬限制
 
 覆盖：SEC-006、SEC-007、ENG-003、ENG-007、ENG-008、ENG-032、ENG-033。

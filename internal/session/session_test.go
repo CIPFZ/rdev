@@ -875,3 +875,136 @@ func TestHostFingerprintCanonicalizesRemoteDirCompatibilitySpelling(t *testing.T
 		t.Fatalf("equivalent RemoteDir changed identity: before=%+v after=%+v", before, after)
 	}
 }
+
+func TestForceAgentUploadPolicyDoesNotReplaceCredentialIdentity(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@one"}); err != nil {
+		t.Fatal(err)
+	}
+	r.Update("dev", func(st *State) {
+		st.Env = map[string]string{"TOKEN": "secret:tok"}
+	})
+	before, _ := r.Resolve("dev")
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@one", ForceAgentUpload: true}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := r.Resolve("dev")
+	if before.Generation != after.Generation || before.Fingerprint != after.Fingerprint {
+		t.Fatalf("bootstrap policy replaced credential identity: before=%+v after=%+v", before, after)
+	}
+	if before.ConnectionFingerprint == after.ConnectionFingerprint {
+		t.Fatal("bootstrap policy did not invalidate the transport connection")
+	}
+	if got := r.State("dev").Env["TOKEN"]; got != "secret:tok" {
+		t.Fatalf("bootstrap policy cleared sticky credential reference: %q", got)
+	}
+}
+
+func TestHostRedefinitionClearsStickyEnvAndSecretDeclarations(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@old", Port: 22}); err != nil {
+		t.Fatal(err)
+	}
+	r.Update("dev", func(st *State) {
+		st.Cwd = "~/old"
+		st.Env = map[string]string{"TOKEN": "secret:tok", "PLAIN": "old"}
+		st.Secrets = map[string]string{"tok": "~/old-token"}
+		st.LoginShell = false
+	})
+	before, _ := r.Resolve("dev")
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@new", Port: 22}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := r.Resolve("dev")
+	if after.Generation == before.Generation {
+		t.Fatal("identity generation did not advance")
+	}
+	st := r.State("dev")
+	if st.Cwd != "" || len(st.Env) != 0 || len(st.Secrets) != 0 || !st.LoginShell {
+		t.Fatalf("old sticky state survived host redefinition: %+v", st)
+	}
+}
+
+func TestScopeChangeAdvancesIdentityAndClearsStickyCredentials(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@h"}); err != nil {
+		t.Fatal(err)
+	}
+	r.Update("dev", func(st *State) {
+		st.Env = map[string]string{"TOKEN": "secret:tok"}
+		st.Secrets = map[string]string{"tok": "~/token"}
+	})
+	before, _ := r.Resolve("dev")
+	r.SetScope("dev", ScopeProject)
+	after, _ := r.Resolve("dev")
+	if after.Scope != ScopeProject || after.Generation == before.Generation || after.Fingerprint == before.Fingerprint {
+		t.Fatalf("scope change did not replace identity: before=%+v after=%+v", before, after)
+	}
+	if st := r.State("dev"); len(st.Env) != 0 || len(st.Secrets) != 0 {
+		t.Fatalf("scope change inherited credentials: %+v", st)
+	}
+}
+
+func TestConfigOverrideReplacesRatherThanMergesOldState(t *testing.T) {
+	r := NewRegistry()
+	global := []byte(`{"hosts":[{"name":"dev","addr":"u@global","env":{"OLD":"secret:old"},"secrets":{"old":"~/old"}}]}`)
+	project := []byte(`{"hosts":[{"name":"dev","addr":"u@project","env":{"NEW":"literal"},"secrets":{"new":"~/new"}}]}`)
+	if err := r.loadBytes("global", global, ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.loadBytes("project", project, ScopeProject); err != nil {
+		t.Fatal(err)
+	}
+	st := r.State("dev")
+	if _, ok := st.Env["OLD"]; ok || st.Env["NEW"] != "literal" {
+		t.Fatalf("project env merged old identity state: %+v", st.Env)
+	}
+	if _, ok := st.Secrets["old"]; ok || st.Secrets["new"] != "~/new" {
+		t.Fatalf("project secrets merged old identity state: %+v", st.Secrets)
+	}
+}
+
+func TestSecretDeclarationChangeAdvancesIdentityGeneration(t *testing.T) {
+	r := NewRegistry()
+	var invalidated []string
+	r.SetHostChangeHook(func(name string, _ uint64) {
+		invalidated = append(invalidated, name)
+	})
+	first := []byte(`{"hosts":[{"name":"dev","addr":"u@same","secrets":{"old":"~/old"}}]}`)
+	second := []byte(`{"hosts":[{"name":"dev","addr":"u@same","secrets":{"new":"~/new"}}]}`)
+	if err := r.loadBytes("global", first, ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+	before, err := r.Resolve("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.loadBytes("global", second, ScopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+	after, err := r.Resolve("dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Generation == before.Generation {
+		t.Fatalf("secret declaration change reused generation %d", after.Generation)
+	}
+	st := r.State("dev")
+	if _, ok := st.Secrets["old"]; ok || st.Secrets["new"] != "~/new" {
+		t.Fatalf("old secret declaration survived replacement: %+v", st.Secrets)
+	}
+	if len(invalidated) != 2 || invalidated[0] != "dev" || invalidated[1] != "dev" {
+		t.Fatalf("host change hook calls = %v", invalidated)
+	}
+}
+
+func TestConfigRejectsInvalidSecretDeclarationBeforePublication(t *testing.T) {
+	r := NewRegistry()
+	bad := []byte(`{"hosts":[{"name":"dev","addr":"u@h","secrets":{"tok":""}}]}`)
+	if err := r.loadBytes("global", bad, ScopeGlobal); err == nil || !strings.Contains(err.Error(), "nonempty name and path") {
+		t.Fatalf("invalid declaration error = %v", err)
+	}
+	if names := r.Names(); len(names) != 0 {
+		t.Fatalf("invalid config published hosts: %v", names)
+	}
+}

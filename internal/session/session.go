@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/CIPFZ/rdev/internal/observe"
+	"github.com/CIPFZ/rdev/internal/secrets"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
 
@@ -132,14 +133,25 @@ func (r *Registry) lockIdentityWrites(names []string) func() {
 // ResolvedHost is an immutable connection identity. Generation prevents an old
 // connection from becoming valid again if an alias is changed and later reverted.
 type ResolvedHost struct {
-	Host        transport.Host
-	Fingerprint string
-	Generation  uint64
+	Host                  transport.Host
+	Scope                 Scope
+	Fingerprint           string
+	ConnectionFingerprint string
+	Generation            uint64
 }
 
-func hostFingerprint(h transport.Host) string {
+func hostFingerprint(h transport.Host, scope Scope) string {
 	remoteDir, _ := transport.ValidateRemoteDir(h.RemoteDir)
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%t", h.Addr, h.Port, remoteDir, h.ForceAgentUpload)))
+	// ForceAgentUpload controls the next bootstrap but does not change the
+	// credential identity. Treating it as identity would purge exact scoped
+	// secrets even though address, user, port, namespace, and scope were stable.
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s", h.Addr, h.Port, remoteDir, scope)))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func connectionFingerprint(h transport.Host, scope Scope) string {
+	remoteDir, _ := transport.ValidateRemoteDir(h.RemoteDir)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%t\x00%s", h.Addr, h.Port, remoteDir, h.ForceAgentUpload, scope)))
 	return fmt.Sprintf("%x", sum[:])
 }
 
@@ -167,6 +179,34 @@ func (r *Registry) SecuritySnapshot() observe.Snapshot {
 	registry := r.observe
 	r.mu.RUnlock()
 	return registry.Snapshot()
+}
+
+func (r *Registry) RecordSecretLoadFailure(reason observe.SecretReason, target string) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.SecretLoadFailed(reason, target)
+}
+
+func (r *Registry) RecordSecretRejection(reason observe.SecretReason, target string) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.SecretRejected(reason, target)
+}
+
+func (r *Registry) RecordConnectionSecurityState(state observe.ConnectionSecurityState, target string) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.ConnectionSecurityStateChanged(state, target)
+}
+
+func (r *Registry) RecordRedactionHit(count uint64) {
+	r.mu.RLock()
+	registry := r.observe
+	r.mu.RUnlock()
+	registry.RedactionHit(count)
 }
 
 func (r *Registry) fatalError() error {
@@ -327,18 +367,25 @@ func applyCandidates(s *registrySnapshot, candidates []hostCandidate, scope Scop
 	for _, c := range candidates {
 		h, e := c.host, c.entry
 		old, exists := s.hosts[h.Name]
-		if !exists || hostFingerprint(old) != hostFingerprint(h) {
+		oldScope := s.scopes[h.Name]
+		oldState := s.state[h.Name]
+		declarationsChanged := oldState == nil || !equalStringMap(oldState.Secrets, e.Secrets)
+		securityChanged := !exists || hostFingerprint(old, oldScope) != hostFingerprint(h, scope) || declarationsChanged
+		connectionChanged := !exists || connectionFingerprint(old, oldScope) != connectionFingerprint(h, scope)
+		if securityChanged {
 			s.nextGen++
 			s.generations[h.Name] = s.nextGen
+		}
+		if securityChanged || connectionChanged {
 			changed = append(changed, h.Name)
 		}
 		s.hosts[h.Name] = h
 		s.scopes[h.Name] = scope
-		st, ok := s.state[h.Name]
-		if !ok {
-			st = &State{LoginShell: true}
-			s.state[h.Name] = st
-		}
+		// A config entry is an authoritative snapshot, not a patch. Reusing the
+		// prior map would retain env or secret declarations removed from disk.
+		// Identity changes additionally advance the generation above.
+		st := &State{LoginShell: true}
+		s.state[h.Name] = st
 		if e.Cwd != "" {
 			st.Cwd = e.Cwd
 		}
@@ -384,6 +431,10 @@ func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, erro
 				reason = observe.ReasonDestination
 			}
 			r.reject(reason, e.Name)
+			return nil, fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
+		}
+		if err := secrets.ValidateDeclarations(e.Secrets); err != nil {
+			r.reject(observe.ReasonConfigInvalid, path)
 			return nil, fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
 		}
 		candidates = append(candidates, hostCandidate{host: h, entry: e})
@@ -681,13 +732,36 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	return trust, writeErr
 }
 
-// SetScope records which config file a host belongs to.
+// SetScope records which config file a host belongs to. Scope is part of the
+// immutable secret identity, so changing it advances the generation, clears
+// sticky state, and invalidates the old connection and credentials.
 func (r *Registry) SetScope(name string, scope Scope) {
+	releaseIdentity := r.lockIdentityWrites([]string{name})
+	defer releaseIdentity()
 	r.tx.Lock()
-	defer r.tx.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	old := r.scopes[name]
+	if old == scope {
+		r.mu.Unlock()
+		r.tx.Unlock()
+		return
+	}
 	r.scopes[name] = scope
+	if _, exists := r.hosts[name]; !exists {
+		r.mu.Unlock()
+		r.tx.Unlock()
+		return
+	}
+	r.state[name] = &State{LoginShell: true}
+	r.nextGen++
+	generation := r.nextGen
+	r.generations[name] = generation
+	hook := r.onHostChange
+	r.mu.Unlock()
+	r.tx.Unlock()
+	if hook != nil {
+		hook(name, generation)
+	}
 }
 
 // ScopeOf reports which config file a host came from.
@@ -723,12 +797,19 @@ func (r *Registry) Add(h transport.Host) error {
 	r.tx.Lock()
 	r.mu.Lock()
 	old, exists := r.hosts[h.Name]
+	scope := r.scopes[h.Name]
+	if scope == "" {
+		scope = ScopeGlobal
+		r.scopes[h.Name] = scope
+	}
 	r.hosts[h.Name] = h
-	if _, ok := r.state[h.Name]; !ok {
+	changed := !exists || hostFingerprint(old, scope) != hostFingerprint(h, scope)
+	connectionChanged := !exists || connectionFingerprint(old, scope) != connectionFingerprint(h, scope)
+	credentialsChanged := !exists || hostFingerprint(old, scope) != hostFingerprint(h, scope)
+	if _, ok := r.state[h.Name]; !ok || credentialsChanged {
 		r.state[h.Name] = &State{LoginShell: true}
 	}
-	var generation uint64
-	changed := !exists || hostFingerprint(old) != hostFingerprint(h)
+	generation := r.generations[h.Name]
 	if changed {
 		r.nextGen++
 		generation = r.nextGen
@@ -737,7 +818,7 @@ func (r *Registry) Add(h transport.Host) error {
 	hook := r.onHostChange
 	r.mu.Unlock()
 	r.tx.Unlock()
-	if changed && hook != nil {
+	if (changed || connectionChanged) && hook != nil {
 		hook(h.Name, generation)
 	}
 	return nil
@@ -762,9 +843,10 @@ func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 	r.mu.RLock()
 	h, ok := r.hosts[name]
 	generation := r.generations[name]
+	scope := r.scopes[name]
 	r.mu.RUnlock()
 	if ok {
-		return ResolvedHost{Host: h, Fingerprint: hostFingerprint(h), Generation: generation}, nil
+		return ResolvedHost{Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope), ConnectionFingerprint: connectionFingerprint(h, scope), Generation: generation}, nil
 	}
 
 	if parsed, err := parseDestination(name); err == nil {
@@ -772,9 +854,9 @@ func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 			return ResolvedHost{}, err
 		}
 		r.mu.RLock()
-		h, generation = r.hosts[parsed.Name], r.generations[parsed.Name]
+		h, generation, scope = r.hosts[parsed.Name], r.generations[parsed.Name], r.scopes[parsed.Name]
 		r.mu.RUnlock()
-		return ResolvedHost{Host: h, Fingerprint: hostFingerprint(h), Generation: generation}, nil
+		return ResolvedHost{Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope), ConnectionFingerprint: connectionFingerprint(h, scope), Generation: generation}, nil
 	}
 	return ResolvedHost{}, fmt.Errorf("unknown host %q (known: %s)", name, strings.Join(r.Names(), ", "))
 }
@@ -790,13 +872,35 @@ func (r *Registry) AcquireIdentity(name string, generation uint64, fingerprint s
 	lease.RLock()
 	r.mu.RLock()
 	h, ok := r.hosts[name]
-	if !ok || r.generations[name] != generation || hostFingerprint(h) != fingerprint {
+	scope := r.scopes[name]
+	if !ok || r.generations[name] != generation || hostFingerprint(h, scope) != fingerprint {
 		r.mu.RUnlock()
 		lease.RUnlock()
 		return nil, false
 	}
 	r.mu.RUnlock()
 	return lease.RUnlock, true
+}
+
+// AcquireIdentityWrite excludes every operation using this alias while a
+// host-scoped secret is replaced or deleted. Without it, rotating a value could
+// remove the old redactor before an in-flight response is scrubbed.
+func (r *Registry) AcquireIdentityWrite(name string, generation uint64, fingerprint string) (func(), bool) {
+	if r.fatalError() != nil {
+		return nil, false
+	}
+	lease := r.identityLease(name)
+	lease.Lock()
+	r.mu.RLock()
+	h, ok := r.hosts[name]
+	scope := r.scopes[name]
+	if !ok || r.generations[name] != generation || hostFingerprint(h, scope) != fingerprint {
+		r.mu.RUnlock()
+		lease.Unlock()
+		return nil, false
+	}
+	r.mu.RUnlock()
+	return lease.Unlock, true
 }
 
 // parseDestination interprets "user@host", "user@host:port", or "host:port".
@@ -860,18 +964,46 @@ func (r *Registry) State(name string) State {
 	return cp
 }
 
-// Update mutates a host's state under lock.
+// Update mutates a host's state under lock. Secret declaration changes advance
+// the host generation so a warm connection cannot continue without loading the
+// new complete declaration set first.
 func (r *Registry) Update(name string, fn func(*State)) {
+	releaseIdentity := r.lockIdentityWrites([]string{name})
+	defer releaseIdentity()
 	r.tx.Lock()
-	defer r.tx.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	st, ok := r.state[name]
 	if !ok {
 		st = &State{LoginShell: true}
 		r.state[name] = st
 	}
+	beforeSecrets := MergeEnv(nil, st.Secrets)
 	fn(st)
+	changed := !equalStringMap(beforeSecrets, st.Secrets)
+	var generation uint64
+	if changed {
+		r.nextGen++
+		generation = r.nextGen
+		r.generations[name] = generation
+	}
+	hook := r.onHostChange
+	r.mu.Unlock()
+	r.tx.Unlock()
+	if changed && hook != nil {
+		hook(name, generation)
+	}
+}
+
+func equalStringMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // MergeEnv layers per-call env over the host's sticky env, with the per-call
