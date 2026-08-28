@@ -164,6 +164,10 @@ type Conn struct {
 	frameLimit      int
 	protocolVersion int
 	features        map[proto.Feature]bool
+	// testBeforeResponseWait is a test-only synchronization point. Production
+	// connections leave it nil; tests may use it to establish exact ordering
+	// immediately before Do selects between a reply and context cancellation.
+	testBeforeResponseWait func()
 
 	// ctlPath is the ssh ControlMaster socket, shared by aux commands so they
 	// skip a fresh TCP+auth handshake.
@@ -1279,6 +1283,9 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 		}
 		c.abandon(req.ID)
 		return nil, fmt.Errorf("write request to agent: %w", writeErr)
+	}
+	if c.testBeforeResponseWait != nil {
+		c.testBeforeResponseWait()
 	}
 
 	select {

@@ -718,64 +718,71 @@ func TestContextCancelDoesNotCancelIndependentMutation(t *testing.T) {
 	}
 }
 
-// A committed terminal is the linearization point for a completed call. This
-// deliberately makes both call.ready and ctx.Done runnable before Do resumes;
-// regardless of which select arm Go chooses, the lock-protected terminal must
-// win. The iteration count is high enough to exercise both scheduler choices
-// in normal and race builds without depending on probability for correctness.
+// A committed terminal is the linearization point for a completed call. The
+// hook holds Do immediately before its response/cancellation select while the
+// test commits the terminal and cancels the context. Both select arms are
+// therefore ready before Do resumes, without relying on scheduler probability.
 func TestTerminalCommitWinsContextSelectionRace(t *testing.T) {
 	c, requests, replies, _ := newTestConn(t)
 	c.protocolVersion = 3
 	c.features = map[proto.Feature]bool{proto.FeatureCancel: true, proto.FeatureStreaming: true}
-	const iterations = 1000
-	for i := 0; i < iterations; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		result := make(chan struct {
+	beforeSelect := make(chan struct{})
+	releaseSelect := make(chan struct{})
+	c.testBeforeResponseWait = func() {
+		close(beforeSelect)
+		<-releaseSelect
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan struct {
+		response *proto.Response
+		err      error
+	}, 1)
+	const operationID = "op_0000000000005000"
+	go func() {
+		response, err := c.Do(ctx, &proto.Request{
+			Op: proto.OpExec, OperationID: operationID, ClientID: "client_0123456789abcdef",
+			Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
+		})
+		result <- struct {
 			response *proto.Response
 			err      error
-		}, 1)
-		operationID := fmt.Sprintf("op_%016x", i+0x5000)
-		go func() {
-			response, err := c.Do(ctx, &proto.Request{
-				Op: proto.OpExec, OperationID: operationID, ClientID: "client_0123456789abcdef",
-				Exec: &proto.ExecParams{Argv: []string{"synthetic"}},
-			})
-			result <- struct {
-				response *proto.Response
-				err      error
-			}{response, err}
-		}()
+		}{response, err}
+	}()
 
-		var request proto.Request
-		if err := requests.Decode(&request); err != nil {
-			t.Fatal(err)
-		}
-		sendReply(t, replies, &proto.Response{
-			ID: request.ID, OperationID: operationID, Type: proto.EventAccepted,
-			Seq: 1, OK: true, Execution: proto.StateAccepted,
-		})
-		sendReply(t, replies, &proto.Response{
-			ID: request.ID, OperationID: operationID, Type: proto.EventFinal,
-			Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
-		})
-		deadline := time.Now().Add(time.Second)
-		for {
-			c.mu.Lock()
-			_, committed := c.completed[request.ID]
-			c.mu.Unlock()
-			if committed {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("iteration %d: terminal did not reach the commit barrier", i)
-			}
-			runtime.Gosched()
-		}
-		cancel()
-		got := <-result
-		if got.err != nil || got.response == nil || !got.response.OK {
-			t.Fatalf("iteration %d: committed success returned response=%+v err=%v", i, got.response, got.err)
-		}
+	var request proto.Request
+	if err := requests.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	<-beforeSelect
+	c.mu.Lock()
+	call := c.pending[request.ID]
+	c.mu.Unlock()
+	if call == nil {
+		t.Fatal("request was not pending at the select barrier")
+	}
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: operationID, Type: proto.EventAccepted,
+		Seq: 1, OK: true, Execution: proto.StateAccepted,
+	})
+	sendReply(t, replies, &proto.Response{
+		ID: request.ID, OperationID: operationID, Type: proto.EventFinal,
+		Seq: 2, Terminal: true, OK: true, Execution: proto.StateCompleted,
+	})
+	<-call.ready
+	c.mu.Lock()
+	committed := call.finished && call.response != nil
+	c.mu.Unlock()
+	if !committed {
+		t.Fatal("ready closed without a committed terminal")
+	}
+	cancel()
+	if ctx.Err() == nil {
+		t.Fatal("context was not canceled before select release")
+	}
+	close(releaseSelect)
+	got := <-result
+	if got.err != nil || got.response == nil || !got.response.OK {
+		t.Fatalf("committed success returned response=%+v err=%v", got.response, got.err)
 	}
 }
 
