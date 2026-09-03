@@ -93,6 +93,27 @@ func runSupervisor(jobDir string, argv []string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
+	// The serving agent owns the creation transaction. Until it publishes
+	// meta.json, this process must not launch the user command: if the agent is
+	// interrupted in that window, a supervisor that went ahead would become an
+	// unobservable runnable orphan. Waiting for a metadata record matching our
+	// own pid makes publication the supervisor's start barrier. A crashed
+	// parent is detected by reparenting; the supervisor then exits without ever
+	// starting argv. There is intentionally no wall-clock timeout while the
+	// parent is alive, so slow disks cannot turn a valid start into a false
+	// rollback.
+	parentPID := os.Getppid()
+	for {
+		var meta jobMeta
+		if err := readJSON(filepath.Join(jobDir, "meta.json"), &meta); err == nil && meta.PID == os.Getpid() {
+			break
+		}
+		if os.Getppid() != parentPID {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	cmd := exec.Command(argv[0], argv[1:]...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
