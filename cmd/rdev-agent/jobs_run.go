@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,6 +33,34 @@ const (
 	maxWaitSec     = 3600
 	defaultWaitSec = 300
 )
+
+// supervisorParentEnv carries the serving agent's PID across the short
+// startup barrier. Reading os.Getppid only after a very fast parent crash can
+// yield init's PID (1), making the supervisor believe it has a live parent and
+// wait forever for metadata that can never be published.
+const supervisorParentEnv = "RDEV_SUPERVISOR_PARENT_PID"
+
+func setEnvValue(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, prefix+value)
+}
+
+func withoutEnvValue(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
 
 func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.Spec == nil || len(p.Spec.Argv) == 0 {
@@ -66,6 +95,7 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	inner := cmd.Args // includes the login-shell wrapper when requested
 	cmd.Path = self
 	cmd.Args = append([]string{self, superviseFlag, dir, "--"}, inner...)
+	cmd.Env = setEnvValue(cmd.Env, supervisorParentEnv, strconv.Itoa(os.Getpid()))
 
 	stdout, err := os.OpenFile(filepath.Join(dir, "stdout"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
