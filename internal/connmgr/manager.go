@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,18 +42,36 @@ type Config struct {
 	LastClientGrace time.Duration
 	DrainTimeout    time.Duration
 	Now             func() time.Time
+	// MaxConcurrentDials bounds calls to dial across all hosts. A non-positive
+	// value selects the conservative default of six.
+	MaxConcurrentDials int
+	// BaseBackoff and MaxBackoff bound reconnect attempts after a failed dial.
+	// Jitter applies a deterministic +/-50% spread using Random.
+	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
+	Jitter      bool
+	Random      func() float64
+	// Rand is an alias retained for callers that use the shorter name.
+	Rand func() float64
+	// OnEvent receives low-cardinality lifecycle events. Key is an opaque
+	// canonical key and must not be treated as a user-facing label.
+	OnEvent  func(Event)
+	Observer interface{ RecordConnection(string, string) }
 }
 
 // Validate checks explicit policy values before a manager is constructed.
 func (c Config) Validate() error {
-	if c.MaxQueue < 0 || c.MaxWarmHosts < 0 {
+	if c.MaxQueue < 0 || c.MaxWarmHosts < 0 || c.MaxConcurrentDials < 0 {
 		return errors.New("connection limits must not be negative")
 	}
-	if c.IdleTTL < 0 || c.MaxIdleTTL < 0 || c.LastClientGrace < 0 || c.DrainTimeout < 0 {
+	if c.IdleTTL < 0 || c.MaxIdleTTL < 0 || c.LastClientGrace < 0 || c.DrainTimeout < 0 || c.BaseBackoff < 0 || c.MaxBackoff < 0 {
 		return errors.New("connection durations must not be negative")
 	}
 	if c.IdleTTL > 0 && c.MaxIdleTTL > 0 && c.MaxIdleTTL < c.IdleTTL {
 		return errors.New("max idle TTL must be at least idle TTL")
+	}
+	if c.BaseBackoff > 0 && c.MaxBackoff > 0 && c.MaxBackoff < c.BaseBackoff {
+		return errors.New("max backoff must be at least base backoff")
 	}
 	return nil
 }
@@ -63,6 +82,12 @@ type Manager struct {
 	maxQueue, maxWarmHosts                             int
 	idleTTL, maxIdleTTL, lastClientGrace, drainTimeout time.Duration
 	now                                                func() time.Time
+	dialSem                                            chan struct{}
+	baseBackoff, maxBackoff                            time.Duration
+	jitter                                             bool
+	random                                             func() float64
+	onEvent                                            func(Event)
+	observer                                           interface{ RecordConnection(string, string) }
 }
 
 type entry struct {
@@ -72,9 +97,76 @@ type entry struct {
 	lease, inflight, queued          int
 	lastActivity, lastClientDetached time.Time
 	dialDone                         chan struct{}
+	lastDialToken                    chan struct{}
+	lastDialErr                      error
 	evictDone                        chan struct{}
 	lastErr                          error
+	nextAttempt                      time.Time
+	failures                         int
+	backoffDone                      chan struct{}
 }
+
+// Event is a stable connection lifecycle observation. Values intentionally
+// use a closed vocabulary; no remote path, argv, or error text is included.
+type Event struct {
+	Key    string
+	Name   string
+	Reason string
+}
+
+// FailureClass is a bounded classification suitable for retry policy and
+// metrics. It deliberately avoids exposing arbitrary error strings.
+type FailureClass string
+
+const (
+	FailureCanceled FailureClass = "canceled"
+	FailureTimeout  FailureClass = "timeout"
+	FailureAuth     FailureClass = "auth"
+	FailureNetwork  FailureClass = "network"
+	FailureResource FailureClass = "resource"
+	FailureUnknown  FailureClass = "unknown"
+)
+
+// ClassifyDialFailure maps common dial errors to a stable low-cardinality
+// class. Callers may wrap errors; errors.Is/As still work through wrapping.
+func ClassifyDialFailure(err error) FailureClass {
+	if err == nil {
+		return FailureUnknown
+	}
+	if errors.Is(err, context.Canceled) {
+		return FailureCanceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return FailureTimeout
+	}
+	var netErr interface{ Timeout() bool }
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return FailureTimeout
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "permission denied") || strings.Contains(msg, "authentication") || strings.Contains(msg, "publickey") {
+		return FailureAuth
+	}
+	if strings.Contains(msg, "too many open files") || strings.Contains(msg, "resource temporarily unavailable") {
+		return FailureResource
+	}
+	if strings.Contains(msg, "connection refused") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "no route") || strings.Contains(msg, "network") {
+		return FailureNetwork
+	}
+	return FailureUnknown
+}
+
+// classifyDialFailure is kept as a small internal alias for event emission.
+func classifyDialFailure(err error) string { return string(ClassifyDialFailure(err)) }
+
+const (
+	EventDialStarted   = "connection.dial_started"
+	EventDialSucceeded = "connection.dial_succeeded"
+	EventDialFailed    = "connection.dial_failed"
+	EventBackoff       = "connection.backoff"
+	EventEvicted       = "connection.evicted"
+	EventDisconnected  = "connection.disconnected"
+)
 
 type Lease struct {
 	m    *Manager
@@ -103,6 +195,8 @@ type Snapshot struct {
 	LastActivity            time.Time
 	LastClientDetached      time.Time
 	LastError               string
+	RetryAt                 time.Time
+	FailureCount            int
 }
 
 func New(cfg Config) *Manager {
@@ -130,15 +224,111 @@ func New(cfg Config) *Manager {
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = 2 * time.Second
 	}
+	if cfg.MaxConcurrentDials <= 0 {
+		cfg.MaxConcurrentDials = 6
+	}
+	if cfg.BaseBackoff <= 0 {
+		cfg.BaseBackoff = 500 * time.Millisecond
+	}
+	if cfg.MaxBackoff <= 0 {
+		cfg.MaxBackoff = 30 * time.Second
+	}
+	if cfg.MaxBackoff < cfg.BaseBackoff {
+		cfg.MaxBackoff = cfg.BaseBackoff
+	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
+	random := cfg.Random
+	if random == nil {
+		random = cfg.Rand
+	}
+	if random == nil {
+		random = func() float64 { return float64(time.Now().UnixNano()%1_000_000) / 1_000_000 }
+	}
 	return &Manager{entries: make(map[string]*entry), maxQueue: cfg.MaxQueue,
 		maxWarmHosts: cfg.MaxWarmHosts, idleTTL: cfg.IdleTTL, maxIdleTTL: cfg.MaxIdleTTL,
-		lastClientGrace: cfg.LastClientGrace, drainTimeout: cfg.DrainTimeout, now: now}
+		lastClientGrace: cfg.LastClientGrace, drainTimeout: cfg.DrainTimeout, now: now,
+		dialSem: make(chan struct{}, cfg.MaxConcurrentDials), baseBackoff: cfg.BaseBackoff,
+		maxBackoff: cfg.MaxBackoff, jitter: cfg.Jitter, random: random, onEvent: cfg.OnEvent, observer: cfg.Observer}
 }
 func (m *Manager) timestamp() time.Time { return m.now() }
+func (m *Manager) emit(key, name, reason string) {
+	if m.onEvent != nil {
+		m.onEvent(Event{Key: key, Name: name, Reason: reason})
+	}
+	if m.observer != nil {
+		m.observer.RecordConnection(name, reason)
+	}
+}
+
+func (m *Manager) waitBackoff(ctx context.Context, e *entry) error {
+	for {
+		m.mu.Lock()
+		until := e.nextAttempt
+		if e.state != Backoff || until.IsZero() || !m.timestamp().Before(until) {
+			if e.state == Backoff {
+				e.state = Cold
+			}
+			m.mu.Unlock()
+			return nil
+		}
+		d := until.Sub(m.timestamp())
+		done := e.backoffDone
+		m.mu.Unlock()
+		t := time.NewTimer(d)
+		select {
+		case <-t.C:
+		case <-done:
+			if !t.Stop() {
+				select {
+				case <-t.C:
+				default:
+				}
+			}
+		case <-ctx.Done():
+			if !t.Stop() {
+				select {
+				case <-t.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		}
+	}
+}
+
+func (m *Manager) backoffDuration(failures int) time.Duration {
+	d := m.baseBackoff
+	for i := 1; i < failures && d < m.maxBackoff; i++ {
+		if d > m.maxBackoff/2 {
+			d = m.maxBackoff
+			break
+		}
+		d *= 2
+	}
+	if d > m.maxBackoff {
+		d = m.maxBackoff
+	}
+	if !m.jitter || d <= 0 {
+		return d
+	}
+	r := m.random()
+	if r < 0 {
+		r = 0
+	}
+	if r > 1 {
+		r = 1
+	}
+	// Apply a +/-50% spread. Clamp to MaxBackoff so jitter never defeats the
+	// configured circuit-open bound.
+	j := time.Duration(float64(d) * (0.5 + r))
+	if j > m.maxBackoff {
+		j = m.maxBackoff
+	}
+	return j
+}
 func (m *Manager) warmCountLocked() int {
 	n := 0
 	for _, e := range m.entries {
@@ -192,6 +382,8 @@ func (m *Manager) finishEviction(e *entry, done chan struct{}, reason string) {
 	}
 	close(done)
 	m.mu.Unlock()
+	m.emit(e.key, EventEvicted, reason)
+	m.emit(e.key, EventDisconnected, reason)
 }
 
 // Acquire coalesces concurrent dials and enforces MaxWarmHosts using an idle
@@ -233,11 +425,46 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 				return nil, ctx.Err()
 			}
 		}
+		if e.state == Backoff {
+			if err := ctx.Err(); err != nil {
+				m.mu.Unlock()
+				return nil, err
+			}
+			// Circuit-open callers fail fast during the retry window. This is
+			// important for a hundred-host recovery: callers do not each sleep
+			// and then stampede the first instant the timer expires. A later
+			// caller (or an explicit retry loop) can try again after RetryAt.
+			err := e.lastErr
+			until := e.nextAttempt
+			now := m.timestamp()
+			m.mu.Unlock()
+			if !until.IsZero() && now.Before(until) {
+				if err != nil {
+					return nil, err
+				}
+				return nil, errors.New("connection is backing off")
+			}
+			m.mu.Lock()
+			if e.state == Backoff && !m.timestamp().Before(e.nextAttempt) {
+				e.state = Cold
+			}
+			m.mu.Unlock()
+			continue
+		}
 		if e.state == Dialing {
 			done := e.dialDone
 			m.mu.Unlock()
 			select {
 			case <-done:
+				m.mu.Lock()
+				err := error(nil)
+				if e.lastDialToken == done {
+					err = e.lastDialErr
+				}
+				m.mu.Unlock()
+				if err != nil {
+					return nil, err
+				}
 				continue
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -261,24 +488,66 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 		e.dialDone = make(chan struct{})
 		done := e.dialDone
 		m.mu.Unlock()
+		// Admission is context-aware. No goroutine or token is retained when a
+		// caller cancels while waiting for the global dial budget.
+		select {
+		case m.dialSem <- struct{}{}:
+		case <-ctx.Done():
+			m.mu.Lock()
+			if e.state == Dialing && e.dialDone == done {
+				e.state = Cold
+				e.lastDialToken, e.lastDialErr = done, ctx.Err()
+				close(done)
+				e.dialDone = nil
+			}
+			m.mu.Unlock()
+			return nil, ctx.Err()
+		}
+		m.emit(key, EventDialStarted, "")
 		conn, err := dial(ctx)
+		<-m.dialSem
 		m.mu.Lock()
 		if err != nil || conn == nil {
 			if err == nil {
 				err = errors.New("dial returned a nil connection")
 			}
-			e.state = Backoff
 			e.lastErr = err
+			if errors.Is(err, context.Canceled) {
+				// A caller withdrawing its own context is not a transport health
+				// failure and must not open the circuit for other callers.
+				e.state = Cold
+				e.nextAttempt = time.Time{}
+			} else {
+				e.state = Backoff
+				e.failures++
+				delay := m.backoffDuration(e.failures)
+				e.nextAttempt = m.timestamp().Add(delay)
+				e.backoffDone = make(chan struct{})
+			}
+			e.lastDialToken, e.lastDialErr = done, err
+			wasBackoff := e.state == Backoff
 			close(done)
 			e.dialDone = nil
 			m.mu.Unlock()
+			m.emit(key, EventDialFailed, classifyDialFailure(err))
+			if wasBackoff {
+				m.emit(key, EventBackoff, classifyDialFailure(err))
+			}
 			return nil, err
 		}
 		e.conn, e.state, e.lastErr, e.lease, e.lastActivity = conn, Warm, nil, 1, m.timestamp()
+		e.lastDialToken, e.lastDialErr = done, nil
+		e.failures = 0
+		e.nextAttempt = time.Time{}
+		if e.backoffDone != nil {
+			close(e.backoffDone)
+			e.backoffDone = nil
+		}
 		e.lastClientDetached = time.Time{}
 		close(done)
 		e.dialDone = nil
 		m.mu.Unlock()
+		m.emit(key, EventDialSucceeded, "")
 		return &Lease{m: m, key: key, conn: conn}, nil
 	}
 }
@@ -448,7 +717,7 @@ func (m *Manager) Snapshot(key string) Snapshot {
 	if e == nil {
 		return Snapshot{Key: key, State: Cold}
 	}
-	s := Snapshot{Key: key, State: e.state, Lease: e.lease, Inflight: e.inflight, Queued: e.queued, LastActivity: e.lastActivity, LastClientDetached: e.lastClientDetached}
+	s := Snapshot{Key: key, State: e.state, Lease: e.lease, Inflight: e.inflight, Queued: e.queued, LastActivity: e.lastActivity, LastClientDetached: e.lastClientDetached, RetryAt: e.nextAttempt, FailureCount: e.failures}
 	if e.lastErr != nil {
 		s.LastError = e.lastErr.Error()
 	}
@@ -459,7 +728,7 @@ func (m *Manager) Snapshots() []Snapshot {
 	defer m.mu.Unlock()
 	out := make([]Snapshot, 0, len(m.entries))
 	for _, e := range m.entries {
-		s := Snapshot{Key: e.key, State: e.state, Lease: e.lease, Inflight: e.inflight, Queued: e.queued, LastActivity: e.lastActivity, LastClientDetached: e.lastClientDetached}
+		s := Snapshot{Key: e.key, State: e.state, Lease: e.lease, Inflight: e.inflight, Queued: e.queued, LastActivity: e.lastActivity, LastClientDetached: e.lastClientDetached, RetryAt: e.nextAttempt, FailureCount: e.failures}
 		if e.lastErr != nil {
 			s.LastError = e.lastErr.Error()
 		}

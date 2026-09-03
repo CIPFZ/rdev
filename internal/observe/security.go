@@ -86,6 +86,8 @@ type Snapshot struct {
 	ProtocolEvents                map[string]uint64 `json:"protocol_events"`
 	ResourceEvents                map[string]uint64 `json:"resource_events"`
 	DedupeEvents                  map[string]uint64 `json:"dedupe_events"`
+	ConnectionEvents              map[string]uint64 `json:"connection_events"`
+	ConnectionReasons             map[string]uint64 `json:"connection_reasons"`
 }
 
 // Registry accepts only enumerated reasons. Target identity is hashed for logs
@@ -102,6 +104,8 @@ type Registry struct {
 	protocolEvents           map[ProtocolEvent]uint64
 	resourceEvents           map[ResourceEvent]uint64
 	dedupeEvents             map[DedupeEvent]uint64
+	connectionEvents         map[ConnectionEvent]uint64
+	connectionReasons        map[string]uint64
 	sink                     Sink
 }
 
@@ -115,6 +119,8 @@ func New(sink Sink) *Registry {
 		protocolEvents:           make(map[ProtocolEvent]uint64),
 		resourceEvents:           make(map[ResourceEvent]uint64),
 		dedupeEvents:             make(map[DedupeEvent]uint64),
+		connectionEvents:         make(map[ConnectionEvent]uint64),
+		connectionReasons:        make(map[string]uint64),
 		sink:                     sink,
 	}
 }
@@ -242,6 +248,8 @@ func (r *Registry) Snapshot() Snapshot {
 		ProtocolEvents:                make(map[string]uint64),
 		ResourceEvents:                make(map[string]uint64),
 		DedupeEvents:                  make(map[string]uint64),
+		ConnectionEvents:              make(map[string]uint64),
+		ConnectionReasons:             make(map[string]uint64),
 	}
 	if r == nil {
 		return out
@@ -269,6 +277,12 @@ func (r *Registry) Snapshot() Snapshot {
 	}
 	for _, event := range dedupeEvents {
 		out.DedupeEvents[string(event)] = r.dedupeEvents[event]
+	}
+	for _, event := range connectionEvents {
+		out.ConnectionEvents[string(event)] = r.connectionEvents[event]
+	}
+	for _, reason := range []string{"canceled", "timeout", "auth", "network", "resource", "unknown", "LRU", "idle TTL", "drain complete", "health_failed", "explicit"} {
+		out.ConnectionReasons[reason] = r.connectionReasons[reason]
 	}
 	out.ProjectApprovals = r.approvals
 	out.RedactionHits = r.redactionHits

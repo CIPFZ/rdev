@@ -3,6 +3,7 @@ package connmgr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -391,5 +392,110 @@ func TestConfigValidation(t *testing.T) {
 	}
 	if err := (Config{MaxWarmHosts: 2, IdleTTL: time.Second, MaxIdleTTL: 2 * time.Second}).Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+}
+
+func TestGlobalDialSemaphoreBoundsHosts(t *testing.T) {
+	m := New(Config{MaxConcurrentDials: 2, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+	started := make(chan struct{}, 8)
+	release := make(chan struct{})
+	var active, peak atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			l, err := m.Acquire(context.Background(), fmt.Sprintf("h-%d", i), func(context.Context) (Connection, error) {
+				n := active.Add(1)
+				for {
+					p := peak.Load()
+					if n <= p || peak.CompareAndSwap(p, n) {
+						break
+					}
+				}
+				started <- struct{}{}
+				<-release
+				active.Add(-1)
+				return &fakeConn{}, nil
+			})
+			if err == nil {
+				l.Release()
+			} else {
+				t.Errorf("acquire: %v", err)
+			}
+		}(i)
+	}
+	for i := 0; i < 2; i++ {
+		<-started
+	}
+	if got := peak.Load(); got > 2 {
+		t.Fatalf("peak concurrent dials=%d", got)
+	}
+	close(release)
+	wg.Wait()
+}
+
+func TestDialFailureBackoffAndCancellation(t *testing.T) {
+	clock := time.Unix(100, 0)
+	m := New(Config{BaseBackoff: time.Second, MaxBackoff: 4 * time.Second, Now: func() time.Time { return clock }})
+	var dials atomic.Int32
+	_, err := m.Acquire(context.Background(), "k", func(context.Context) (Connection, error) {
+		dials.Add(1)
+		return nil, errors.New("connection refused")
+	})
+	if err == nil || dials.Load() != 1 {
+		t.Fatalf("first dial err=%v dials=%d", err, dials.Load())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	if _, err = m.Acquire(ctx, "k", func(context.Context) (Connection, error) { dials.Add(1); return &fakeConn{}, nil }); err == nil || err.Error() != "connection refused" {
+		t.Fatalf("backoff err=%v", err)
+	}
+	if dials.Load() != 1 {
+		t.Fatalf("redial during backoff: %d", dials.Load())
+	}
+	clock = clock.Add(time.Second)
+	if _, err = m.Acquire(context.Background(), "k", func(context.Context) (Connection, error) { dials.Add(1); return &fakeConn{}, nil }); err != nil || dials.Load() != 2 {
+		t.Fatalf("recovery err=%v dials=%d", err, dials.Load())
+	}
+}
+
+func TestConcurrentDialFailureIsShared(t *testing.T) {
+	m := New(Config{BaseBackoff: time.Second, MaxBackoff: time.Second})
+	var dials atomic.Int32
+	dial := func(context.Context) (Connection, error) {
+		dials.Add(1)
+		return nil, errors.New("connection refused")
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); <-start; _, err := m.Acquire(context.Background(), "same", dial); errs <- err }()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err == nil || err.Error() != "connection refused" {
+			t.Fatalf("shared err=%v", err)
+		}
+	}
+	if dials.Load() != 1 {
+		t.Fatalf("dials=%d, want one singleflight attempt", dials.Load())
+	}
+}
+
+func TestBackoffJitterUsesDeterministicClockAndRandom(t *testing.T) {
+	clock := time.Unix(300, 0)
+	m := New(Config{BaseBackoff: 10 * time.Second, MaxBackoff: 20 * time.Second, Jitter: true,
+		Now: func() time.Time { return clock }, Random: func() float64 { return 1 }})
+	_, _ = m.Acquire(context.Background(), "jitter", func(context.Context) (Connection, error) {
+		return nil, errors.New("network unavailable")
+	})
+	s := m.Snapshot("jitter")
+	if want := clock.Add(15 * time.Second); !s.RetryAt.Equal(want) {
+		t.Fatalf("retry at=%v, want deterministic jitter at %v", s.RetryAt, want)
 	}
 }
