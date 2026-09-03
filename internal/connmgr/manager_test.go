@@ -299,6 +299,18 @@ func TestAcquireRejectsNilContextAndNilConnection(t *testing.T) {
 	if got := m.Snapshot("k"); got.State != Backoff || got.LastError == "" {
 		t.Fatalf("snapshot=%+v", got)
 	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	var dials atomic.Int32
+	if _, err := m.Acquire(canceled, "already-canceled", func(context.Context) (Connection, error) {
+		dials.Add(1)
+		return &fakeConn{}, nil
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled acquire err=%v", err)
+	}
+	if dials.Load() != 0 {
+		t.Fatal("already-canceled acquire reached dial")
+	}
 }
 
 func TestMaxWarmHostsEvictsLeastRecentlyUsedIdle(t *testing.T) {

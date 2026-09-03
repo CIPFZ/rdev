@@ -115,6 +115,9 @@ func newDialSemaphore(limit int) *dialSemaphore {
 }
 
 func (s *dialSemaphore) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	w := &dialWaiter{ready: make(chan struct{})}
 	s.mu.Lock()
 	if s.inUse < s.limit && len(s.waiters) == 0 {
