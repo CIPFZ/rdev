@@ -1931,7 +1931,14 @@ func controlPath(h Host) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	key := fmt.Sprintf("%s:%d", h.Addr, h.Port)
+	// The ControlMaster is an authenticated SSH transport. Reusing a socket
+	// across different users, identities, jump hosts, or host-key policies
+	// would silently attach a caller to the wrong security context, so derive
+	// its name from the same immutable identity as connection pooling.
+	key, err := CanonicalConnectionKey(h)
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256([]byte(key))
 	return filepath.Join(dir, hex.EncodeToString(sum[:])[:16]), nil
 }

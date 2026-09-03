@@ -901,6 +901,36 @@ func TestForceAgentUploadPolicyDoesNotReplaceCredentialIdentity(t *testing.T) {
 	}
 }
 
+func TestSSHExecutionProfileChangesIdentityAndConnection(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Add(transport.Host{Name: "dev", Addr: "u@one", RemoteDir: "state"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := r.Resolve("dev")
+	profiles := []transport.Host{
+		{Name: "dev", Addr: "u@one", RemoteDir: "state", IdentityFile: "~/.ssh/id_ed25519"},
+		{Name: "dev", Addr: "u@one", RemoteDir: "state", IdentitiesOnly: true},
+		{Name: "dev", Addr: "u@one", RemoteDir: "state", ProxyJump: "jump"},
+		{Name: "dev", Addr: "u@one", RemoteDir: "state", HostKeyPolicy: "accept-new"},
+	}
+	for i, h := range profiles {
+		if err := r.Add(h); err != nil {
+			t.Fatalf("profile %d: %v", i, err)
+		}
+		after, _ := r.Resolve("dev")
+		if after.Generation == before.Generation {
+			t.Fatalf("profile %d did not advance identity generation", i)
+		}
+		if after.Fingerprint == before.Fingerprint {
+			t.Fatalf("profile %d did not change identity fingerprint", i)
+		}
+		if after.ConnectionFingerprint == before.ConnectionFingerprint {
+			t.Fatalf("profile %d did not change connection fingerprint", i)
+		}
+		before = after
+	}
+}
+
 func TestHostRedefinitionClearsStickyEnvAndSecretDeclarations(t *testing.T) {
 	r := NewRegistry()
 	if err := r.Add(transport.Host{Name: "dev", Addr: "u@old", Port: 22}); err != nil {

@@ -1400,6 +1400,22 @@ func TestControlPathIsShortAndStable(t *testing.T) {
 	if p3 == p1 {
 		t.Error("hosts differing only by port share a control path")
 	}
+	for name, mutate := range map[string]func(*Host){
+		"identity": func(h *Host) { h.IdentityFile = "~/.ssh/id_ed25519" },
+		"proxy":    func(h *Host) { h.ProxyJump = "jump.example" },
+		"policy":   func(h *Host) { h.HostKeyPolicy = "accept-new" },
+		"state":    func(h *Host) { h.RemoteDir = "other-state" },
+	} {
+		variant := long
+		mutate(&variant)
+		pv, err := controlPath(variant)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if pv == p1 {
+			t.Errorf("%s variant shares authenticated control path", name)
+		}
+	}
 }
 
 func TestRemoteDirNormalization(t *testing.T) {

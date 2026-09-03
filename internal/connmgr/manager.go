@@ -47,7 +47,11 @@ type entry struct {
 	lease, inflight, queued int
 	lastActivity            time.Time
 	dialDone                chan struct{}
-	lastErr                 error
+	// evictDone is closed after an EVICTING connection has finished Close and
+	// been removed from the map. Acquires wait on it instead of starting a new
+	// dial against the same entry while the old transport is still closing.
+	evictDone chan struct{}
+	lastErr   error
 }
 
 type Lease struct {
@@ -89,7 +93,7 @@ func New(cfg Config) *Manager {
 // runs outside the manager lock; exactly one caller owns it and all followers
 // observe the same result.
 func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Context) (Connection, error)) (*Lease, error) {
-	if m == nil || key == "" || dial == nil {
+	if m == nil || key == "" || dial == nil || ctx == nil {
 		return nil, errors.New("invalid connection acquire")
 	}
 	for {
@@ -114,6 +118,16 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 			m.mu.Unlock()
 			return &Lease{m: m, key: key, conn: c}, nil
 		}
+		if e.state == EVICTING {
+			done := e.evictDone
+			m.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		if e.state == Dialing {
 			done := e.dialDone
 			m.mu.Unlock()
@@ -130,7 +144,10 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 		m.mu.Unlock()
 		conn, err := dial(ctx)
 		m.mu.Lock()
-		if err != nil {
+		if err != nil || conn == nil {
+			if err == nil {
+				err = errors.New("dial returned a nil connection")
+			}
 			e.state = Backoff
 			e.lastErr = err
 			close(done)
@@ -233,6 +250,8 @@ func (m *Manager) Evict(key, reason string) bool {
 	e.state = EVICTING
 	c := e.conn
 	e.conn = nil
+	e.evictDone = make(chan struct{})
+	done := e.evictDone
 	m.mu.Unlock()
 	_ = c.Close()
 	m.mu.Lock()
@@ -241,6 +260,7 @@ func (m *Manager) Evict(key, reason string) bool {
 		e.lastErr = fmt.Errorf("evicted: %s", reason)
 		delete(m.entries, key)
 	}
+	close(done)
 	m.mu.Unlock()
 	return true
 }

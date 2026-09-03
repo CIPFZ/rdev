@@ -183,18 +183,33 @@ type ResolvedHost struct {
 }
 
 func hostFingerprint(h transport.Host, scope Scope) string {
-	remoteDir, _ := transport.ValidateRemoteDir(h.RemoteDir)
-	// ForceAgentUpload controls the next bootstrap but does not change the
-	// credential identity. Treating it as identity would purge exact scoped
-	// secrets even though address, user, port, namespace, and scope were stable.
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s", h.Addr, h.Port, remoteDir, scope)))
+	// The transport options are part of the immutable credential/trust identity:
+	// changing an identity file, proxy, or host-key policy must not leave old
+	// secret declarations attached to the new endpoint. ForceAgentUpload is
+	// intentionally excluded because it only controls bootstrap policy.
+	identity := canonicalHostIdentity(h)
+	sum := sha256.Sum256([]byte(identity + "\x00" + string(scope)))
 	return fmt.Sprintf("%x", sum[:])
 }
 
 func connectionFingerprint(h transport.Host, scope Scope) string {
-	remoteDir, _ := transport.ValidateRemoteDir(h.RemoteDir)
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%t\x00%s", h.Addr, h.Port, remoteDir, h.ForceAgentUpload, scope)))
+	// ForceAgentUpload is not part of CanonicalConnectionKey, but changing it
+	// still requests a fresh bootstrap, so retain it in the pool invalidation
+	// fingerprint while keeping it out of the credential identity above.
+	identity := canonicalHostIdentity(h)
+	sum := sha256.Sum256([]byte(identity + "\x00" + fmt.Sprintf("%t", h.ForceAgentUpload) + "\x00" + string(scope)))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+func canonicalHostIdentity(h transport.Host) string {
+	if key, err := transport.CanonicalConnectionKey(h); err == nil {
+		return key
+	}
+	// Registry callers validate hosts before publication. Keep a deterministic
+	// fallback for zero-value historical snapshots so a malformed old entry
+	// cannot collapse two identities into the same fingerprint.
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%t\x00%s\x00%s", h.Addr, h.Port, h.RemoteDir,
+		h.IdentityFile, h.IdentitiesOnly, h.ProxyJump, h.HostKeyPolicy)
 }
 
 // SetHostChangeHook installs the connection-pool invalidation hook. Registry
