@@ -224,6 +224,12 @@ func newJobID() string {
 	return fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102-150405"), hex.EncodeToString(b[:]))
 }
 
+// jobIDGenerator is a narrow test seam for exercising duplicate-ID handling.
+// Production always uses newJobID, whose random suffix makes collisions
+// vanishingly unlikely; the retry in jobStart is still required because the
+// directory is the durable uniqueness boundary.
+var jobIDGenerator = newJobID
+
 // jobList reports jobs, newest first.
 //
 // StartedAt, not the directory name, defines recency, so every readable metadata

@@ -38,6 +38,27 @@ func runSupervisor(jobDir string, argv []string) {
 		os.Exit(2)
 	}
 
+	// The serving agent owns the creation transaction. Until it publishes
+	// meta.json, this process must not launch the user command: if the agent is
+	// interrupted in that window, a supervisor that went ahead would become an
+	// unobservable runnable orphan. Waiting for a metadata record matching our
+	// own pid makes publication the supervisor's start barrier. A crashed
+	// parent is detected by reparenting; the supervisor then exits without ever
+	// starting argv. There is intentionally no wall-clock timeout while the
+	// parent is alive, so slow disks cannot turn a valid start into a false
+	// rollback.
+	parentPID := os.Getppid()
+	for {
+		var meta jobMeta
+		if err := readJSON(filepath.Join(jobDir, "meta.json"), &meta); err == nil && meta.PID == os.Getpid() {
+			break
+		}
+		if os.Getppid() != parentPID {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	cmd := exec.Command(argv[0], argv[1:]...)
 	// Inherit the stdio the parent already redirected to the job's log files.
 	cmd.Stdout = os.Stdout
@@ -48,17 +69,29 @@ func runSupervisor(jobDir string, argv []string) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: false}
 
 	if err := cmd.Start(); err != nil {
-		writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
-			"exit_code": -1,
-			"ended_at":  time.Now().UTC().Format(time.RFC3339),
-			"error":     fmt.Sprintf("start failed: %v", err),
+		_ = withJobLock(jobDir, func() error {
+			if !jobExists(jobDir) {
+				return nil
+			}
+			return writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
+				"exit_code": -1,
+				"ended_at":  time.Now().UTC().Format(time.RFC3339),
+				"error":     fmt.Sprintf("start failed: %v", err),
+			})
 		})
 		os.Exit(127)
 	}
 
-	// Record the real child pid alongside the supervisor pid. Callers signal
-	// the group, but the child pid is useful when diagnosing by hand.
-	writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
+	// Record the real child pid alongside the supervisor pid. This publication
+	// participates in the same transaction lock as job_start/job_rm: a starter
+	// that is still committing metadata, or a remover that is tearing the record
+	// down, must not race a child.json write into a half-removed directory.
+	_ = withJobLock(jobDir, func() error {
+		if !jobExists(jobDir) {
+			return nil
+		}
+		return writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
+	})
 
 	err := cmd.Wait()
 	code := 0

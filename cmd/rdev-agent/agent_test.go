@@ -346,6 +346,74 @@ func TestJobLifecycle(t *testing.T) {
 	}
 }
 
+func TestJobStartMetadataFailureRollsBackSupervisor(t *testing.T) {
+	state := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var startedPID int
+	oldWriter := writeJobMeta
+	writeJobMeta = func(path string, v any) error {
+		if m, ok := v.(*jobMeta); ok {
+			startedPID = m.PID
+		}
+		return errors.New("injected metadata failure")
+	}
+	t.Cleanup(func() { writeJobMeta = oldWriter })
+
+	if _, err := jobStart(&proto.JobParams{Spec: &proto.ExecParams{
+		Argv: []string{"sleep", "30"},
+	}}, state); err == nil {
+		t.Fatal("metadata failure should fail job_start")
+	}
+	if startedPID <= 0 {
+		t.Fatal("metadata writer was not reached with a started supervisor pid")
+	}
+	// SIGKILL + Wait in the rollback path must leave no runnable process and no
+	// partially published job directory behind.
+	deadline := time.Now().Add(2 * time.Second)
+	for processAlive(startedPID) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processAlive(startedPID) {
+		t.Fatalf("supervisor pid %d survived metadata rollback", startedPID)
+	}
+	entries, err := os.ReadDir(filepath.Join(state, "jobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rollback left job entries: %v", entries)
+	}
+}
+
+func TestJobStartRetriesDuplicateID(t *testing.T) {
+	state := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := "duplicate-id"
+	if err := os.Mkdir(filepath.Join(state, "jobs", first), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldGenerator := jobIDGenerator
+	ids := []string{first, "fresh-id"}
+	jobIDGenerator = func() string {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}
+	t.Cleanup(func() { jobIDGenerator = oldGenerator })
+	res, err := jobStart(&proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"true"}}}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Info.ID != "fresh-id" {
+		t.Fatalf("job id = %q, want fresh-id", res.Info.ID)
+	}
+	jobWait(&proto.JobParams{ID: res.Info.ID, WaitTimeoutSec: 5}, state)
+}
+
 func TestJobLogsGrepAndTail(t *testing.T) {
 	state := t.TempDir()
 	dir := filepath.Join(state, "jobs", "j1")

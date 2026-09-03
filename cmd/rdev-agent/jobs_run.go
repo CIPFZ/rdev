@@ -11,8 +11,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -38,75 +40,136 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, invalidRequestError("job spec with argv required")
 	}
 
-	id := newJobID()
-	dir := jobDir(state, id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// The jobs directory is shared by multiple agent processes. The directory
+	// creation itself is the uniqueness commit point; Mkdir (rather than
+	// MkdirAll) lets a deliberately repeated ID fail closed instead of opening
+	// an existing record and mixing its logs with a new process.
+	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
 		return nil, err
 	}
+	for attempt := 0; attempt < 32; attempt++ {
+		id := jobIDGenerator()
+		dir := jobDir(state, id)
+		var result *proto.JobResult
+		err := withJobLock(dir, func() error {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				if errors.Is(err, os.ErrExist) {
+					return errJobIDCollision
+				}
+				return err
+			}
+			var err error
+			result, err = startJobTransaction(p, id, dir)
+			return err
+		})
+		if errors.Is(err, errJobIDCollision) {
+			continue
+		}
+		if err != nil {
+			removeJobLock(dir)
+			return nil, err
+		}
+		return result, nil
+	}
+	return nil, processStateError("could not allocate a unique job id")
+}
 
+var errJobIDCollision = errors.New("job id already exists")
+
+// writeJobMeta is replaceable only by package tests. Keeping the fault seam at
+// the publication boundary lets tests prove that a failed metadata rename
+// rolls back the already-started supervisor, without weakening normal file
+// permissions or relying on a root/non-root distinction.
+var writeJobMeta = func(path string, v any) error { return writeJSON(path, v) }
+
+// startJobTransaction is called while holding the job lock. No externally
+// visible job record is committed until meta.json is atomically published. If
+// any post-Start step fails, the whole process group is killed and reaped before
+// the directory is removed, so metadata failures cannot strand a runnable job.
+func startJobTransaction(p *proto.JobParams, id, dir string) (*proto.JobResult, error) {
 	cmd, err := buildCmd(p.Spec)
 	if err != nil {
+		os.RemoveAll(dir)
 		return nil, err
 	}
-
-	// Re-target the command at this same binary in supervisor mode, so the
-	// direct parent of the real process is something that outlives ssh and can
-	// record the exit code. buildCmd already validated cwd/env/argv and
-	// resolved the login-shell wrapper, so only Path and Args change here.
 	self, err := os.Executable()
 	if err != nil {
+		os.RemoveAll(dir)
 		return nil, fmt.Errorf("locate agent binary: %w", err)
 	}
-	inner := cmd.Args // includes the login-shell wrapper when requested
+	inner := append([]string(nil), cmd.Args...)
 	cmd.Path = self
 	cmd.Args = append([]string{self, superviseFlag, dir, "--"}, inner...)
 
 	stdout, err := os.Create(filepath.Join(dir, "stdout"))
 	if err != nil {
+		os.RemoveAll(dir)
 		return nil, err
 	}
-	defer stdout.Close()
 	stderr, err := os.Create(filepath.Join(dir, "stderr"))
 	if err != nil {
+		stdout.Close()
+		os.RemoveAll(dir)
 		return nil, err
 	}
-	defer stderr.Close()
-
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Stdin = nil // a detached job has no console to read from
-
-	// Setsid detaches the child into a new session and process group. Without
-	// it the child would share the agent's group and die when ssh hangs up.
+	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
+		stdout.Close()
+		stderr.Close()
+		os.RemoveAll(dir)
 		return nil, processStartError(err)
 	}
 
-	// Preserve sub-second start order. keep_last cannot infer which job is newer
-	// when several starts are truncated to the same whole second.
-	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	meta := &jobMeta{
 		ID:        id,
 		Label:     p.Label,
 		Argv:      p.Spec.Argv,
 		Cwd:       p.Spec.Cwd,
 		PID:       cmd.Process.Pid,
-		StartedAt: startedAt,
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if err := writeJSON(filepath.Join(dir, "meta.json"), meta); err != nil {
-		return nil, err
+	if err := writeJobMeta(filepath.Join(dir, "meta.json"), meta); err != nil {
+		rbErr := rollbackStartedJob(cmd, dir)
+		stdout.Close()
+		stderr.Close()
+		return nil, errors.Join(err, rbErr)
 	}
 
-	// Reap in the background as a best-effort fast path: when the agent does
-	// stay alive, status.json lands immediately. The supervisor writes the same
-	// file independently, so correctness never depends on this goroutine.
-	go func() {
-		cmd.Wait()
-	}()
-
+	stdout.Close()
+	stderr.Close()
+	// The serving agent reaps the supervisor when it remains alive. The
+	// supervisor independently writes status.json, so this is only a fast path.
+	go func() { _ = cmd.Wait() }()
 	return &proto.JobResult{Info: metaToInfo(meta, dir)}, nil
+}
+
+func rollbackStartedJob(cmd *exec.Cmd, dir string) error {
+	if cmd == nil || cmd.Process == nil {
+		return os.RemoveAll(dir)
+	}
+	pid := cmd.Process.Pid
+	var killErr error
+	if groupErr := syscall.Kill(-pid, syscall.SIGKILL); groupErr != nil && !errors.Is(groupErr, syscall.ESRCH) {
+		// A group probe can fail while the supervisor itself is still
+		// signalable. Treat the fallback as successful if it works; report a
+		// rollback failure only when both addresses reject the escalation.
+		if pidErr := syscall.Kill(pid, syscall.SIGKILL); pidErr != nil && !errors.Is(pidErr, syscall.ESRCH) {
+			killErr = errors.Join(groupErr, pidErr)
+		}
+	}
+	waitErr := cmd.Wait()
+	// A killed supervisor reports *exec.ExitError; that is the expected result
+	// of rollback, not evidence that rollback itself failed.
+	var exitErr *exec.ExitError
+	if errors.As(waitErr, &exitErr) {
+		waitErr = nil
+	}
+	removeErr := os.RemoveAll(dir)
+	return errors.Join(killErr, waitErr, removeErr)
 }
 
 func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
