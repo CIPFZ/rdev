@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -48,12 +49,33 @@ func runSupervisor(jobDir string, argv []string) {
 	// parent is alive, so slow disks cannot turn a valid start into a false
 	// rollback.
 	parentPID := os.Getppid()
+	if raw := os.Getenv(supervisorParentEnv); raw != "" {
+		if expected, err := strconv.Atoi(raw); err == nil && expected > 0 {
+			parentPID = expected
+		}
+	}
 	for {
 		var meta jobMeta
 		if err := readJSON(filepath.Join(jobDir, "meta.json"), &meta); err == nil && meta.PID == os.Getpid() {
 			break
 		}
 		if os.Getppid() != parentPID {
+			// The serving agent died before publishing the metadata commit
+			// point. Do not leave an unobservable directory behind. Re-check
+			// under the same lock used by job_start: the parent may have
+			// published metadata concurrently with the reparenting notice, in
+			// which case this supervisor must continue and own the job.
+			_ = withJobLock(jobDir, func() error {
+				var committed jobMeta
+				if err := readJSON(filepath.Join(jobDir, "meta.json"), &committed); err == nil && committed.PID == os.Getpid() {
+					return nil
+				}
+				if err := os.RemoveAll(jobDir); err != nil {
+					return err
+				}
+				removeJobLock(jobDir)
+				return nil
+			})
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -64,6 +86,7 @@ func runSupervisor(jobDir string, argv []string) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = nil
+	cmd.Env = withoutEnvValue(os.Environ(), supervisorParentEnv)
 	// Keep the child in the supervisor's process group so that signalling the
 	// group (job_stop uses -pgid) reaches supervisor and child together.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: false}

@@ -25,11 +25,73 @@ import (
 // binary never runs main(), so without this hook the supervisor would start no
 // child and every job would look like it vanished.
 func TestMain(m *testing.M) {
+	if os.Getenv("RDEV_TEST_ORPHAN_SUPERVISOR") == "1" {
+		// Start a supervisor and intentionally let this parent exit before the
+		// metadata barrier is published. The supervisor must reclaim the
+		// unpublished directory instead of leaving a partial job record.
+		dir := os.Getenv("RDEV_TEST_ORPHAN_DIR")
+		cmd := exec.Command(os.Args[0], superviseFlag, dir, "--", "sleep", "30")
+		cmd.Env = make([]string, 0, len(os.Environ()))
+		for _, env := range os.Environ() {
+			if !strings.HasPrefix(env, "RDEV_TEST_ORPHAN_SUPERVISOR=") {
+				cmd.Env = append(cmd.Env, env)
+			}
+		}
+		cmd.Env = setEnvValue(cmd.Env, supervisorParentEnv, fmt.Sprint(os.Getpid()))
+		if err := cmd.Start(); err != nil {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(os.Getenv("RDEV_TEST_ORPHAN_PID"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644); err != nil {
+			os.Exit(3)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 3 && os.Args[1] == superviseFlag && os.Args[3] == "--" {
 		runSupervisor(os.Args[2], os.Args[4:])
 		return // unreachable: runSupervisor exits
 	}
 	os.Exit(m.Run())
+}
+
+func TestSupervisorCrashBeforeMetadataCleansRecord(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.MkdirAll(jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(jobs, "unpublished")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(state, "supervisor.pid")
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(),
+		"RDEV_TEST_ORPHAN_SUPERVISOR=1",
+		"RDEV_TEST_ORPHAN_DIR="+dir,
+		"RDEV_TEST_ORPHAN_PID="+pidPath,
+	)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("orphan-parent helper: %v", err)
+	}
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	if _, err := fmt.Sscan(string(pidBytes), &pid); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(dir); os.IsNotExist(err) && !processAlive(pid) {
+			if _, err := os.Stat(lockPath(dir)); !os.IsNotExist(err) {
+				t.Fatalf("unpublished job lock survived cleanup: %v", err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("supervisor %d or unpublished directory survived parent crash", pid)
 }
 
 func TestCapWriterTruncatesButCounts(t *testing.T) {
