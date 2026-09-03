@@ -1921,6 +1921,13 @@ func (c *Conn) CloseControlMaster(ctx context.Context) error {
 	if !owned {
 		return nil
 	}
+	// Conn values normally come from Dial, but this public lifecycle method
+	// must still fail closed when a caller constructs one directly.  The
+	// destination is placed in an ssh argv slot below, so apply the same sink
+	// validation used by Dial before executing anything.
+	if err := ValidateHost(c.host); err != nil {
+		return fmt.Errorf("invalid host for control master close: %w", err)
+	}
 	if c.ctlPath == "" {
 		return errors.New("control master path is empty")
 	}

@@ -142,7 +142,11 @@ func (m *Manager) timestamp() time.Time { return m.now() }
 func (m *Manager) warmCountLocked() int {
 	n := 0
 	for _, e := range m.entries {
-		if e.conn != nil && (e.state == Warm || e.state == Draining || e.state == Dialing) {
+		// Keep EVICTING connections counted until Close has returned.  The
+		// underlying transport is still live during a slow close; dropping it
+		// from the count before then would let a full pool temporarily exceed
+		// MaxWarmHosts.
+		if e.state == Dialing || (e.conn != nil && (e.state == Warm || e.state == Draining || e.state == EVICTING)) {
 			n++
 		}
 	}
@@ -182,6 +186,7 @@ func (m *Manager) closeConnection(c Connection) {
 func (m *Manager) finishEviction(e *entry, done chan struct{}, reason string) {
 	m.mu.Lock()
 	if cur := m.entries[e.key]; cur == e {
+		e.conn = nil
 		e.state = Cold
 		e.lastErr = fmt.Errorf("evicted: %s", reason)
 	}
@@ -247,7 +252,6 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 			m.beginEvictionLocked(victim)
 			done := victim.evictDone
 			c := victim.conn
-			victim.conn = nil
 			m.mu.Unlock()
 			m.closeConnection(c)
 			m.finishEviction(victim, done, "LRU")
@@ -283,21 +287,22 @@ func (m *Manager) releaseLease(key string) {
 	var e *entry
 	m.mu.Lock()
 	e = m.entries[key]
+	released := false
 	if e != nil && e.lease > 0 {
+		released = true
 		e.lease--
 		e.lastActivity = m.timestamp()
 		if e.lease == 0 {
 			e.lastClientDetached = m.timestamp()
 		}
 	}
-	closeNow := e != nil && e.state == Draining && e.lease == 0 && e.inflight == 0 && e.queued == 0
+	closeNow := released && e.state == Draining && e.lease == 0 && e.inflight == 0 && e.queued == 0
 	var done chan struct{}
 	var c Connection
 	if closeNow {
 		m.beginEvictionLocked(e)
 		done = e.evictDone
 		c = e.conn
-		e.conn = nil
 	}
 	m.mu.Unlock()
 	if closeNow {
@@ -333,7 +338,6 @@ func (m *Manager) Queue(key string) (func(), error) {
 			if e.state == Draining && e.lease == 0 && e.inflight == 0 && e.queued == 0 {
 				m.beginEvictionLocked(e)
 				done, c = e.evictDone, e.conn
-				e.conn = nil
 			}
 			m.mu.Unlock()
 			if done != nil {
@@ -350,11 +354,11 @@ func (m *Manager) Begin(key string) error {
 	if e == nil {
 		return ErrNotFound
 	}
-	if e.queued > 0 {
-		e.queued--
-	}
 	if e.state == EVICTING || e.state == Draining {
 		return ErrDraining
+	}
+	if e.queued > 0 {
+		e.queued--
 	}
 	e.inflight++
 	e.lastActivity = m.timestamp()
@@ -368,9 +372,11 @@ func (m *Manager) End(key string) error {
 		m.mu.Unlock()
 		return ErrNotFound
 	}
-	if e.inflight > 0 {
-		e.inflight--
+	if e.inflight == 0 {
+		m.mu.Unlock()
+		return nil
 	}
+	e.inflight--
 	e.lastActivity = m.timestamp()
 	closeNow := e.state == Draining && e.lease == 0 && e.inflight == 0 && e.queued == 0
 	var done chan struct{}
@@ -379,7 +385,6 @@ func (m *Manager) End(key string) error {
 		m.beginEvictionLocked(e)
 		done = e.evictDone
 		c = e.conn
-		e.conn = nil
 	}
 	m.mu.Unlock()
 	if closeNow {
@@ -403,16 +408,9 @@ func (m *Manager) Evict(key, reason string) bool {
 	m.beginEvictionLocked(e)
 	done := e.evictDone
 	c := e.conn
-	e.conn = nil
 	m.mu.Unlock()
 	m.closeConnection(c)
-	m.mu.Lock()
-	if cur := m.entries[key]; cur == e {
-		e.state = Cold
-		e.lastErr = fmt.Errorf("evicted: %s", reason)
-	}
-	close(done)
-	m.mu.Unlock()
+	m.finishEviction(e, done, reason)
 	return true
 }
 
@@ -437,7 +435,6 @@ func (m *Manager) Reap(at time.Time) int {
 		m.mu.Lock()
 		done := e.evictDone
 		c := e.conn
-		e.conn = nil
 		m.mu.Unlock()
 		m.closeConnection(c)
 		m.finishEviction(e, done, "idle TTL")

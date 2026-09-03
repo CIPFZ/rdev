@@ -191,6 +191,102 @@ func TestAcquireWaitsForEvictionBeforeRedial(t *testing.T) {
 	}
 }
 
+func TestMaxWarmHostsCountsConnectionDuringClose(t *testing.T) {
+	m := New(Config{MaxWarmHosts: 1})
+	c := &blockingCloseConn{started: make(chan struct{}), release: make(chan struct{})}
+	l, err := m.Acquire(context.Background(), "a", func(context.Context) (Connection, error) { return c, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Release()
+	evicted := make(chan bool, 1)
+	go func() { evicted <- m.Evict("a", "test") }()
+	select {
+	case <-c.started:
+	case <-time.After(time.Second):
+		t.Fatal("eviction did not start closing")
+	}
+	var dialed atomic.Int32
+	if _, err := m.Acquire(context.Background(), "b", func(context.Context) (Connection, error) {
+		dialed.Add(1)
+		return &fakeConn{}, nil
+	}); !errors.Is(err, ErrWarmLimit) {
+		t.Fatalf("acquire while close pending: %v, want ErrWarmLimit", err)
+	}
+	if dialed.Load() != 0 {
+		t.Fatal("dial started while the warm-host slot was still closing")
+	}
+	close(c.release)
+	if !<-evicted {
+		t.Fatal("eviction failed")
+	}
+	l2, err := m.Acquire(context.Background(), "b", func(context.Context) (Connection, error) { return &fakeConn{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2.Release()
+}
+
+func TestMaxWarmHostsCountsDialingConnection(t *testing.T) {
+	m := New(Config{MaxWarmHosts: 1})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	first := make(chan *Lease, 1)
+	go func() {
+		l, err := m.Acquire(context.Background(), "a", func(context.Context) (Connection, error) {
+			close(started)
+			<-release
+			return &fakeConn{}, nil
+		})
+		if err != nil {
+			t.Errorf("first acquire: %v", err)
+			return
+		}
+		first <- l
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("dial did not start")
+	}
+	var dialed atomic.Int32
+	if _, err := m.Acquire(context.Background(), "b", func(context.Context) (Connection, error) {
+		dialed.Add(1)
+		return &fakeConn{}, nil
+	}); !errors.Is(err, ErrWarmLimit) {
+		t.Fatalf("acquire while another dial is pending: %v, want ErrWarmLimit", err)
+	}
+	if dialed.Load() != 0 {
+		t.Fatal("second dial started while warm-host slot was occupied")
+	}
+	close(release)
+	l := <-first
+	l.Release()
+}
+
+func TestBeginDrainingDoesNotConsumeQueue(t *testing.T) {
+	m := New(Config{})
+	l, err := m.Acquire(context.Background(), "k", func(context.Context) (Connection, error) { return &fakeConn{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := m.Queue("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Evict("k", "busy") {
+		t.Fatal("busy connection was evicted synchronously")
+	}
+	if err := m.Begin("k"); !errors.Is(err, ErrDraining) {
+		t.Fatalf("Begin on draining connection: %v", err)
+	}
+	if got := m.Snapshot("k").Queued; got != 1 {
+		t.Fatalf("queued=%d after rejected Begin, want 1", got)
+	}
+	release()
+	l.Release()
+}
+
 func TestAcquireRejectsNilContextAndNilConnection(t *testing.T) {
 	m := New(Config{})
 	if _, err := m.Acquire(nil, "k", func(context.Context) (Connection, error) { return &fakeConn{}, nil }); err == nil {

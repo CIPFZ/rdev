@@ -1439,6 +1439,17 @@ func TestControlMasterOwnershipIsExplicit(t *testing.T) {
 	}
 }
 
+func TestOwnedControlMasterCloseValidatesDestination(t *testing.T) {
+	c := &Conn{host: Host{Addr: "-oProxyCommand=touch /tmp/pwned"}, ctlPath: filepath.Join(t.TempDir(), "ctl")}
+	c.SetControlMasterOwnership(true)
+	if err := c.CloseControlMaster(context.Background()); err == nil {
+		t.Fatal("malformed destination unexpectedly reached ssh")
+	}
+	if c.OwnsControlMaster() {
+		t.Fatal("failed close retained control-master ownership")
+	}
+}
+
 func TestRemoteDirNormalization(t *testing.T) {
 	valid := map[string]string{
 		"":                  ".cache/rdev",
