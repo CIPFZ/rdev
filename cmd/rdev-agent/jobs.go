@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,21 +61,88 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 // jobMeta is the on-disk record. It is the single source of truth: a fresh
 // agent process reconstructs everything by reading these files.
 type jobMeta struct {
-	ID        string   `json:"id"`
-	Label     string   `json:"label,omitempty"`
-	Argv      []string `json:"argv"`
-	Cwd       string   `json:"cwd,omitempty"`
-	PID       int      `json:"pid"`
-	StartedAt string   `json:"started_at"`
+	ID    string   `json:"id"`
+	Label string   `json:"label,omitempty"`
+	Argv  []string `json:"argv"`
+	Cwd   string   `json:"cwd,omitempty"`
+	PID   int      `json:"pid"`
+	// ProcessIdentity is an immutable kernel-provided start token for PID. A
+	// PID alone is reusable; this token is checked before every signal.
+	ProcessIdentity string `json:"process_identity,omitempty"`
+	StartedAt       string `json:"started_at"`
 }
 
-func jobDir(state, id string) string { return filepath.Join(state, "jobs", id) }
+func jobDir(state, id string) string {
+	if validateJobID(id) != nil {
+		// Keep this legacy helper containment-safe for package callers and tests;
+		// public operations use validatedJobDir and return the validation error.
+		return filepath.Join(state, "jobs", ".invalid-job-id")
+	}
+	return filepath.Join(state, "jobs", id)
+}
+
+const maxJobIDLen = 128
+
+// validateJobID accepts the historical sortable IDs and other opaque labels,
+// while rejecting every path-bearing or control-character value. The ID is a
+// single directory name under state/jobs, never a relative path.
+func validateJobID(id string) error {
+	if id == "" {
+		return invalidRequestError("job id required")
+	}
+	if len(id) > maxJobIDLen || id == "." || id == ".." {
+		return invalidRequestError("invalid job id")
+	}
+	if filepath.IsAbs(id) || strings.ContainsAny(id, `/\\`) {
+		return invalidRequestError("invalid job id")
+	}
+	for _, r := range id {
+		if r < 0x21 || r == 0x7f || r > 0x7e {
+			return invalidRequestError("invalid job id")
+		}
+	}
+	for _, r := range id {
+		if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			return invalidRequestError("invalid job id")
+		}
+	}
+	return nil
+}
+
+func validatedJobDir(state, id string) (string, error) {
+	if err := validateJobID(id); err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(filepath.Join(state, "jobs"))
+	if err != nil {
+		return "", err
+	}
+	if st, statErr := os.Lstat(root); statErr == nil {
+		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+			return "", processStateError("job root is not a private directory")
+		}
+		if st.Mode().Perm() != 0o700 {
+			if chmodErr := os.Chmod(root, 0o700); chmodErr != nil {
+				return "", chmodErr
+			}
+		}
+	}
+	dir := filepath.Join(root, id)
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel != id || strings.ContainsAny(rel, `/\\`) {
+		return "", invalidRequestError("invalid job id")
+	}
+	if st, err := os.Lstat(dir); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return "", processStateError("job directory is a symlink")
+	}
+	return dir, nil
+}
 
 func jobStatus(id, state string) (*proto.JobInfo, error) {
-	if id == "" {
-		return nil, invalidRequestError("job id required")
+	dir, err := validatedJobDir(state, id)
+	if err != nil {
+		return nil, err
 	}
-	dir := jobDir(state, id)
 	meta, err := readMeta(dir)
 	if err != nil {
 		return nil, fmt.Errorf("job %s: %w", id, err)
@@ -117,7 +185,7 @@ func metaToInfo(m *jobMeta, dir string) *proto.JobInfo {
 		return info
 	}
 
-	if processAlive(m.PID) {
+	if processMatches(m.PID, m.ProcessIdentity) {
 		info.State = proto.JobRunning
 		return info
 	}
@@ -125,7 +193,7 @@ func metaToInfo(m *jobMeta, dir string) *proto.JobInfo {
 	// The supervisor is gone without recording a status. If the child survived
 	// it (orphaned to init), the job is still doing work and must not be
 	// reported as finished.
-	if child := readChildPID(dir); child > 0 && processAlive(child) {
+	if child, identity := readChildProcess(dir); child > 0 && processMatches(child, identity) {
 		info.State = proto.JobRunning
 		info.ChildPID = child
 		info.Orphaned = true
@@ -140,13 +208,25 @@ func metaToInfo(m *jobMeta, dir string) *proto.JobInfo {
 
 // readChildPID returns the supervised child's pid, or 0 when unrecorded.
 func readChildPID(dir string) int {
+	pid, _ := readChildProcess(dir)
+	return pid
+}
+
+func readChildProcess(dir string) (int, string) {
 	var c struct {
-		ChildPID int `json:"child_pid"`
+		ChildPID        int    `json:"child_pid"`
+		ProcessIdentity string `json:"process_identity,omitempty"`
 	}
 	if err := readJSON(filepath.Join(dir, "child.json"), &c); err != nil {
-		return 0
+		return 0, ""
 	}
-	return c.ChildPID
+	// Legacy records did not persist a child token. Deriving one preserves
+	// observability for those records while all newly-created records are
+	// identity-bound on disk.
+	if c.ProcessIdentity == "" && c.ChildPID > 0 {
+		c.ProcessIdentity, _ = processIdentity(c.ChildPID)
+	}
+	return c.ChildPID, c.ProcessIdentity
 }
 
 func processAlive(pid int) bool {
@@ -157,14 +237,25 @@ func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
+func processMatches(pid int, identity string) bool {
+	if pid <= 0 || syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	if identity == "" {
+		return true // legacy metadata; signal paths perform stricter checks
+	}
+	current, err := processIdentity(pid)
+	return err == nil && current == identity
+}
+
 // jobAlive reports whether any part of the job is still running: the supervisor
 // or, if it died, the orphaned child.
 func jobAlive(m *jobMeta, dir string) bool {
-	if processAlive(m.PID) {
+	if processMatches(m.PID, m.ProcessIdentity) {
 		return true
 	}
-	child := readChildPID(dir)
-	return child > 0 && processAlive(child)
+	child, identity := readChildProcess(dir)
+	return child > 0 && processMatches(child, identity)
 }
 
 func readMeta(dir string) (*jobMeta, error) {
@@ -174,6 +265,9 @@ func readMeta(dir string) (*jobMeta, error) {
 	}
 	if m.ID == "" {
 		return nil, processStateError("invalid job metadata")
+	}
+	if err := validateJobID(m.ID); err != nil || m.ID != filepath.Base(dir) {
+		return nil, processStateError("invalid job metadata id")
 	}
 	return &m, nil
 }
@@ -191,7 +285,7 @@ func writeJSON(path string, v any) error {
 	// status now hold the job lock, but the supervisor writes child.json outside
 	// it, and a unique name costs nothing.
 	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -202,6 +296,9 @@ func writeJSON(path string, v any) error {
 }
 
 func readJSON(path string, v any) error {
+	if err := secureRecordFile(path); err != nil {
+		return err
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -232,6 +329,10 @@ func newJobID() string {
 // records; the full scan pays one metadata read per directory without retaining
 // every record in memory.
 func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	root, err := secureJobRoot(state)
+	if err != nil {
+		return nil, err
+	}
 	limit := p.Limit
 	if limit < 0 || limit > 1000 {
 		return nil, limitExceededError("job list limit is outside the hard limit")
@@ -240,7 +341,6 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		limit = defaultJobListLimit
 	}
 
-	root := filepath.Join(state, "jobs")
 	dir, err := os.Open(root)
 	if err != nil {
 		if os.IsNotExist(err) {

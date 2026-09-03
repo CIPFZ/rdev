@@ -37,6 +37,10 @@ func runSupervisor(jobDir string, argv []string) {
 		fmt.Fprintln(os.Stderr, "rdev-agent -supervise: argv required after --")
 		os.Exit(2)
 	}
+	if err := secureJobDir(jobDir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	// Inherit the stdio the parent already redirected to the job's log files.
@@ -58,7 +62,8 @@ func runSupervisor(jobDir string, argv []string) {
 
 	// Record the real child pid alongside the supervisor pid. Callers signal
 	// the group, but the child pid is useful when diagnosing by hand.
-	writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
+	childIdentity, _ := processIdentity(cmd.Process.Pid)
+	writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid, "process_identity": childIdentity})
 
 	err := cmd.Wait()
 	code := 0

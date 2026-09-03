@@ -49,10 +49,13 @@ func jobRm(p *proto.JobParams, state string) (*proto.JobResult, error) {
 // Two callers racing on the same ID both asked for it to be gone, and it is; the
 // old behaviour leaked a bare ENOENT from meta.json to whichever one lost.
 func jobRmOne(id, state string) (*proto.JobResult, error) {
-	dir := jobDir(state, id)
+	dir, err := validatedJobDir(state, id)
+	if err != nil {
+		return nil, err
+	}
 	res := &proto.JobResult{}
 
-	err := withJobLock(dir, func() error {
+	err = withJobLock(dir, func() error {
 		// Read inside the lock. A meta read from outside it says nothing about
 		// what is on disk by the time the removal runs.
 		meta, err := readMeta(dir)
@@ -94,7 +97,10 @@ func jobRmOne(id, state string) (*proto.JobResult, error) {
 }
 
 func jobRmSweep(p *proto.JobParams, state string) (*proto.JobResult, error) {
-	root := filepath.Join(state, "jobs")
+	root, err := secureJobRoot(state)
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -116,6 +122,12 @@ func jobRmSweep(p *proto.JobParams, state string) (*proto.JobResult, error) {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
+		if validateJobID(e.Name()) != nil {
+			continue
+		}
+		if st, lerr := os.Lstat(dir); lerr != nil || st.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 		meta, err := readMeta(dir)
 		if err != nil {
 			continue // half-written or foreign directory

@@ -74,14 +74,17 @@ func lockPath(jobDir string) string {
 // would again be outside the lock.
 func withJobLock(jobDir string, fn func() error) error {
 	path := lockPath(jobDir)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := secureDir(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := secureRecordFile(path); err != nil {
+		return err
+	}
 
 	if err := acquireJobLock(f, path); err != nil {
 		return err

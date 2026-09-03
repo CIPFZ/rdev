@@ -74,8 +74,8 @@ var defaultWaitHub = newWaitHub(realWaitClock{})
 func watcherKey(state, id string) string { return state + "\x00" + id }
 
 func (h *waitHub) subscribe(id, state string) (<-chan waitObservation, func(), error) {
-	if id == "" {
-		return nil, nil, invalidRequestError("job id required")
+	if _, err := validatedJobDir(state, id); err != nil {
+		return nil, nil, err
 	}
 	key := watcherKey(state, id)
 
@@ -310,7 +310,14 @@ func jobWaitContext(ctx context.Context, hub *waitHub, p *proto.JobParams, state
 			}
 		}
 		if p.TailOnExit > 0 && w.Info != nil && w.Info.State != proto.JobRunning {
-			logPath := filepath.Join(jobDir(state, s.id), "stdout")
+			dir, dirErr := validatedJobDir(state, s.id)
+			if dirErr != nil {
+				continue
+			}
+			logPath := filepath.Join(dir, "stdout")
+			if secureRecordFile(logPath) != nil {
+				continue
+			}
 			if logs, readErr := readTail(logPath, p.TailOnExit); readErr == nil {
 				w.Logs = logs
 				if info, statErr := os.Stat(logPath); statErr == nil {

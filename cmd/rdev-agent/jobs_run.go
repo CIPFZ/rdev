@@ -39,8 +39,14 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 
 	id := newJobID()
-	dir := jobDir(state, id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if _, err := secureJobRoot(state); err != nil {
+		return nil, err
+	}
+	dir, err := validatedJobDir(state, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := secureJobDir(dir); err != nil {
 		return nil, err
 	}
 
@@ -61,16 +67,18 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	cmd.Path = self
 	cmd.Args = append([]string{self, superviseFlag, dir, "--"}, inner...)
 
-	stdout, err := os.Create(filepath.Join(dir, "stdout"))
+	stdout, err := os.OpenFile(filepath.Join(dir, "stdout"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	defer stdout.Close()
-	stderr, err := os.Create(filepath.Join(dir, "stderr"))
+	_ = stdout.Chmod(0o600)
+	stderr, err := os.OpenFile(filepath.Join(dir, "stderr"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	defer stderr.Close()
+	_ = stderr.Chmod(0o600)
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -83,17 +91,23 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, processStartError(err)
 	}
+	identity, err := processIdentity(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return nil, processStartError(fmt.Errorf("record process identity: %w", err))
+	}
 
 	// Preserve sub-second start order. keep_last cannot infer which job is newer
 	// when several starts are truncated to the same whole second.
 	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	meta := &jobMeta{
-		ID:        id,
-		Label:     p.Label,
-		Argv:      p.Spec.Argv,
-		Cwd:       p.Spec.Cwd,
-		PID:       cmd.Process.Pid,
-		StartedAt: startedAt,
+		ID:              id,
+		Label:           p.Label,
+		Argv:            p.Spec.Argv,
+		Cwd:             p.Spec.Cwd,
+		PID:             cmd.Process.Pid,
+		ProcessIdentity: identity,
+		StartedAt:       startedAt,
 	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), meta); err != nil {
 		return nil, err
@@ -110,13 +124,13 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 }
 
 func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
-	if p.ID == "" {
-		return nil, invalidRequestError("job id required")
+	dir, err := validatedJobDir(state, p.ID)
+	if err != nil {
+		return nil, err
 	}
 	if p.GraceSec < 0 || p.GraceSec > hardExecTimeoutSec {
 		return nil, limitExceededError("grace_sec is outside the hard limit")
 	}
-	dir := jobDir(state, p.ID)
 	meta, err := readMeta(dir)
 	if err != nil {
 		return nil, fmt.Errorf("job %s: %w", p.ID, err)
@@ -131,6 +145,22 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, invalidRequestError("signal must be TERM or KILL")
 	}
 
+	// Verify identities immediately before signalling. A recycled PID must
+	// never receive a signal intended for an older job.
+	if meta.ProcessIdentity != "" {
+		current, identityErr := processIdentity(meta.PID)
+		if identityErr != nil || current != meta.ProcessIdentity {
+			return nil, processStateError("job process identity no longer matches")
+		}
+	}
+	childPID, childIdentity := readChildProcess(dir)
+	if childPID > 0 && childIdentity != "" {
+		current, identityErr := processIdentity(childPID)
+		if identityErr != nil || current != childIdentity {
+			childPID = 0
+		}
+	}
+
 	// Signal the whole process group (negative pid). Because jobStart used
 	// Setsid, the supervisor pid is also the pgid, so this reaches every
 	// descendant -- the reason a recorded pgid beats grepping for a command
@@ -142,7 +172,7 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		// still running, and that child is exactly what a caller wants to stop.
 		pidErr := syscall.Kill(meta.PID, sig)
 		if pidErr != nil {
-			child := readChildPID(dir)
+			child := childPID
 			if child <= 0 || syscall.Kill(child, sig) != nil {
 				return nil, processStateError("job process is unavailable")
 			}
@@ -161,7 +191,7 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		}
 		if jobAlive(meta, dir) {
 			syscall.Kill(-meta.PID, syscall.SIGKILL)
-			if child := readChildPID(dir); child > 0 {
+			if child := childPID; child > 0 {
 				syscall.Kill(child, syscall.SIGKILL)
 				syscall.Kill(-child, syscall.SIGKILL)
 			}

@@ -27,8 +27,9 @@ const hardLogTailLines = 1000
 const maxLogLineLen = 1 << 20
 
 func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
-	if p.ID == "" {
-		return nil, invalidRequestError("job id required")
+	dir, err := validatedJobDir(state, p.ID)
+	if err != nil {
+		return nil, err
 	}
 	stream := p.Stream
 	if stream == "" {
@@ -38,7 +39,10 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, invalidRequestError("stream must be stdout or stderr")
 	}
 
-	path := filepath.Join(jobDir(state, p.ID), stream)
+	path := filepath.Join(dir, stream)
+	if err := secureRecordFile(path); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

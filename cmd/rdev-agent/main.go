@@ -818,7 +818,7 @@ func stateDir(dir string) (string, error) {
 			}
 			resolved = filepath.Join(home, resolved)
 		}
-		if err := os.MkdirAll(filepath.Join(resolved, "jobs"), 0o755); err != nil {
+		if err := secureDir(filepath.Join(resolved, "jobs"), 0o700); err != nil {
 			return "", err
 		}
 		return resolved, nil
@@ -829,7 +829,7 @@ func stateDir(dir string) (string, error) {
 		return "", err
 	}
 	d := filepath.Join(home, ".cache", "rdev")
-	if err := os.MkdirAll(filepath.Join(d, "jobs"), 0o755); err != nil {
+	if err := secureDir(filepath.Join(d, "jobs"), 0o700); err != nil {
 		return "", err
 	}
 	return d, nil
