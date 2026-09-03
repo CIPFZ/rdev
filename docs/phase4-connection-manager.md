@@ -20,6 +20,21 @@ lease, in-flight and queue counts are all zero. Close runs outside the state
 lock, then the entry is removed and returns to `COLD`, preventing a slow close
 from blocking unrelated hosts.
 
-This slice deliberately does not add global dial semaphores, LRU/TTL policy,
-ControlMaster ownership, durable jobs, or broker functionality; those remain
-the subsequent Phase 4 tasks.
+P4-03A adds bounded warm-host admission (`MaxWarmHosts`), deterministic idle
+reaping (`IdleTTL` plus the shorter `LastClientGrace` after the final lease is
+released), and least-recently-used eviction when the pool is full. Busy entries
+are never selected: they first enter `DRAINING` and close automatically only
+after lease, in-flight, and queued counts all reach zero. `Config.Now` makes
+policy tests deterministic; `Config.Validate` rejects negative limits and an
+inverted TTL pair.
+
+P4-03B adds an optional `GracefulConnection` close hook with a bounded drain
+context, followed by idempotent `Close`. Transport connections expose explicit
+ControlMaster ownership. A normal `Dial` connection is shared by default and
+therefore never sends `ssh -O exit`; only a broker that created the master may
+call `SetControlMasterOwnership(true)`. The manager invokes
+`CloseControlMaster` only after the connection has drained, so a shared socket
+cannot be removed by another profile or process.
+
+Global dial semaphores, durable jobs, and broker functionality remain outside
+this slice.

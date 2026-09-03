@@ -19,6 +19,13 @@ type blockingCloseConn struct {
 	release chan struct{}
 }
 
+type gracefulConn struct {
+	closed, graceful atomic.Int32
+}
+
+func (f *gracefulConn) GracefulClose(context.Context) error { f.graceful.Add(1); return nil }
+func (f *gracefulConn) Close() error                        { f.closed.Add(1); return nil }
+
 func (f *blockingCloseConn) Close() error {
 	f.closed.Add(1)
 	close(f.started)
@@ -194,5 +201,99 @@ func TestAcquireRejectsNilContextAndNilConnection(t *testing.T) {
 	}
 	if got := m.Snapshot("k"); got.State != Backoff || got.LastError == "" {
 		t.Fatalf("snapshot=%+v", got)
+	}
+}
+
+func TestMaxWarmHostsEvictsLeastRecentlyUsedIdle(t *testing.T) {
+	clock := time.Unix(100, 0)
+	m := New(Config{MaxWarmHosts: 2, IdleTTL: time.Hour, Now: func() time.Time { return clock }})
+	var conns []*fakeConn
+	acquire := func(key string) *Lease {
+		c := &fakeConn{}
+		conns = append(conns, c)
+		l, err := m.Acquire(context.Background(), key, func(context.Context) (Connection, error) { return c, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	l1 := acquire("a")
+	l1.Release()
+	clock = clock.Add(time.Second)
+	l2 := acquire("b")
+	l2.Release()
+	clock = clock.Add(time.Second)
+	l3 := acquire("c")
+	l3.Release()
+	if conns[0].closed.Load() != 1 {
+		t.Fatalf("oldest connection close count=%d", conns[0].closed.Load())
+	}
+	warm := 0
+	for _, s := range m.Snapshots() {
+		if s.State == Warm {
+			warm++
+		}
+	}
+	if warm != 2 {
+		t.Fatalf("warm snapshots=%d, want 2", warm)
+	}
+}
+
+func TestReapUsesLastClientGraceAndGracefulClose(t *testing.T) {
+	clock := time.Unix(200, 0)
+	m := New(Config{IdleTTL: time.Hour, LastClientGrace: 10 * time.Second, DrainTimeout: time.Second, Now: func() time.Time { return clock }})
+	c := &gracefulConn{}
+	l, err := m.Acquire(context.Background(), "k", func(context.Context) (Connection, error) { return c, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Release()
+	clock = clock.Add(9 * time.Second)
+	if n := m.Reap(clock); n != 0 {
+		t.Fatalf("reaped early: %d", n)
+	}
+	clock = clock.Add(time.Second)
+	if n := m.Reap(clock); n != 1 {
+		t.Fatalf("reaped=%d, want 1", n)
+	}
+	if c.graceful.Load() != 1 || c.closed.Load() != 1 {
+		t.Fatalf("close graceful=%d close=%d", c.graceful.Load(), c.closed.Load())
+	}
+}
+
+func TestDrainingClosesAfterQueueLeaves(t *testing.T) {
+	m := New(Config{})
+	c := &fakeConn{}
+	l, err := m.Acquire(context.Background(), "k", func(context.Context) (Connection, error) { return c, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := m.Queue("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Evict("k", "test") {
+		t.Fatal("busy queue was evicted synchronously")
+	}
+	l.Release()
+	release()
+	if c.closed.Load() != 1 {
+		t.Fatalf("close count=%d, want 1", c.closed.Load())
+	}
+}
+
+func TestConfigValidation(t *testing.T) {
+	for _, cfg := range []Config{
+		{MaxQueue: -1},
+		{MaxWarmHosts: -1},
+		{IdleTTL: -time.Second},
+		{IdleTTL: 10 * time.Second, MaxIdleTTL: time.Second},
+	} {
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate(%+v) unexpectedly succeeded", cfg)
+		}
+	}
+	if err := (Config{MaxWarmHosts: 2, IdleTTL: time.Second, MaxIdleTTL: 2 * time.Second}).Validate(); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
 	}
 }

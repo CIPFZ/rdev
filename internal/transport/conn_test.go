@@ -1418,6 +1418,27 @@ func TestControlPathIsShortAndStable(t *testing.T) {
 	}
 }
 
+func TestControlMasterOwnershipIsExplicit(t *testing.T) {
+	c := &Conn{host: Host{Addr: "u@host"}, ctlPath: filepath.Join(t.TempDir(), "ctl")}
+	if c.OwnsControlMaster() {
+		t.Fatal("new connection unexpectedly owns shared master")
+	}
+	if err := c.CloseControlMaster(context.Background()); err != nil {
+		t.Fatalf("shared close: %v", err)
+	}
+	c.SetControlMasterOwnership(true)
+	if !c.OwnsControlMaster() {
+		t.Fatal("ownership claim was not recorded")
+	}
+	c.ctlPath = ""
+	if err := c.CloseControlMaster(context.Background()); err == nil {
+		t.Fatal("owned master with empty socket should fail closed")
+	}
+	if c.OwnsControlMaster() {
+		t.Fatal("failed master close retained ownership")
+	}
+}
+
 func TestRemoteDirNormalization(t *testing.T) {
 	valid := map[string]string{
 		"":                  ".cache/rdev",

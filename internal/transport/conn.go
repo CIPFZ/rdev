@@ -232,6 +232,10 @@ type Conn struct {
 	// ctlPath is the ssh ControlMaster socket, shared by aux commands so they
 	// skip a fresh TCP+auth handshake.
 	ctlPath string
+	// controlMasterOwned is deliberately false unless an owner explicitly
+	// claims the master. ControlMaster=auto may attach to a socket created by
+	// another rdev process, and that shared socket must never be exited here.
+	controlMasterOwned bool
 	// agentPath is the absolute remote path of the installed agent binary.
 	agentPath string
 	// stateDir is the absolute remote directory holding job records. Passed to
@@ -1867,6 +1871,66 @@ func (c *Conn) SupportsFeature(feature proto.Feature) bool {
 // SSHArgs returns the base ssh options, so helpers like rsync can reuse the
 // same multiplexed connection.
 func (c *Conn) SSHArgs() []string { return c.sshBase() }
+
+// SetControlMasterOwnership explicitly transfers responsibility for the
+// ControlMaster lifecycle to this connection. It is intended for a broker that
+// created the master itself; ordinary multi-process clients must leave it false.
+func (c *Conn) SetControlMasterOwnership(owned bool) {
+	c.mu.Lock()
+	c.controlMasterOwned = owned
+	c.mu.Unlock()
+}
+
+// OwnsControlMaster reports whether this connection may request master exit.
+func (c *Conn) OwnsControlMaster() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.controlMasterOwned
+}
+
+// GracefulClose satisfies connmgr's optional drain hook. Closing stdin causes
+// the agent server to stop admitting requests and perform its bounded drain;
+// the context bounds a caller that supplies an unusually short deadline.
+func (c *Conn) GracefulClose(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	go func() { _ = c.Close(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// CloseControlMaster requests an OpenSSH master exit only when this Conn has
+// explicit ownership. Shared sockets are intentionally left to ControlPersist
+// (or their owning process), preventing one profile from disrupting another.
+func (c *Conn) CloseControlMaster(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.Lock()
+	owned := c.controlMasterOwned
+	if owned {
+		c.controlMasterOwned = false
+	}
+	c.mu.Unlock()
+	if !owned {
+		return nil
+	}
+	if c.ctlPath == "" {
+		return errors.New("control master path is empty")
+	}
+	args := append(c.sshBase(), "-O", "exit", c.host.Addr)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("close control master: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 // Close terminates the agent session. The ControlMaster is left to expire on
 // its own ControlPersist timer, keeping reconnects fast.

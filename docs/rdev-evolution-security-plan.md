@@ -980,7 +980,7 @@ Phase 3 完成记录：
 - rsync stdout/stderr 不再使用无界 builder；两路持续 drain、各自有 retention cap，并返回 original/retained/dropped/truncated 与二进制 base64 标记。exec/read/rsync 的 binary wire value 在 client 端先 decode、对 raw bytes 脱敏、再 lossless encode，CLI 和官方 Go MCP SDK 投影同一安全账本。普通业务错误经 agent 的单一 typed mapping 边界转换：参数/资源、object not found、process start/state 分别使用稳定 registry code/category/retry/execution state，只有未知错误映射为 `internal.failure`，对外消息不含路径、argv 或 raw errno。
 - 新增的观测词汇是固定低基数枚举；secret、argv、stdout/stderr 和远端路径不进入 label。测试使用临时目录、合成数据、fake deadline、blocking writer、真实 OS pipe/child process 和 deterministic barrier，并覆盖响应丢失三种操作分类、restart/eviction/conflict、leader 早退且子进程忽略 TERM、cancel/deadline/disconnect、terminal-before-cancel-lock、cancel-before-terminal、terminal 通知与 ctx 同时 ready、cancel ack/final 迟到、初始写与 data 写阻塞、精确 cancel 优先级、慢读 teardown、rsync Unicode/NUL/非 UTF-8 与无限输出、typed error 全链路投影、malformed/重复/cancel-to-success terminal、watcher fan-out/queue、N/N-1 以及官方 MCP SDK 元数据。仲裁排列普通/race 各执行 1000 次；真实 blocked-pipe 进程 teardown 普通/race 各执行 100 次。
 
-兼容与残余边界：协议 3 的最低兼容版本是 2；v2 共同操作保留一元 fallback，但只有双方协商到对应 feature 才启用 v3 cancel、streaming、dedupe 和结构化截断。writer 的固定预算保证等待者返回，并在 agent 端经 bounded cleanup 后退出污染的 serving process；它不保证向已经停止读取的 peer 成功交付 control frame，也不保证本机 ssh 在其本地 stdout 未被 drain 时同步退出。标准 MCP progress 仍依赖调用方提供 progress token，未提供时 MCP 返回最终聚合结果而不伪造实时通知。rsync 截断账本描述本机保留内容，不提供被丢弃字节的持久归档。Phase 4 的百机连接池、idle TTL、detached job 磁盘预算、持久去重/事务日志和 job durable ownership 未在本阶段扩大范围。
+兼容与残余边界：协议 3 的最低兼容版本是 2；v2 共同操作保留一元 fallback，但只有双方协商到对应 feature 才启用 v3 cancel、streaming、dedupe 和结构化截断。writer 的固定预算保证等待者返回，并在 agent 端经 bounded cleanup 后退出污染的 serving process；它不保证向已经停止读取的 peer 成功交付 control frame，也不保证本机 ssh 在其本地 stdout 未被 drain 时同步退出。标准 MCP progress 仍依赖调用方提供 progress token，未提供时 MCP 返回最终聚合结果而不伪造实时通知。rsync 截断账本描述本机保留内容，不提供被丢弃字节的持久归档。detached job 磁盘预算、持久去重/事务日志和 job durable ownership 仍未在本阶段扩大范围。
 
 ### Phase 4：单进程百机 Connection Manager 与 job 耐久性
 
@@ -991,8 +991,8 @@ Phase 3 完成记录：
 | P4-01 | 实现 canonical connection key | Phase 1 | 相同身份可合并；不同 user/key/proxy/state 不误复用 |
 | P4-02 | 实现 COLD/DIALING/WARM/BACKOFF/EVICTING 状态机 | P0-03、P4-01 | 状态转换和错误原因可观测 |
 | P4-03 | 实现 connection lease、inflight/queue 计数和 `DRAINING` 竞态控制 | P4-02、P3-04 | 有 lease/inflight/queue 时绝不关闭；新请求与 eviction 竞态可重复测试 |
-| P4-03A | 增加 `max_warm_hosts`、idle TTL、last-client grace 和 LRU | P4-03 | 顺序访问 100 host 后 warm 数不超过配置值；无 client 后按 grace 回收 |
-| P4-03B | 实现 graceful close 和 ControlMaster ownership | P4-03 | 只关闭自己拥有的 master；共享 master 不被误杀；disconnect reason 完整记录 |
+| ✅ P4-03A | 增加 `max_warm_hosts`、idle TTL、last-client grace 和 LRU | P4-03 | 顺序访问 100 host 后 warm 数不超过配置值；无 client 后按 grace 回收 |
+| ✅ P4-03B | 实现 graceful close 和 ControlMaster ownership | P4-03 | 只关闭自己拥有的 master；共享 master 不被误杀；disconnect reason 完整记录 |
 | P4-04 | 全局 dial semaphore、singleflight、backoff+jitter | P4-02 | 100 host 同时恢复时并发拨号不超过上限，无重连风暴 |
 | P4-05 | job 创建事务化 | Phase 3 | metadata 失败时 supervisor 被终止并回收，不留下孤儿 |
 | P4-06 | job 使用不可复用的进程身份 | P4-05 | PID start identity 不匹配时拒绝 signal |
