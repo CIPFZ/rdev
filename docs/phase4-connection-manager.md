@@ -36,9 +36,11 @@ call `SetControlMasterOwnership(true)`. The manager invokes
 `CloseControlMaster` only after the connection has drained, so a shared socket
 cannot be removed by another profile or process.
 
-P4-04 adds a process-wide dial semaphore (default six), per-key singleflight
-with context cancellation, and bounded exponential reconnect backoff. Failed
-dials publish one result to all waiters; subsequent attempts wait for the
+P4-04 adds a process-wide FIFO dial semaphore (default six), per-key
+singleflight with context cancellation, and bounded exponential reconnect
+backoff. A canceled leader releases its per-key flight so a waiter with a live
+context can take over; canceled waiters never retain a global dial token.
+Failed dials publish one result to all waiters; subsequent attempts wait for the
 backoff window, with optional deterministic jitter for tests. Dial failures are
 classified into a fixed vocabulary (`canceled`, `timeout`, `auth`, `network`,
 `resource`, `unknown`) and lifecycle/disconnect events can be forwarded to the
