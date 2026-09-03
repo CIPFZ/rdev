@@ -362,7 +362,11 @@ type hostEntry struct {
 	// built later. Persisted per host because the situation that calls for it --
 	// a shared box where agents are stamped from another branch -- is a property
 	// of that host, not of one command.
-	ForceAgentUpload bool `json:"force_agent_upload,omitempty"`
+	ForceAgentUpload bool   `json:"force_agent_upload,omitempty"`
+	IdentityFile     string `json:"identity_file,omitempty"`
+	IdentitiesOnly   bool   `json:"identities_only,omitempty"`
+	ProxyJump        string `json:"proxy_jump,omitempty"`
+	HostKeyPolicy    string `json:"host_key_policy,omitempty"`
 	// Env is the host's sticky environment. Persisted so a caller that sets it
 	// once does not have to re-set it every session.
 	//
@@ -558,7 +562,7 @@ func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, erro
 			r.reject(observe.ReasonConfigInvalid, path)
 			return nil, fmt.Errorf("parse %s: every host requires non-empty name and addr", path)
 		}
-		h := transport.Host{Name: e.Name, Addr: e.Addr, Port: e.Port, RemoteDir: e.RemoteDir, ForceAgentUpload: e.ForceAgentUpload}
+		h := transport.Host{Name: e.Name, Addr: e.Addr, Port: e.Port, RemoteDir: e.RemoteDir, ForceAgentUpload: e.ForceAgentUpload, IdentityFile: e.IdentityFile, IdentitiesOnly: e.IdentitiesOnly, ProxyJump: e.ProxyJump, HostKeyPolicy: e.HostKeyPolicy}
 		if err := transport.ValidateHost(h); err != nil {
 			reason := observe.ReasonRemoteDir
 			if transport.ValidateDestination(h.Addr, h.Port) != nil {
@@ -769,6 +773,8 @@ func (r *Registry) marshalScopeSnapshot(s registrySnapshot, scope Scope) (string
 		e := hostEntry{
 			Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
 			ForceAgentUpload: h.ForceAgentUpload,
+			IdentityFile:     h.IdentityFile, IdentitiesOnly: h.IdentitiesOnly,
+			ProxyJump: h.ProxyJump, HostKeyPolicy: h.HostKeyPolicy,
 		}
 		if st, ok := s.state[name]; ok {
 			e.Cwd = st.Cwd

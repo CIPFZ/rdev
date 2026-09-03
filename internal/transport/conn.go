@@ -52,6 +52,66 @@ type Host struct {
 	// newer. The escape hatch for the case the refusal cannot distinguish: a
 	// deliberate rollback, or an agent stamped from someone else's branch.
 	ForceAgentUpload bool
+	// IdentityFile, IdentitiesOnly, ProxyJump and HostKeyPolicy are part of
+	// the immutable transport identity.  They are kept here even when the
+	// current ssh invocation uses an ssh_config alias, so a future execution
+	// profile cannot accidentally reuse a connection created with different
+	// authentication or trust settings.
+	IdentityFile   string
+	IdentitiesOnly bool
+	ProxyJump      string
+	HostKeyPolicy  string
+}
+
+// CanonicalConnectionKey is the reusable transport identity.  Alias/name and
+// ForceAgentUpload are deliberately excluded: aliases may point at the same
+// endpoint and upload policy changes do not change an established transport.
+// The key is a stable, opaque digest so credentials and paths never appear in
+// logs or metric labels.
+func CanonicalConnectionKey(h Host) (string, error) {
+	if err := ValidateHost(h); err != nil {
+		return "", err
+	}
+	remoteDir, err := ValidateRemoteDir(h.RemoteDir)
+	if err != nil {
+		return "", err
+	}
+	addr := strings.TrimSpace(h.Addr)
+	// Normalize user and host spellings so equivalent DNS destinations share a
+	// transport. The alias/name field itself is intentionally not considered.
+	user, host := "", addr
+	if at := strings.LastIndexByte(addr, '@'); at > 0 {
+		user, host = addr[:at], addr[at+1:]
+		user = strings.ToLower(user)
+	}
+	if strings.HasPrefix(host, "[") {
+		if end := strings.IndexByte(host, ']'); end > 1 {
+			host = "[" + strings.ToLower(host[1:end]) + "]" + host[end+1:]
+		}
+	} else {
+		host = strings.ToLower(host)
+	}
+	port := h.Port
+	if port == 0 {
+		port = 22
+	}
+	identity := ""
+	if h.IdentityFile != "" {
+		identity = filepath.Clean(h.IdentityFile)
+	}
+	canonical := struct {
+		User, Host, RemoteDir, IdentityFile, ProxyJump, HostKeyPolicy string
+		Port                                                          int
+		IdentitiesOnly                                                bool
+	}{User: user, Host: host, RemoteDir: remoteDir, IdentityFile: identity,
+		ProxyJump: strings.TrimSpace(h.ProxyJump), HostKeyPolicy: strings.TrimSpace(h.HostKeyPolicy),
+		Port: port, IdentitiesOnly: h.IdentitiesOnly}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("canonical connection key: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return "conn_" + hex.EncodeToString(sum[:]), nil
 }
 
 // ValidateDestination checks the exact value placed in ssh's destination slot.
@@ -430,6 +490,18 @@ func (c *Conn) sshBase() []string {
 	}
 	if c.host.Port != 0 {
 		args = append(args, "-p", fmt.Sprint(c.host.Port))
+	}
+	if c.host.IdentityFile != "" {
+		args = append(args, "-i", c.host.IdentityFile)
+	}
+	if c.host.IdentitiesOnly {
+		args = append(args, "-o", "IdentitiesOnly=yes")
+	}
+	if c.host.ProxyJump != "" {
+		args = append(args, "-J", c.host.ProxyJump)
+	}
+	if c.host.HostKeyPolicy != "" {
+		args = append(args, "-o", "StrictHostKeyChecking="+c.host.HostKeyPolicy)
 	}
 	return args
 }

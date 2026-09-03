@@ -1017,6 +1017,8 @@ Phase 3 完成记录：
 | P4-21 | 单文件传输改为 chunk/resume/digest/staging/atomic commit | P3-10、P4-11、P4-09 | 中断可安全 resume，完成前目标不可见，digest 不符不提交 |
 | P4-22 | 目录 sync 增加 immutable manifest、冲突和 symlink policy | P4-21、P4-12 | delete 只作用于计划 snapshot，并发覆盖返回 conflict |
 
+P4-01–P4-03 首批实现记录见 [`docs/phase4-connection-manager.md`](phase4-connection-manager.md)。
+
 百机 Gate：
 
 - [ ] 配置 100 host、未使用时保持 0 个 SSH 连接。
