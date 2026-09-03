@@ -435,6 +435,128 @@ func TestGlobalDialSemaphoreBoundsHosts(t *testing.T) {
 	wg.Wait()
 }
 
+func TestCanceledSemaphoreLeaderDoesNotPoisonWaiters(t *testing.T) {
+	m := New(Config{MaxConcurrentDials: 1, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+	blockStarted := make(chan struct{})
+	blockRelease := make(chan struct{})
+	blockDone := make(chan struct{})
+	go func() {
+		defer close(blockDone)
+		l, err := m.Acquire(context.Background(), "block", func(context.Context) (Connection, error) {
+			close(blockStarted)
+			<-blockRelease
+			return &fakeConn{}, nil
+		})
+		if err != nil {
+			t.Errorf("blocking acquire: %v", err)
+			return
+		}
+		l.Release()
+	}()
+	<-blockStarted
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := m.Acquire(ctx, "target", func(context.Context) (Connection, error) {
+			return nil, errors.New("canceled leader unexpectedly reached dial")
+		})
+		leaderDone <- err
+	}()
+
+	var dials atomic.Int32
+	waiterDone := make(chan *Lease, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		l, err := m.Acquire(context.Background(), "target", func(context.Context) (Connection, error) {
+			dials.Add(1)
+			return &fakeConn{}, nil
+		})
+		if err != nil {
+			waiterErr <- err
+			return
+		}
+		waiterDone <- l
+	}()
+
+	if err := <-leaderDone; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("leader err=%v, want deadline exceeded", err)
+	}
+	close(blockRelease)
+	<-blockDone
+	select {
+	case err := <-waiterErr:
+		t.Fatalf("waiter failed after leader cancellation: %v", err)
+	case l := <-waiterDone:
+		if l == nil {
+			t.Fatal("waiter returned nil lease")
+		}
+		l.Release()
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("waiter dials=%d, want one takeover dial", got)
+	}
+}
+
+func TestDialSemaphoreFIFO(t *testing.T) {
+	s := newDialSemaphore(1)
+	if err := s.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	order := make(chan int, 2)
+	go func() {
+		if err := s.acquire(context.Background()); err != nil {
+			t.Errorf("acquire 0: %v", err)
+			return
+		}
+		order <- 0
+		s.release()
+	}()
+	// Wait until the first caller is queued before starting the second, so the
+	// expected FIFO order is independent of goroutine scheduling.
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.mu.Lock()
+		queued := len(s.waiters)
+		s.mu.Unlock()
+		if queued == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("waiters did not queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go func() {
+		if err := s.acquire(context.Background()); err != nil {
+			t.Errorf("acquire 1: %v", err)
+			return
+		}
+		order <- 1
+		s.release()
+	}()
+	for {
+		s.mu.Lock()
+		queued := len(s.waiters)
+		s.mu.Unlock()
+		if queued == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second waiter did not queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	s.release()
+	if got := <-order; got != 0 {
+		t.Fatalf("first waiter=%d, want 0", got)
+	}
+	if got := <-order; got != 1 {
+		t.Fatalf("second waiter=%d, want 1", got)
+	}
+}
+
 func TestDialFailureBackoffAndCancellation(t *testing.T) {
 	clock := time.Unix(100, 0)
 	m := New(Config{BaseBackoff: time.Second, MaxBackoff: 4 * time.Second, Now: func() time.Time { return clock }})

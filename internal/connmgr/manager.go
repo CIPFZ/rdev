@@ -82,12 +82,90 @@ type Manager struct {
 	maxQueue, maxWarmHosts                             int
 	idleTTL, maxIdleTTL, lastClientGrace, drainTimeout time.Duration
 	now                                                func() time.Time
-	dialSem                                            chan struct{}
+	dialSem                                            *dialSemaphore
 	baseBackoff, maxBackoff                            time.Duration
 	jitter                                             bool
 	random                                             func() float64
 	onEvent                                            func(Event)
 	observer                                           interface{ RecordConnection(string, string) }
+}
+
+// dialSemaphore is a FIFO, context-aware semaphore. A buffered channel is
+// sufficient to cap concurrency, but does not provide a fairness guarantee:
+// a newly arriving host can repeatedly win a send race over an older waiter.
+// Keeping the waiter queue explicit also lets cancellation remove a waiter
+// without leaving a token or goroutine behind.
+type dialSemaphore struct {
+	mu      sync.Mutex
+	limit   int
+	inUse   int
+	waiters []*dialWaiter
+}
+
+type dialWaiter struct {
+	ready   chan struct{}
+	granted bool
+}
+
+func newDialSemaphore(limit int) *dialSemaphore {
+	if limit <= 0 {
+		limit = 1
+	}
+	return &dialSemaphore{limit: limit}
+}
+
+func (s *dialSemaphore) acquire(ctx context.Context) error {
+	w := &dialWaiter{ready: make(chan struct{})}
+	s.mu.Lock()
+	if s.inUse < s.limit && len(s.waiters) == 0 {
+		s.inUse++
+		s.mu.Unlock()
+		return nil
+	}
+	s.waiters = append(s.waiters, w)
+	s.mu.Unlock()
+	select {
+	case <-w.ready:
+		return nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		if w.granted {
+			// The grant may race with cancellation. This caller will not use the
+			// token, so return it and wake the next FIFO waiter.
+			s.inUse--
+			s.grantNextLocked()
+			s.mu.Unlock()
+			return ctx.Err()
+		}
+		for i, queued := range s.waiters {
+			if queued == w {
+				s.waiters = append(s.waiters[:i], s.waiters[i+1:]...)
+				break
+			}
+		}
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (s *dialSemaphore) grantNextLocked() {
+	if s.inUse >= s.limit || len(s.waiters) == 0 {
+		return
+	}
+	w := s.waiters[0]
+	s.waiters = s.waiters[1:]
+	w.granted = true
+	s.inUse++
+	close(w.ready)
+}
+
+func (s *dialSemaphore) release() {
+	s.mu.Lock()
+	if s.inUse > 0 {
+		s.inUse--
+	}
+	s.grantNextLocked()
+	s.mu.Unlock()
 }
 
 type entry struct {
@@ -250,7 +328,7 @@ func New(cfg Config) *Manager {
 	return &Manager{entries: make(map[string]*entry), maxQueue: cfg.MaxQueue,
 		maxWarmHosts: cfg.MaxWarmHosts, idleTTL: cfg.IdleTTL, maxIdleTTL: cfg.MaxIdleTTL,
 		lastClientGrace: cfg.LastClientGrace, drainTimeout: cfg.DrainTimeout, now: now,
-		dialSem: make(chan struct{}, cfg.MaxConcurrentDials), baseBackoff: cfg.BaseBackoff,
+		dialSem: newDialSemaphore(cfg.MaxConcurrentDials), baseBackoff: cfg.BaseBackoff,
 		maxBackoff: cfg.MaxBackoff, jitter: cfg.Jitter, random: random, onEvent: cfg.OnEvent, observer: cfg.Observer}
 }
 func (m *Manager) timestamp() time.Time { return m.now() }
@@ -263,6 +341,14 @@ func (m *Manager) emit(key, name, reason string) {
 	}
 }
 
+func leaveBackoffLocked(e *entry) {
+	if e.backoffDone != nil {
+		close(e.backoffDone)
+		e.backoffDone = nil
+	}
+	e.nextAttempt = time.Time{}
+}
+
 func (m *Manager) waitBackoff(ctx context.Context, e *entry) error {
 	for {
 		m.mu.Lock()
@@ -270,6 +356,7 @@ func (m *Manager) waitBackoff(ctx context.Context, e *entry) error {
 		if e.state != Backoff || until.IsZero() || !m.timestamp().Before(until) {
 			if e.state == Backoff {
 				e.state = Cold
+				leaveBackoffLocked(e)
 			}
 			m.mu.Unlock()
 			return nil
@@ -447,6 +534,7 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 			m.mu.Lock()
 			if e.state == Backoff && !m.timestamp().Before(e.nextAttempt) {
 				e.state = Cold
+				leaveBackoffLocked(e)
 			}
 			m.mu.Unlock()
 			continue
@@ -463,6 +551,12 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 				}
 				m.mu.Unlock()
 				if err != nil {
+					// A canceled leader must not poison callers that are still
+					// willing to dial. The next loop iteration can take over the
+					// cold entry once the global semaphore is available.
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						continue
+					}
 					return nil, err
 				}
 				continue
@@ -490,33 +584,31 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 		m.mu.Unlock()
 		// Admission is context-aware. No goroutine or token is retained when a
 		// caller cancels while waiting for the global dial budget.
-		select {
-		case m.dialSem <- struct{}{}:
-		case <-ctx.Done():
+		if err := m.dialSem.acquire(ctx); err != nil {
 			m.mu.Lock()
 			if e.state == Dialing && e.dialDone == done {
 				e.state = Cold
-				e.lastDialToken, e.lastDialErr = done, ctx.Err()
+				e.lastDialToken, e.lastDialErr = done, err
 				close(done)
 				e.dialDone = nil
 			}
 			m.mu.Unlock()
-			return nil, ctx.Err()
+			return nil, err
 		}
 		m.emit(key, EventDialStarted, "")
 		conn, err := dial(ctx)
-		<-m.dialSem
+		m.dialSem.release()
 		m.mu.Lock()
 		if err != nil || conn == nil {
 			if err == nil {
 				err = errors.New("dial returned a nil connection")
 			}
 			e.lastErr = err
-			if errors.Is(err, context.Canceled) {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				// A caller withdrawing its own context is not a transport health
 				// failure and must not open the circuit for other callers.
 				e.state = Cold
-				e.nextAttempt = time.Time{}
+				leaveBackoffLocked(e)
 			} else {
 				e.state = Backoff
 				e.failures++
@@ -538,11 +630,7 @@ func (m *Manager) Acquire(ctx context.Context, key string, dial func(context.Con
 		e.conn, e.state, e.lastErr, e.lease, e.lastActivity = conn, Warm, nil, 1, m.timestamp()
 		e.lastDialToken, e.lastDialErr = done, nil
 		e.failures = 0
-		e.nextAttempt = time.Time{}
-		if e.backoffDone != nil {
-			close(e.backoffDone)
-			e.backoffDone = nil
-		}
+		leaveBackoffLocked(e)
 		e.lastClientDetached = time.Time{}
 		close(done)
 		e.dialDone = nil
