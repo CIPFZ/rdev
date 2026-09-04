@@ -29,6 +29,7 @@ func TestExecutionProfileDigestIsStableAndExcludesDigest(t *testing.T) {
 }
 
 func TestCapabilityProbeReportsProfileAndSafeMetadata(t *testing.T) {
+	t.Setenv("RDEV_TEST_SECRET", "capability-secret-value")
 	result := probeCapabilities(true)
 	if result == nil || result.ProbeVersion == "" || result.ProbedAt == "" || result.OS == "" || result.Arch == "" {
 		t.Fatalf("incomplete capability result: %+v", result)
@@ -45,6 +46,19 @@ func TestCapabilityProbeReportsProfileAndSafeMetadata(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), os.Getenv("RDEV_TEST_SECRET")) && os.Getenv("RDEV_TEST_SECRET") != "" {
 		t.Fatal("capability result unexpectedly contains test secret")
+	}
+}
+
+func TestProcessUmaskIsReadOnlyAndCanonical(t *testing.T) {
+	value := processUmask()
+	if value == "" {
+		t.Skip("platform does not expose a read-only process umask")
+	}
+	if len(value) != 4 || strings.Trim(value, "01234567") != "" {
+		t.Fatalf("non-canonical umask %q", value)
+	}
+	if got := processUmask(); got != value {
+		t.Fatalf("umask changed while reading it: %q vs %q", value, got)
 	}
 }
 

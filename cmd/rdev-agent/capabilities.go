@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,7 +19,7 @@ import (
 const capabilityProbeVersion = "1"
 
 func executionProfile() proto.ExecutionProfile {
-	p := proto.ExecutionProfile{Shell: os.Getenv("SHELL"), Path: os.Getenv("PATH"), Home: "", Locale: os.Getenv("LC_ALL"), Cwd: currentWorkingDir()}
+	p := proto.ExecutionProfile{Shell: os.Getenv("SHELL"), Path: os.Getenv("PATH"), Home: "", Locale: os.Getenv("LC_ALL"), Cwd: currentWorkingDir(), Umask: processUmask()}
 	if p.Shell == "" {
 		p.Shell = os.Getenv("COMSPEC")
 	}
@@ -26,6 +30,29 @@ func executionProfile() proto.ExecutionProfile {
 		p.Home = os.Getenv("HOME")
 	}
 	return withProfileDigest(p)
+}
+
+// processUmask reads the kernel's representation when procfs exposes it. The
+// usual syscall.Umask(0) approach is not safe here: changing the process umask
+// even briefly races with concurrent job creation in the agent. An empty value
+// means that the platform does not provide a race-free read-only query.
+func processUmask() string {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return ""
+	}
+	for _, line := range bytes.Split(b, []byte{'\n'}) {
+		if !bytes.HasPrefix(line, []byte("Umask:")) {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(string(line), "Umask:"))
+		n, err := strconv.ParseUint(value, 8, 32)
+		if err != nil || n > 0777 {
+			return ""
+		}
+		return fmt.Sprintf("%04o", n)
+	}
+	return ""
 }
 
 func currentWorkingDir() string {
@@ -50,15 +77,18 @@ func probeCapabilities(refresh bool) *proto.CapabilityResult {
 	result := &proto.CapabilityResult{ProbeVersion: capabilityProbeVersion, ProbedAt: now.Format(time.RFC3339Nano), OS: runtime.GOOS, Arch: runtime.GOARCH, Rlimit: rlimitAvailable()}
 	// Linux cgroup v2 is the only currently advertised hard-control backend.
 	if runtime.GOOS == "linux" {
-		if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
-			result.Cgroup = true
-		}
+		result.Cgroup = cgroupV2Available()
 	}
 	result.Resources = proto.ResourceEnvelope{WallTimeoutSec: hardExecTimeoutSec}
 	result.Effective = result.Resources
 	p := executionProfile()
 	result.Profile = &p
 	return result
+}
+
+func cgroupV2Available() bool {
+	b, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
+	return err == nil && len(bytes.TrimSpace(b)) > 0
 }
 
 func rlimitAvailable() bool {
