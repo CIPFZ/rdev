@@ -303,12 +303,16 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		// still running, and that child is exactly what a caller wants to stop.
 		pidErr := syscall.Kill(meta.PID, sig)
 		if pidErr != nil {
-			child := childPID
-			if child <= 0 || syscall.Kill(child, sig) != nil {
+			// A successful child-group signal is sufficient even when the
+			// supervisor has already exited; probing the leader again would turn
+			// that successful stop into a spurious "unavailable" error.
+			if childGroupErr != nil && (childPID <= 0 || syscall.Kill(childPID, sig) != nil) {
 				return nil, processStateError("job process is unavailable")
 			}
 			// Also sweep the orphan's own group, in case it spawned children.
-			syscall.Kill(-child, sig)
+			if childPID > 0 {
+				syscall.Kill(-childPID, sig)
+			}
 		}
 	}
 	if groupErr != nil && childGroupErr != nil && childPID <= 0 {
