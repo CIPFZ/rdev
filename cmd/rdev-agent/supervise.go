@@ -149,12 +149,26 @@ func runSupervisor(jobDir string, argv []string) {
 	// participates in the same transaction lock as job_start/job_rm: a starter
 	// that is still committing metadata, or a remover that is tearing the record
 	// down, must not race a child.json write into a half-removed directory.
-	_ = withJobLock(jobDir, func() error {
+	childPublishErr := withJobLock(jobDir, func() error {
 		if !jobExists(jobDir) {
 			return nil
 		}
 		return writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
 	})
+	if childPublishErr != nil {
+		// Without child.json a later stop cannot address this isolated process
+		// group after the supervisor exits. Never continue with an unobservable
+		// runnable job: terminate and reap the complete tree, then make a best
+		// effort to publish a terminal failure.
+		killJobChildGroup(cmd.Process.Pid)
+		_ = cmd.Wait()
+		_ = writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
+			"exit_code": -1,
+			"ended_at":  time.Now().UTC().Format(time.RFC3339),
+			"error":     fmt.Sprintf("publish child identity: %v", childPublishErr),
+		})
+		os.Exit(125)
+	}
 
 	stopLedger := make(chan struct{})
 	go func() {
