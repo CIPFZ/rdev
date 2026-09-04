@@ -21,6 +21,7 @@ import (
 // protocol/MCP surface and are not needed to act on a report.
 const storageReportRoot = "jobs"
 const storageReportPolicy = "storage-policy.json"
+const storageReportMetrics = "storage-metrics.json"
 
 func storageScope(p *proto.StorageParams) (storage.ScopePolicy, string, error) {
 	if p == nil {
@@ -112,6 +113,7 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 	}
 	free := filesystemFreeBytes(root)
 	pressure, target := gcPressure(scope, used, free)
+	metrics := storageMetricsSnapshot(state, policy, name, used, free, pressure)
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -138,7 +140,7 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 	return &proto.StorageScope{Name: name, Root: storageReportRoot, UsedBytes: used, FreeBytes: free, MaxBytes: scope.MaxBytes,
 		TargetBytes: target, MinFreeBytes: scope.MinFreeBytes, HighWatermark: scope.HighWatermark,
 		LowWatermark: scope.LowWatermark, RetentionSec: scope.RetentionSec, KeepLastJobs: scope.KeepLastJobs,
-		JobCount: jobs, RunningJobs: running, Pressure: pressure, PolicySource: storageReportPolicy}, nil
+		JobCount: jobs, RunningJobs: running, Pressure: pressure, PolicySource: storageReportPolicy, Metrics: metrics}, nil
 }
 
 func storageGC(p *proto.StorageParams, state string) (*proto.StorageGCReport, error) {
@@ -186,11 +188,171 @@ func storageGC(p *proto.StorageParams, state string) (*proto.StorageGCReport, er
 	if opts.MaxDeleteBytes == 0 {
 		opts.MaxDeleteBytes = cleanup.MaxDeleteBytes
 	}
+	started := time.Now()
 	gc, err := runStorageGC(state, scope, opts)
 	if err != nil {
 		return nil, err
 	}
-	return storageGCProto(gc), nil
+	var metrics *proto.StorageMetrics
+	if p.DryRun {
+		metrics = storageMetricsSnapshot(state, policy, name, gc.UsedBytes, gc.FreeBytes, gc.Pressure)
+	} else {
+		metrics = updateStorageMetrics(filepath.Join(state, storageReportMetrics), name, scope, gc, time.Since(started))
+	}
+	out := storageGCProto(gc)
+	out.Metrics = metrics
+	return out, nil
+}
+
+func protoStorageMetrics(in storage.MetricsSnapshot) *proto.StorageMetrics {
+	convScope := func(s storage.ScopeMetrics) proto.StorageMetricsScope {
+		return proto.StorageMetricsScope{UsedBytes: s.UsedBytes, FreeBytes: s.FreeBytes, BudgetBytes: s.BudgetBytes, Pressure: s.Pressure, PressureLevel: s.PressureLevel}
+	}
+	out := &proto.StorageMetrics{SchemaVersion: in.SchemaVersion, Local: convScope(in.Local), RemoteState: convScope(in.RemoteState),
+		Logs: proto.StorageLogMetrics{OriginalBytes: in.Logs.OriginalBytes, RetainedBytes: in.Logs.RetainedBytes, DroppedBytes: in.Logs.DroppedBytes},
+		GC:   proto.StorageGCMetrics{ScannedJobs: in.GC.ScannedJobs, RemovedJobs: in.GC.RemovedJobs, FreedBytes: in.GC.FreedBytes, Errors: in.GC.Errors, DurationMS: in.GC.DurationMS, Runs: in.GC.Runs, FailureReasons: in.GC.FailureReasons}, QuotaHits: in.QuotaHits}
+	for _, e := range in.PressureEvents {
+		out.PressureEvents = append(out.PressureEvents, proto.StoragePressureEvent{Scope: e.Scope, State: e.State, At: e.At})
+	}
+	return out
+}
+
+// storageMetricsSnapshot is read-only: status and doctor must not create or
+// rewrite telemetry files. Ledger bytes are recomputed from managed records so
+// a crash cannot inflate counters by replaying a finalization write.
+func storageMetricsSnapshot(state string, policy storage.Policy, scopeName string, used, free int64, pressure bool) *proto.StorageMetrics {
+	snap := loadStorageMetricsReadOnly(state)
+	snap.Local.BudgetBytes, snap.RemoteState.BudgetBytes = policy.Local.MaxBytes, policy.RemoteState.MaxBytes
+	selected := &snap.RemoteState
+	if scopeName == "local" {
+		selected = &snap.Local
+	}
+	selected.UsedBytes, selected.FreeBytes, selected.Pressure = used, free, pressure
+	if pressure {
+		selected.PressureLevel = "high"
+	} else {
+		selected.PressureLevel = "normal"
+	}
+	var logs storage.LogMetrics
+	root := filepath.Join(state, storageReportRoot)
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || validateJobID(e.Name()) != nil {
+				continue
+			}
+			path := filepath.Join(root, e.Name(), "ledger.json")
+			st, err := os.Lstat(path)
+			if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+				continue
+			}
+			var raw struct {
+				Stdout proto.LogLedger `json:"stdout_ledger"`
+				Stderr proto.LogLedger `json:"stderr_ledger"`
+			}
+			// Decode through a map to retain compatibility with old ledger files.
+			b, err := os.ReadFile(path)
+			if err != nil || json.Unmarshal(b, &raw) != nil {
+				continue
+			}
+			for _, l := range []proto.LogLedger{raw.Stdout, raw.Stderr} {
+				if l.OriginalBytes > 0 {
+					logs.OriginalBytes += uint64(l.OriginalBytes)
+				}
+				if l.RetainedBytes > 0 {
+					logs.RetainedBytes += uint64(l.RetainedBytes)
+				}
+				if l.DroppedBytes > 0 {
+					logs.DroppedBytes += uint64(l.DroppedBytes)
+				}
+			}
+		}
+	}
+	snap.Logs = logs
+	return protoStorageMetrics(snap)
+}
+
+func loadStorageMetricsReadOnly(state string) storage.MetricsSnapshot {
+	path := filepath.Join(state, storageReportMetrics)
+	if st, err := os.Lstat(path); err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+		return storage.MetricsSnapshot{SchemaVersion: storage.MetricsSchemaVersion}
+	}
+	snap, err := storage.LoadMetrics(path)
+	if err != nil {
+		return storage.MetricsSnapshot{SchemaVersion: storage.MetricsSchemaVersion}
+	}
+	return snap
+}
+
+func updateStorageMetrics(path, scopeName string, scope storage.ScopePolicy, report *GCReport, duration time.Duration) *proto.StorageMetrics {
+	snap := storage.MetricsSnapshot{SchemaVersion: storage.MetricsSchemaVersion}
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink == 0 && st.Mode().IsRegular() && pathOwnedByCurrentUser(st) {
+		if loaded, loadErr := storage.LoadMetrics(path); loadErr == nil {
+			snap = loaded
+		}
+	}
+	if report == nil {
+		return protoStorageMetrics(snap)
+	}
+	previous := false
+	if scopeName == "local" {
+		previous = snap.Local.Pressure
+		if previous != report.Pressure {
+			state := "cleared"
+			if report.Pressure {
+				state = "entered"
+			}
+			snap.PressureEvents = append(snap.PressureEvents, storage.PressureEvent{Scope: scopeName, State: state, At: time.Now().UTC().Format(time.RFC3339Nano)})
+		}
+		snap.Local.UsedBytes, snap.Local.FreeBytes, snap.Local.BudgetBytes, snap.Local.Pressure = report.UsedBytes, report.FreeBytes, scope.MaxBytes, report.Pressure
+	} else {
+		previous = snap.RemoteState.Pressure
+		if previous != report.Pressure {
+			state := "cleared"
+			if report.Pressure {
+				state = "entered"
+			}
+			snap.PressureEvents = append(snap.PressureEvents, storage.PressureEvent{Scope: scopeName, State: state, At: time.Now().UTC().Format(time.RFC3339Nano)})
+		}
+		snap.RemoteState.UsedBytes, snap.RemoteState.FreeBytes, snap.RemoteState.BudgetBytes, snap.RemoteState.Pressure = report.UsedBytes, report.FreeBytes, scope.MaxBytes, report.Pressure
+	}
+	if len(snap.PressureEvents) > storage.MaxPressureEvents {
+		snap.PressureEvents = snap.PressureEvents[len(snap.PressureEvents)-storage.MaxPressureEvents:]
+	}
+	snap.GC.ScannedJobs += uint64(max(report.Scanned, 0))
+	snap.GC.RemovedJobs += uint64(len(report.Removed))
+	snap.GC.FreedBytes += uint64(max64(report.FreedBytes, 0))
+	snap.GC.Errors += uint64(len(report.Errors))
+	if duration > 0 {
+		snap.GC.DurationMS += uint64(duration / time.Millisecond)
+	}
+	result := "success"
+	if report.DryRun {
+		result = "dry_run"
+	} else if len(report.Errors) > 0 {
+		result = "error"
+	}
+	if snap.GC.Runs == nil {
+		snap.GC.Runs = map[string]uint64{"success": 0, "error": 0, "dry_run": 0}
+	}
+	snap.GC.Runs[result]++
+	if len(report.Errors) > 0 {
+		if snap.GC.FailureReasons == nil {
+			snap.GC.FailureReasons = map[string]uint64{"io": 0, "unsafe": 0, "budget": 0}
+		}
+		snap.GC.FailureReasons["io"] += uint64(len(report.Errors))
+	}
+	if report.Pressure {
+		snap.QuotaHits++
+	}
+	_ = storage.SaveMetrics(path, snap) // telemetry failures never fail the request
+	return protoStorageMetrics(snap)
+}
+
+func max64(v int64, floor int64) int64 {
+	if v < floor {
+		return floor
+	}
+	return v
 }
 
 func storageGCProto(in *GCReport) *proto.StorageGCReport {
@@ -216,6 +378,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 		return nil, err
 	}
 	report := &proto.StorageDoctorReport{}
+	policy, _, _ := loadStoragePolicy(state)
 	stateAbs, err := filepath.Abs(state)
 	if err != nil {
 		return nil, err
@@ -246,7 +409,6 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 	}
 	if free := filesystemFreeBytes(root); free >= 0 {
 		if used, e1 := safeTreeSize(root); e1 == nil {
-			policy, _, _ := loadStoragePolicy(state)
 			selected := policy.RemoteState
 			if strings.EqualFold(strings.TrimSpace(p.Scope), "local") {
 				selected = policy.Local
@@ -254,6 +416,12 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 			if pressure, _ := gcPressure(selected, used, free); pressure {
 				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "storage_pressure", Severity: "warning", Message: "storage is above the configured high watermark or minimum free space", Action: "run storage_gc dry-run, then execute a bounded cleanup"})
 			}
+			report.Metrics = storageMetricsSnapshot(state, policy, func() string {
+				if strings.EqualFold(strings.TrimSpace(p.Scope), "local") {
+					return "local"
+				}
+				return "remote_state"
+			}(), used, free, func() bool { v, _ := gcPressure(selected, used, free); return v }())
 		}
 	}
 	entries, err := os.ReadDir(root)

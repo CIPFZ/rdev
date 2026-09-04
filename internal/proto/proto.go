@@ -432,21 +432,64 @@ type JobResult struct {
 }
 
 type StorageScope struct {
-	Name          string  `json:"name"`
-	Root          string  `json:"root"`
-	UsedBytes     int64   `json:"used_bytes"`
-	FreeBytes     int64   `json:"free_bytes,omitempty"`
-	MaxBytes      int64   `json:"max_bytes"`
-	TargetBytes   int64   `json:"target_bytes,omitempty"`
-	MinFreeBytes  int64   `json:"min_free_bytes,omitempty"`
-	HighWatermark float64 `json:"high_watermark"`
-	LowWatermark  float64 `json:"low_watermark"`
-	RetentionSec  int64   `json:"retention_sec"`
-	KeepLastJobs  int     `json:"keep_last_jobs"`
-	JobCount      int     `json:"job_count"`
-	RunningJobs   int     `json:"running_jobs"`
-	Pressure      bool    `json:"pressure"`
-	PolicySource  string  `json:"policy_source"`
+	Name          string          `json:"name"`
+	Root          string          `json:"root"`
+	UsedBytes     int64           `json:"used_bytes"`
+	FreeBytes     int64           `json:"free_bytes,omitempty"`
+	MaxBytes      int64           `json:"max_bytes"`
+	TargetBytes   int64           `json:"target_bytes,omitempty"`
+	MinFreeBytes  int64           `json:"min_free_bytes,omitempty"`
+	HighWatermark float64         `json:"high_watermark"`
+	LowWatermark  float64         `json:"low_watermark"`
+	RetentionSec  int64           `json:"retention_sec"`
+	KeepLastJobs  int             `json:"keep_last_jobs"`
+	JobCount      int             `json:"job_count"`
+	RunningJobs   int             `json:"running_jobs"`
+	Pressure      bool            `json:"pressure"`
+	PolicySource  string          `json:"policy_source"`
+	Metrics       *StorageMetrics `json:"metrics,omitempty"`
+}
+
+// StorageMetrics is a bounded, low-cardinality telemetry snapshot. Scope is
+// represented by fixed fields (local/remote_state), never arbitrary labels.
+type StorageMetrics struct {
+	SchemaVersion  int                    `json:"schema_version"`
+	Local          StorageMetricsScope    `json:"local"`
+	RemoteState    StorageMetricsScope    `json:"remote_state"`
+	Logs           StorageLogMetrics      `json:"logs"`
+	GC             StorageGCMetrics       `json:"gc"`
+	PressureEvents []StoragePressureEvent `json:"pressure_events,omitempty"`
+	QuotaHits      uint64                 `json:"quota_hits_total"`
+}
+
+type StorageMetricsScope struct {
+	UsedBytes     int64  `json:"used_bytes"`
+	FreeBytes     int64  `json:"free_bytes,omitempty"`
+	BudgetBytes   int64  `json:"budget_bytes"`
+	Pressure      bool   `json:"pressure"`
+	PressureLevel string `json:"pressure_level"`
+}
+
+type StorageLogMetrics struct {
+	OriginalBytes uint64 `json:"original_bytes"`
+	RetainedBytes uint64 `json:"retained_bytes"`
+	DroppedBytes  uint64 `json:"dropped_bytes"`
+}
+
+type StorageGCMetrics struct {
+	ScannedJobs    uint64            `json:"scanned_jobs"`
+	RemovedJobs    uint64            `json:"removed_jobs"`
+	FreedBytes     uint64            `json:"freed_bytes"`
+	Errors         uint64            `json:"errors"`
+	DurationMS     uint64            `json:"duration_ms"`
+	Runs           map[string]uint64 `json:"runs"`
+	FailureReasons map[string]uint64 `json:"failure_reasons"`
+}
+
+type StoragePressureEvent struct {
+	Scope string `json:"scope"`
+	State string `json:"state"`
+	At    string `json:"at"`
 }
 
 type StorageResult struct {
@@ -480,6 +523,7 @@ type StorageGCReport struct {
 	Skipped       []string        `json:"skipped,omitempty"`
 	FreedBytes    int64           `json:"freed_bytes"`
 	Errors        []string        `json:"errors,omitempty"`
+	Metrics       *StorageMetrics `json:"metrics,omitempty"`
 }
 
 type StorageDoctorFinding struct {
@@ -494,6 +538,7 @@ type StorageDoctorReport struct {
 	Root     string                 `json:"root"`
 	OK       bool                   `json:"ok"`
 	Findings []StorageDoctorFinding `json:"findings,omitempty"`
+	Metrics  *StorageMetrics        `json:"metrics,omitempty"`
 }
 
 // WaitedJob is one job's outcome in a multi-job wait.

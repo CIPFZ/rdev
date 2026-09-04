@@ -409,7 +409,7 @@ func managedJobSize(dir string) (int64, error) {
 
 func managedJobName(name string) bool {
 	switch name {
-	case "meta.json", "status.json", "child.json", "ledger.json", "stdout", "stderr", "storage-policy.json":
+	case "meta.json", "status.json", "child.json", "ledger.json", "stdout", "stderr", "storage-policy.json", "storage-metrics.json":
 		return true
 	default:
 		return false
