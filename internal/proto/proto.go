@@ -403,6 +403,10 @@ type JobResult struct {
 	LogSize int64 `json:"log_size,omitempty"`
 	// Matched counts lines kept by Grep, before TailLines was applied.
 	Matched int `json:"matched,omitempty"`
+	// TailTruncated indicates the bounded backward scan could not reach the
+	// requested number of lines. TailScanBytes records bytes inspected.
+	TailTruncated bool  `json:"tail_truncated,omitempty"`
+	TailScanBytes int64 `json:"tail_scan_bytes,omitempty"`
 
 	// TimedOut is set by job_wait when the wait budget expired while the job was
 	// still running. The job is unaffected; the caller may wait again.

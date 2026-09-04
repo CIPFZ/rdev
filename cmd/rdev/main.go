@@ -624,13 +624,13 @@ func readAllStdin() (string, error) {
 
 func cmdSync(ctx context.Context, c *client.Client, args []string) error {
 	fs, err := parseFlags(args,
-		map[string]bool{"dry-run": true, "delete": true},
+		map[string]bool{"dry-run": true, "delete": true, "confirm-delete": true},
 		map[string]bool{"exclude": true})
 	if err != nil {
 		return err
 	}
 	if len(fs.pos) < 4 {
-		return errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete] [-max-output-bytes N]")
+		return errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete] [-confirm-delete] [-symlink-policy preserve|follow|skip] [-conflict-policy overwrite|skip|fail] [-max-output-bytes N]")
 	}
 	var maxOutputBytes int64
 	if raw, ok := fs.vals["max-output-bytes"]; ok {
@@ -643,6 +643,7 @@ func cmdSync(ctx context.Context, c *client.Client, args []string) error {
 	res, err := c.Sync(ctx, client.SyncOptions{
 		Host: fs.pos[0], Direction: fs.pos[1], Local: fs.pos[2], Remote: fs.pos[3],
 		Exclude: fs.repeat["exclude"], DryRun: fs.bools["dry-run"], Delete: fs.bools["delete"],
+		ConfirmDelete: fs.bools["confirm-delete"], SymlinkPolicy: fs.str("symlink-policy"), ConflictPolicy: fs.str("conflict-policy"),
 		MaxOutputBytes: maxOutputBytes,
 	})
 	if err != nil {

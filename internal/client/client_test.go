@@ -195,6 +195,47 @@ func TestSyncRejectsMissingPaths(t *testing.T) {
 	}
 }
 
+func TestSyncDeleteRequiresExplicitConfirmation(t *testing.T) {
+	c := newTestClient()
+	_, err := c.Sync(t.Context(), SyncOptions{Host: "user@h", Direction: "push", Local: t.TempDir(), Remote: "dst", Delete: true})
+	var env *proto.ErrorEnvelope
+	if err == nil || !errors.As(err, &env) || env.Code != proto.CodeInvalidRequest {
+		t.Fatalf("delete without confirmation error = %v", err)
+	}
+}
+
+func TestBuildSyncArgsPolicies(t *testing.T) {
+	args := buildSyncArgs(transport.Host{Addr: "u@h"}, nil, SyncOptions{Direction: "push", Local: "src", Remote: "dst", SymlinkPolicy: "follow", ConflictPolicy: "skip"})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--copy-links", "--ignore-existing"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args %q missing %s", joined, want)
+		}
+	}
+}
+
+func TestBuildSyncManifestDeterministicAndSymlinkPolicy(t *testing.T) {
+	d := t.TempDir()
+	if err := os.WriteFile(filepath.Join(d, "a"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a", filepath.Join(d, "link")); err != nil {
+		t.Fatal(err)
+	}
+	a, err := buildSyncManifest(d, "preserve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := buildSyncManifest(d, "preserve")
+	if err != nil || a != b {
+		t.Fatalf("manifest not deterministic: %+v %+v err=%v", a, b, err)
+	}
+	c, err := buildSyncManifest(d, "skip")
+	if err != nil || c.Entries >= a.Entries {
+		t.Fatalf("skip symlink manifest = %+v preserve=%+v err=%v", c, a, err)
+	}
+}
+
 func TestBuildSyncArgsTerminatesOptionsBeforeOperands(t *testing.T) {
 	opts := SyncOptions{
 		Direction: "push", Local: "-leading-local", Remote: "~/dst",

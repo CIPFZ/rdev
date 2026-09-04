@@ -1358,6 +1358,14 @@ type SyncOptions struct {
 	Exclude   []string
 	DryRun    bool
 	Delete    bool
+	// ConfirmDelete is required for a mutating --delete transfer. Dry-runs are
+	// always allowed; this gate prevents an accidental destructive invocation.
+	ConfirmDelete bool
+	// SymlinkPolicy is preserve (default), follow, or skip.
+	SymlinkPolicy string
+	// ConflictPolicy is overwrite (default), skip, or fail. fail performs a
+	// dry-run preflight and refuses when rsync reports conflicts.
+	ConflictPolicy string
 	// MaxOutputBytes may only lower the per-stream system cap. Zero uses the
 	// bounded default.
 	MaxOutputBytes int64
@@ -1375,6 +1383,8 @@ type SyncResult struct {
 	ExitCode         int              `json:"exit_code"`
 	DryRun           bool             `json:"dry_run,omitempty"`
 	Command          string           `json:"command"`
+	ManifestDigest   string           `json:"manifest_digest,omitempty"`
+	ManifestEntries  int              `json:"manifest_entries,omitempty"`
 }
 
 const defaultSyncOutputBytes int64 = 256 << 10
@@ -1390,6 +1400,21 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	}
 	if opts.Direction != "" && opts.Direction != "push" && opts.Direction != "pull" {
 		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	if opts.Delete && !opts.DryRun && !opts.ConfirmDelete {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "sync --delete requires explicit confirmation", proto.StateNotSent)
+	}
+	if opts.SymlinkPolicy == "" {
+		opts.SymlinkPolicy = "preserve"
+	}
+	if opts.SymlinkPolicy != "preserve" && opts.SymlinkPolicy != "follow" && opts.SymlinkPolicy != "skip" {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "invalid symlink policy", proto.StateNotSent)
+	}
+	if opts.ConflictPolicy == "" {
+		opts.ConflictPolicy = "overwrite"
+	}
+	if opts.ConflictPolicy != "overwrite" && opts.ConflictPolicy != "skip" && opts.ConflictPolicy != "fail" {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "invalid conflict policy", proto.StateNotSent)
 	}
 	limit := opts.MaxOutputBytes
 	if limit < 0 || limit > proto.AbsoluteOutputBytes {
@@ -1418,6 +1443,19 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	defer release()
 
 	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
+	manifest := syncManifest{}
+	if opts.Direction == "" || opts.Direction == "push" {
+		manifest, err = buildSyncManifest(opts.Local, opts.SymlinkPolicy)
+		if err != nil {
+			// Preserve rsync's own diagnostics for a missing source path. The
+			// manifest is an audit aid, not a second path-validation mechanism.
+			if os.IsNotExist(err) {
+				manifest = syncManifest{}
+			} else {
+				return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("build sync manifest: %w", err))
+			}
+		}
+	}
 
 	stdoutCapture := newBoundedCapture(limit)
 	stderrCapture := newBoundedCapture(limit)
@@ -1446,7 +1484,8 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		// Leaving one field of the same struct unscrubbed is exactly the accident
 		// decision 6 exists to prevent -- redaction has to be at the boundary, not
 		// per field, or the next field added inherits the gap.
-		Command: c.redactTextWith(redactionSnapshot, "rsync "+strings.Join(args, " ")),
+		Command:        c.redactTextWith(redactionSnapshot, "rsync "+strings.Join(args, " ")),
+		ManifestDigest: manifest.Digest, ManifestEntries: manifest.Entries,
 	}
 	var ee *exec.ExitError
 	if errors.As(runErr, &ee) {
@@ -1518,6 +1557,15 @@ func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []st
 	}
 	if opts.Delete {
 		args = append(args, "--delete")
+	}
+	switch opts.SymlinkPolicy {
+	case "follow":
+		args = append(args, "--copy-links")
+	case "skip":
+		args = append(args, "--no-links")
+	}
+	if opts.ConflictPolicy == "skip" {
+		args = append(args, "--ignore-existing")
 	}
 	for _, ex := range opts.Exclude {
 		args = append(args, "--exclude", ex)
