@@ -31,6 +31,13 @@ func storageScope(p *proto.StorageParams) (storage.ScopePolicy, string, error) {
 
 func loadStoragePolicy(state string) (storage.Policy, string, error) {
 	path := filepath.Join(state, "storage-policy.json")
+	if st, err := os.Lstat(path); err == nil {
+		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+			return storage.Policy{}, path, fmt.Errorf("storage policy is not a private owned regular file")
+		}
+	} else if !os.IsNotExist(err) {
+		return storage.Policy{}, path, err
+	}
 	p, err := storage.Load(path)
 	if err != nil {
 		return storage.Policy{}, path, err
@@ -170,6 +177,9 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 	root := report.Root
 	if _, _, err := loadStoragePolicy(state); err != nil {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "policy_invalid", Severity: "error", Path: filepath.Join(state, "storage-policy.json"), Message: err.Error(), Action: "restore a valid policy or remove the file to use defaults"})
+	}
+	if policyPath := filepath.Join(state, "storage-policy.json"); func() bool { st, e := os.Lstat(policyPath); return e == nil && st.Mode().Perm() != 0o600 }() {
+		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "policy_permissions", Severity: "warning", Path: "storage-policy.json", Message: "storage policy permissions are broader than 0600", Action: "chmod the policy file to 0600"})
 	}
 	if free := filesystemFreeBytes(root); free >= 0 {
 		if used, e1 := safeTreeSize(root); e1 == nil {
