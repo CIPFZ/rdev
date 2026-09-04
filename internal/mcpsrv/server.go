@@ -289,6 +289,8 @@ type JobOut struct {
 	OperationID    string               `json:"operation_id,omitempty"`
 	Terminal       bool                 `json:"terminal"`
 	ExecutionState proto.ExecutionState `json:"execution_state"`
+	StdoutLedger   proto.LogLedger      `json:"stdout_ledger"`
+	StderrLedger   proto.LogLedger      `json:"stderr_ledger"`
 }
 
 func toJobOut(j *proto.JobInfo) JobOut {
@@ -300,6 +302,7 @@ func toJobOut(j *proto.JobInfo) JobOut {
 		State: j.State, ExitCode: j.ExitCode, StartedAt: j.StartedAt, EndedAt: j.EndedAt,
 		Orphaned: j.Orphaned, ChildPID: j.ChildPID,
 		OperationID: j.OperationID, Terminal: j.Terminal, ExecutionState: j.Execution,
+		StdoutLedger: j.StdoutLedger, StderrLedger: j.StderrLedger,
 	}
 }
 
@@ -338,6 +341,7 @@ type JobLogsOut struct {
 	OperationID    string               `json:"operation_id"`
 	Terminal       bool                 `json:"terminal"`
 	ExecutionState proto.ExecutionState `json:"execution_state"`
+	Ledger         proto.LogLedger      `json:"ledger"`
 }
 
 type JobStopIn struct {
@@ -535,7 +539,7 @@ func toJobLogsOut(res *proto.JobResult) JobLogsOut {
 		Logs: res.Logs, NextOffset: res.NextOffset,
 		LogSize: res.LogSize, Matched: res.Matched, Returned: returned,
 		Truncation: res.LogsTruncation, OperationID: res.OperationID,
-		Terminal: res.Terminal, ExecutionState: res.Execution,
+		Terminal: res.Terminal, ExecutionState: res.Execution, Ledger: res.LogLedger,
 	}
 }
 

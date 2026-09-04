@@ -345,9 +345,22 @@ type JobInfo struct {
 	// continues but no exit code will be recorded.
 	Orphaned bool `json:"orphaned,omitempty"`
 	// ExitCode is valid only when State is JobExited.
-	ExitCode  int    `json:"exit_code,omitempty"`
-	StartedAt string `json:"started_at"`
-	EndedAt   string `json:"ended_at,omitempty"`
+	ExitCode     int       `json:"exit_code,omitempty"`
+	StartedAt    string    `json:"started_at"`
+	EndedAt      string    `json:"ended_at,omitempty"`
+	StdoutLedger LogLedger `json:"stdout_ledger"`
+	StderrLedger LogLedger `json:"stderr_ledger"`
+}
+
+// LogLedger is the durable accounting for a bounded job log stream.
+type LogLedger struct {
+	OriginalBytes    int64  `json:"original_bytes"`
+	RetainedBytes    int64  `json:"retained_bytes"`
+	DroppedBytes     int64  `json:"dropped_bytes"`
+	Truncated        bool   `json:"truncated"`
+	FirstTruncatedAt string `json:"first_truncated_at,omitempty"`
+	LimitBytes       int64  `json:"limit_bytes"`
+	Policy           string `json:"policy"`
 }
 
 // JobResult is the union of replies for the job ops.
@@ -365,6 +378,7 @@ type JobResult struct {
 	// Logs fields, set for job_logs.
 	Logs           string     `json:"logs,omitempty"`
 	LogsTruncation Truncation `json:"logs_truncation"`
+	LogLedger      LogLedger  `json:"log_ledger"`
 	// NextOffset is the byte offset to pass as SinceOffset on the next poll.
 	NextOffset int64 `json:"next_offset,omitempty"`
 	// LogSize is the current total size of the selected stream.

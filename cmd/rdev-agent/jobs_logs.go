@@ -70,6 +70,16 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 
 	res := &proto.JobResult{LogSize: info.Size()}
+	var st struct {
+		StdoutLedger proto.LogLedger `json:"stdout_ledger"`
+		StderrLedger proto.LogLedger `json:"stderr_ledger"`
+	}
+	_ = readJSON(filepath.Join(jobDir(state, p.ID), "status.json"), &st)
+	if stream == "stdout" {
+		res.LogLedger = st.StdoutLedger
+	} else {
+		res.LogLedger = st.StderrLedger
+	}
 
 	tail := p.TailLines
 	if tail < 0 || tail > hardLogTailLines {
@@ -93,6 +103,9 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		}
 		res.Logs = logs
 		res.LogsTruncation, _ = proto.NewTruncation(info.Size(), int64(len(logs)))
+		if res.LogLedger.LimitBytes != 0 {
+			res.LogsTruncation, _ = proto.NewTruncation(res.LogLedger.OriginalBytes, res.LogLedger.RetainedBytes)
+		}
 		res.NextOffset = info.Size()
 		return res, nil
 	}
@@ -135,6 +148,9 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 	res.Logs = strings.Join(ring.lines(), "\n")
 	res.LogsTruncation, _ = proto.NewTruncation(regionBytes, int64(len(res.Logs)))
+	if res.LogLedger.LimitBytes != 0 {
+		res.LogsTruncation, _ = proto.NewTruncation(res.LogLedger.OriginalBytes, res.LogLedger.RetainedBytes)
+	}
 	return res, nil
 }
 
