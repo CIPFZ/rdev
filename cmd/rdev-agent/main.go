@@ -682,6 +682,7 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	}
 
 	mode := os.FileMode(p.Mode)
+	explicitMode := p.Mode != 0
 	if mode == 0 {
 		mode = 0o644
 	} else if mode&^0o7777 != 0 {
@@ -713,11 +714,15 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 		// Historically an overwrite without an explicit mode retained the
 		// target's permissions. Preserve that behavior while still making the
 		// replacement itself atomic.
-		if p.Mode == 0 {
+		if !explicitMode {
 			mode = st.Mode().Perm()
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return nil, statErr
+	} else if !explicitMode {
+		// CreateTemp starts at 0600. Keep that restrictive mode for a new
+		// implicit-mode file instead of chmod'ing to 0644 and bypassing umask.
+		mode = 0o600
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".rdev-write-*")
 	if err != nil {

@@ -266,6 +266,21 @@ func TestWriteThenReadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteDefaultModeDoesNotWidenNewFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "private")
+	if _, err := doWrite(&proto.WriteParams{Path: path, Content: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("default new-file mode = %o, want restrictive 600", got)
+	}
+}
+
 func TestWriteMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "script.sh")

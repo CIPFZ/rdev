@@ -140,7 +140,8 @@ type WriteParams struct {
 	Content string `json:"content"`
 	// ContentB64 marks Content as base64-encoded, for binary payloads.
 	ContentB64 bool `json:"content_b64,omitempty"`
-	// Mode is the octal file mode, e.g. 0o755. 0 means 0o644.
+	// Mode is the octal file mode, e.g. 0o755. 0 preserves an existing mode;
+	// newly created files use a restrictive 0o600 mode.
 	Mode uint32 `json:"mode,omitempty"`
 	// Append adds to an existing file instead of truncating it.
 	Append bool `json:"append,omitempty"`
