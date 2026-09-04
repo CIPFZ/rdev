@@ -18,7 +18,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,20 +93,20 @@ func runSupervisor(jobDir string, argv []string) {
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		os.Exit(127)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		os.Exit(127)
-	}
 	cmd.Stdin = nil
 	cmd.Env = withoutEnvValue(os.Environ(), supervisorParentEnv)
 	// Keep the child in the supervisor's process group so that signalling the
 	// group (job_stop uses -pgid) reaches supervisor and child together.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: false}
 
+	so := storage.NewSink(policy.PerJob.MaxStdoutBytes, policy.PerJob.OnLogLimit)
+	se := storage.NewSink(policy.PerJob.MaxStderrBytes, policy.PerJob.OnLogLimit)
+	// Assign bounded writers directly to Cmd. os/exec owns the internal pipe
+	// drain goroutines and Wait waits for those goroutines before returning.
+	// Using StdoutPipe/Wait manually can close the pipe before io.Copy drains
+	// the final bytes, making a completed job occasionally report empty logs.
+	cmd.Stdout = so
+	cmd.Stderr = se
 	if err := cmd.Start(); err != nil {
 		_ = withJobLock(jobDir, func() error {
 			if !jobExists(jobDir) {
@@ -133,11 +132,6 @@ func runSupervisor(jobDir string, argv []string) {
 		return writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
 	})
 
-	so := storage.NewSink(policy.PerJob.MaxStdoutBytes, policy.PerJob.OnLogLimit)
-	se := storage.NewSink(policy.PerJob.MaxStderrBytes, policy.PerJob.OnLogLimit)
-	drainDone := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(so, stdout); drainDone <- struct{}{} }()
-	go func() { _, _ = io.Copy(se, stderr); drainDone <- struct{}{} }()
 	stopLedger := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(200 * time.Millisecond)
@@ -171,8 +165,6 @@ func runSupervisor(jobDir string, argv []string) {
 	}
 	err = cmd.Wait()
 	close(stopLimit)
-	<-drainDone
-	<-drainDone
 	close(stopLedger)
 	_ = so.Flush(filepath.Join(jobDir, "stdout"))
 	_ = se.Flush(filepath.Join(jobDir, "stderr"))
