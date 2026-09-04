@@ -61,7 +61,11 @@ func buildSyncManifest(root string, symlinkPolicy string) (syncManifest, error) 
 			}
 			extra = target
 		} else if i.Mode().IsRegular() && i.Size() <= maxSyncManifestDigestBytes {
-			f, e := os.Open(path)
+			// Do not follow a link while hashing.  The entry was inspected with
+			// Lstat, but an attacker can replace it between that inspection and
+			// Open; following the replacement could hash data outside the source
+			// tree and make the manifest claim a state rsync never saw.
+			f, e := openManifestFile(path)
 			if e != nil {
 				return e
 			}

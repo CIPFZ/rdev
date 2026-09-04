@@ -309,6 +309,7 @@ func TestSyncPlanHasConflicts(t *testing.T) {
 		{name: "new directory", out: "cd+++++++++ dir/\n", want: false},
 		{name: "delete", out: "*deleting   old\n", want: false},
 		{name: "existing update", out: ">f.st...... file\n", want: true},
+		{name: "unknown deletion-like item", out: "*f......... file\n", want: true},
 		{name: "diagnostic", out: "sending incremental file list\n", want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -361,6 +362,23 @@ func TestBuildSyncManifestFollowRejectsEscapingSymlink(t *testing.T) {
 	}
 	if _, err := buildSyncManifest(d, "follow"); err == nil {
 		t.Fatal("follow policy must reject a symlink escaping the sync root")
+	}
+}
+
+func TestOpenManifestFileDoesNotFollowFinalSymlink(t *testing.T) {
+	d := t.TempDir()
+	target := filepath.Join(d, "target")
+	link := filepath.Join(d, "link")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openManifestFile(link)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("manifest digest open unexpectedly followed symlink")
 	}
 }
 

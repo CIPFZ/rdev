@@ -1787,7 +1787,7 @@ func syncPlanHasConflicts(raw []byte) bool {
 		}
 		// It is an itemized change to an existing object. Fail closed if the
 		// format ever changes in a way we cannot classify.
-		if code[0] == '>' || code[0] == '<' || code[0] == 'c' || code[0] == 'h' || code[0] == '.' {
+		if code[0] == '>' || code[0] == '<' || code[0] == 'c' || code[0] == 'h' || code[0] == '.' || code[0] == '*' {
 			return true
 		}
 	}
