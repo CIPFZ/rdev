@@ -54,8 +54,15 @@ func activeJobCount(state string) int {
 		if !e.IsDir() {
 			continue
 		}
-		m, err := readMeta(filepath.Join(state, "jobs", e.Name()))
-		if err == nil && jobAlive(m, filepath.Join(state, "jobs", e.Name())) {
+		dir := filepath.Join(state, "jobs", e.Name())
+		m, err := readMeta(dir)
+		// A newly reserved directory has not published meta.json yet. Count it
+		// conservatively while admission is serialized, otherwise two concurrent
+		// starters can both pass the job-count check before either supervisor is
+		// visible.
+		if err == nil && jobAlive(m, dir) {
+			n++
+		} else if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
 			n++
 		}
 	}

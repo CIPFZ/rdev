@@ -66,11 +66,6 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.Spec == nil || len(p.Spec.Argv) == 0 {
 		return nil, invalidRequestError("job spec with argv required")
 	}
-	effective, err := enforceJobEnvelope(p, state)
-	if err != nil {
-		return nil, limitExceededError(err.Error())
-	}
-
 	// The jobs directory is shared by multiple agent processes. The directory
 	// creation itself is the uniqueness commit point; Mkdir (rather than
 	// MkdirAll) lets a deliberately repeated ID fail closed instead of opening
@@ -78,14 +73,25 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if _, err := secureJobRoot(state); err != nil {
 		return nil, err
 	}
-	for attempt := 0; attempt < 32; attempt++ {
-		id := jobIDGenerator()
-		dir := jobDir(state, id)
-		var result *proto.JobResult
-		err := withJobLock(dir, func() error {
+	// Admission is serialized across agent processes. Counting only published
+	// supervisors is racy: two starters could both pass JobCount before either
+	// metadata record becomes visible. The reservation directory is created
+	// under this lock and is counted conservatively until its transaction
+	// publishes meta.json.
+	var effective proto.ResourceEnvelope
+	var id, dir string
+	err := withJobLock(filepath.Join(state, "jobs", ".admission"), func() error {
+		var err error
+		effective, err = enforceJobEnvelope(p, state)
+		if err != nil {
+			return limitExceededError(err.Error())
+		}
+		for attempt := 0; attempt < 32; attempt++ {
+			id = jobIDGenerator()
+			dir = jobDir(state, id)
 			if err := os.Mkdir(dir, 0o755); err != nil {
 				if errors.Is(err, os.ErrExist) {
-					return errJobIDCollision
+					continue
 				}
 				return err
 			}
@@ -93,20 +99,23 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 				_ = os.RemoveAll(dir)
 				return err
 			}
-			var err error
-			result, err = startJobTransaction(p, id, dir, effective)
-			return err
-		})
-		if errors.Is(err, errJobIDCollision) {
-			continue
+			return nil
 		}
-		if err != nil {
-			removeJobLock(dir)
-			return nil, err
-		}
-		return result, nil
+		return processStateError("could not allocate a unique job id")
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, processStateError("could not allocate a unique job id")
+	var result *proto.JobResult
+	err = withJobLock(dir, func() error {
+		result, err = startJobTransaction(p, id, dir, effective)
+		return err
+	})
+	if err != nil {
+		removeJobLock(dir)
+		return nil, err
+	}
+	return result, nil
 }
 
 var errJobIDCollision = errors.New("job id already exists")
@@ -280,11 +289,14 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		}
 	}
 
-	// Signal the whole process group (negative pid). Because jobStart used
-	// Setsid, the supervisor pid is also the pgid, so this reaches every
-	// descendant -- the reason a recorded pgid beats grepping for a command
-	// string.
+	// Signal the supervisor group and the separately isolated child group. The
+	// latter is essential when a child spawns descendants: killing only the
+	// direct child would orphan those descendants after a timeout/stop.
 	groupErr := syscall.Kill(-meta.PID, sig)
+	childGroupErr := error(nil)
+	if childPID > 0 {
+		childGroupErr = syscall.Kill(-childPID, sig)
+	}
 	if groupErr != nil {
 		// The group is gone. Try the bare supervisor pid, then the recorded
 		// child: a SIGKILLed supervisor leaves the child orphaned to init but
@@ -299,6 +311,9 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 			syscall.Kill(-child, sig)
 		}
 	}
+	if groupErr != nil && childGroupErr != nil && childPID <= 0 {
+		return nil, processStateError("job process is unavailable")
+	}
 
 	if sig == syscall.SIGTERM && p.GraceSec > 0 {
 		deadline := time.Now().Add(time.Duration(p.GraceSec) * time.Second)
@@ -311,8 +326,8 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		if jobAlive(meta, dir) {
 			syscall.Kill(-meta.PID, syscall.SIGKILL)
 			if child := childPID; child > 0 {
-				syscall.Kill(child, syscall.SIGKILL)
 				syscall.Kill(-child, syscall.SIGKILL)
+				syscall.Kill(child, syscall.SIGKILL)
 			}
 		}
 	}

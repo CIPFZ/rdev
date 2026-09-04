@@ -33,6 +33,18 @@ import (
 // mode instead of serving the JSON protocol.
 const superviseFlag = "-supervise"
 
+// killJobChildGroup terminates the child and every descendant in its private
+// process group. The supervisor itself remains outside that group so it can
+// reap the child and persist a terminal status after an enforced limit.
+func killJobChildGroup(pid int) {
+	if pid <= 0 {
+		return
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
 // runSupervisor executes args[0:] as a child, waits for it, and records the
 // outcome in <jobDir>/status.json. It never returns; it exits with the child's
 // code so `ps` and any outer waiter see a faithful status.
@@ -105,9 +117,11 @@ func runSupervisor(jobDir string, argv []string) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = nil
 	cmd.Env = withoutEnvValue(os.Environ(), supervisorParentEnv)
-	// Keep the child in the supervisor's process group so that signalling the
-	// group (job_stop uses -pgid) reaches supervisor and child together.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: false}
+	// Isolate the child in its own process group. This lets timeout and log-limit
+	// enforcement kill the complete descendant tree while keeping the
+	// supervisor alive long enough to publish a terminal status. job_stop
+	// explicitly signals both the supervisor and child groups.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	so := storage.NewSink(policy.PerJob.MaxStdoutBytes, policy.PerJob.OnLogLimit)
 	se := storage.NewSink(policy.PerJob.MaxStderrBytes, policy.PerJob.OnLogLimit)
@@ -164,7 +178,7 @@ func runSupervisor(jobDir string, argv []string) {
 				select {
 				case <-ticker.C:
 					if so.LimitReached() || se.LimitReached() {
-						_ = cmd.Process.Kill()
+						killJobChildGroup(cmd.Process.Pid)
 						return
 					}
 				case <-stopLimit:
@@ -183,7 +197,7 @@ func runSupervisor(jobDir string, argv []string) {
 			timer.Stop()
 		case <-timer.C:
 			resourceLimit = "wall_timeout"
-			_ = cmd.Process.Kill()
+			killJobChildGroup(cmd.Process.Pid)
 			err = <-waitDone
 		}
 	} else {
