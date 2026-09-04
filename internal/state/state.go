@@ -58,6 +58,55 @@ type Report struct {
 const manifestName = "manifest.json"
 const lockName = ".migration.lock"
 
+// validateRoot is deliberately read-only. The agent normally creates this
+// directory before calling the state package, but exported state operations
+// must not follow a caller-controlled symlink into an arbitrary tree.
+func validateRoot(root string) error {
+	if root == "" {
+		return errors.New("state root is required")
+	}
+	st, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return errors.New("state root is not a directory")
+	}
+	return nil
+}
+
+func validateJobsDir(root string) error {
+	jobs := filepath.Join(root, "jobs")
+	st, err := os.Lstat(jobs)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return errors.New("state jobs is not a directory")
+	}
+	return nil
+}
+
+// ensurePrivateDir validates an existing child directory without following a
+// symlink. It is used for backup/quarantine roots because MkdirAll alone would
+// happily traverse an attacker-supplied symlink.
+func ensurePrivateDir(path string, mode os.FileMode) error {
+	if err := os.MkdirAll(path, mode); err != nil {
+		return err
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return fmt.Errorf("%s is not a directory", filepath.Base(path))
+	}
+	return nil
+}
+
 func privateRegular(path string) (os.FileInfo, error) {
 	st, err := os.Lstat(path)
 	if err != nil {
@@ -160,6 +209,12 @@ func acquire(root string) (func(), error) {
 
 func Inspect(root string) (Report, error) {
 	r := Report{Root: root, SchemaVersion: CurrentSchemaVersion}
+	if err := validateRoot(root); err != nil {
+		return r, err
+	}
+	if err := validateJobsDir(root); err != nil {
+		return r, err
+	}
 	manifestPath := filepath.Join(root, manifestName)
 	_, manifestStatErr := os.Lstat(manifestPath)
 	m, err := loadManifest(root)
@@ -196,16 +251,24 @@ func Inspect(root string) (Report, error) {
 			rec.Bytes = st.Size()
 			b, readErr := os.ReadFile(full)
 			var raw struct {
-				SchemaVersion int `json:"schema_version"`
+				SchemaVersion *int `json:"schema_version"`
 			}
 			unmarshalErr := json.Unmarshal(b, &raw)
-			if readErr != nil || unmarshalErr != nil || raw.SchemaVersion > CurrentSchemaVersion {
+			version := 0
+			if raw.SchemaVersion != nil {
+				version = *raw.SchemaVersion
+			}
+			// A missing version is the explicitly supported legacy v0 shape;
+			// an explicit zero/negative value is malformed and must not be
+			// silently upgraded during migration.
+			invalidVersion := raw.SchemaVersion != nil && version <= 0
+			if readErr != nil || unmarshalErr != nil || invalidVersion || version > CurrentSchemaVersion {
 				rec.Valid = false
-				rec.SchemaVersion = raw.SchemaVersion
+				rec.SchemaVersion = version
 				r.Findings = append(r.Findings, Finding{Path: recPath, Kind: "record_corrupt", Message: "invalid or future schema", Action: "quarantine after review"})
 			} else {
 				rec.Valid = true
-				rec.SchemaVersion = raw.SchemaVersion
+				rec.SchemaVersion = version
 			}
 		}
 		r.Records = append(r.Records, rec)
@@ -254,7 +317,10 @@ func Migrate(root string, dryRun bool) (Report, error) {
 	}
 	defer release()
 	backupDir := filepath.Join(root, "backup", time.Now().UTC().Format("20060102T150405.000000000Z"))
-	if err := os.MkdirAll(backupDir, 0700); err != nil {
+	if err := ensurePrivateDir(filepath.Dir(backupDir), 0700); err != nil {
+		return r, err
+	}
+	if err := ensurePrivateDir(backupDir, 0700); err != nil {
 		return r, err
 	}
 	if old, e := os.ReadFile(filepath.Join(root, manifestName)); e == nil {
@@ -322,7 +388,10 @@ func Repair(root string, dryRun bool) (Report, error) {
 	}
 	defer release()
 	qroot := filepath.Join(root, "quarantine", time.Now().UTC().Format("20060102T150405.000000000Z"))
-	if err := os.MkdirAll(qroot, 0700); err != nil {
+	if err := ensurePrivateDir(filepath.Dir(qroot), 0700); err != nil {
+		return r, err
+	}
+	if err := ensurePrivateDir(qroot, 0700); err != nil {
 		return r, err
 	}
 	for _, rel := range r.Quarantined {
