@@ -144,3 +144,18 @@ func TestStorageGCScopeReportJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestStorageGCDryRunDoesNotCreateLocks(t *testing.T) {
+	state := t.TempDir()
+	now := time.Now().UTC()
+	writeGCJob(t, state, "old", now.Add(-48*time.Hour), now.Add(-47*time.Hour), "old", false)
+	scope := storage.Default().RemoteState
+	scope.RetentionSec = 1
+	scope.KeepLastJobs = 0
+	if _, err := runStorageGC(state, scope, GCOptions{DryRun: true, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, ".job-locks")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created lock directory: %v", err)
+	}
+}

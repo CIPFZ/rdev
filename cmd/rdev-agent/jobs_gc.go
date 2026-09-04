@@ -146,7 +146,11 @@ func planStorageGC(state string, scope storage.ScopePolicy, options GCOptions) (
 		// A dry-run must have the same lock admission semantics as execution;
 		// otherwise it would promise deletion of a job that is currently being
 		// started, stopped, or finalized.
-		locked, lockErr := tryJobLock(dir, func() error {
+		lockFn := tryJobLock
+		if options.DryRun {
+			lockFn = tryExistingJobLock
+		}
+		locked, lockErr := lockFn(dir, func() error {
 			fresh, freshErr := readMeta(dir)
 			if freshErr != nil {
 				return errGCSkip

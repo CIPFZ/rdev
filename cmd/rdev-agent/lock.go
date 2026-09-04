@@ -123,11 +123,44 @@ func acquireJobLock(f *os.File, path string) error {
 // supervisor, or job_rm is evidence that the record is in-flight and must be
 // left for a later pass rather than delaying unrelated work.
 func tryJobLock(jobDir string, fn func() error) (bool, error) {
+	return tryJobLockMode(jobDir, true, fn)
+}
+
+// tryExistingJobLock is the read-only variant used by storage dry-runs. It
+// never creates the lock directory/file, because a dry-run must not leave
+// filesystem artifacts merely by inspecting a candidate. A missing lock is
+// treated as uncontended; execution rechecks under a real lock before rename.
+func tryExistingJobLock(jobDir string, fn func() error) (bool, error) {
+	return tryJobLockMode(jobDir, false, fn)
+}
+
+func tryJobLockMode(jobDir string, create bool, fn func() error) (bool, error) {
 	path := lockPath(jobDir)
-	if err := secureDir(filepath.Dir(path), 0o700); err != nil {
-		return false, err
+	parent := filepath.Dir(path)
+	if create {
+		if err := secureDir(parent, 0o700); err != nil {
+			return false, err
+		}
+	} else {
+		st, err := os.Lstat(parent)
+		if errors.Is(err, os.ErrNotExist) {
+			return true, fn()
+		}
+		if err != nil {
+			return false, err
+		}
+		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+			return false, errors.New("job lock directory is not private")
+		}
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
+	if !create && errors.Is(err, os.ErrNotExist) {
+		return true, fn()
+	}
 	if err != nil {
 		return false, err
 	}
