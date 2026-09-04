@@ -304,6 +304,11 @@ func updateStorageMetrics(path, scopeName string, scope storage.ScopePolicy, rep
 			snap.PressureEvents = append(snap.PressureEvents, storage.PressureEvent{Scope: scopeName, State: state, At: time.Now().UTC().Format(time.RFC3339Nano)})
 		}
 		snap.Local.UsedBytes, snap.Local.FreeBytes, snap.Local.BudgetBytes, snap.Local.Pressure = report.UsedBytes, report.FreeBytes, scope.MaxBytes, report.Pressure
+		if report.Pressure {
+			snap.Local.PressureLevel = "high"
+		} else {
+			snap.Local.PressureLevel = "normal"
+		}
 	} else {
 		previous = snap.RemoteState.Pressure
 		if previous != report.Pressure {
@@ -314,6 +319,11 @@ func updateStorageMetrics(path, scopeName string, scope storage.ScopePolicy, rep
 			snap.PressureEvents = append(snap.PressureEvents, storage.PressureEvent{Scope: scopeName, State: state, At: time.Now().UTC().Format(time.RFC3339Nano)})
 		}
 		snap.RemoteState.UsedBytes, snap.RemoteState.FreeBytes, snap.RemoteState.BudgetBytes, snap.RemoteState.Pressure = report.UsedBytes, report.FreeBytes, scope.MaxBytes, report.Pressure
+		if report.Pressure {
+			snap.RemoteState.PressureLevel = "high"
+		} else {
+			snap.RemoteState.PressureLevel = "normal"
+		}
 	}
 	if len(snap.PressureEvents) > storage.MaxPressureEvents {
 		snap.PressureEvents = snap.PressureEvents[len(snap.PressureEvents)-storage.MaxPressureEvents:]
@@ -341,7 +351,7 @@ func updateStorageMetrics(path, scopeName string, scope storage.ScopePolicy, rep
 		}
 		snap.GC.FailureReasons["io"] += uint64(len(report.Errors))
 	}
-	if report.Pressure {
+	if scope.MaxBytes > 0 && report.UsedBytes >= scope.MaxBytes {
 		snap.QuotaHits++
 	}
 	_ = storage.SaveMetrics(path, snap) // telemetry failures never fail the request
