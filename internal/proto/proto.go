@@ -573,6 +573,12 @@ type ListParams struct {
 	Path string `json:"path"`
 	// Limit caps the number of entries returned. 0 means the agent default.
 	Limit int `json:"limit,omitempty"`
+	// MaxEntries is an explicit alias for Limit used by bounded callers.
+	MaxEntries int `json:"max_entries,omitempty"`
+	// MaxBytes caps the encoded listing payload. 0 means the agent default.
+	MaxBytes int `json:"max_bytes,omitempty"`
+	// Cursor resumes after the entry named by the previous page's NextCursor.
+	Cursor string `json:"cursor,omitempty"`
 }
 
 // ListResult carries a directory listing.
@@ -586,4 +592,6 @@ type ListResult struct {
 	// tell a listing was cut short.
 	Total     int  `json:"total"`
 	Truncated bool `json:"truncated,omitempty"`
+	// NextCursor is opaque and can be passed back in ListParams.Cursor.
+	NextCursor string `json:"next_cursor,omitempty"`
 }

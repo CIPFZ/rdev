@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -663,14 +664,11 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 }
 
 func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
+	if p == nil {
+		return nil, invalidRequestError("write parameters required")
+	}
 	if p.Path == "" {
 		return nil, invalidRequestError("write path required")
-	}
-	path := expandHome(p.Path)
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
-		}
 	}
 
 	data := []byte(p.Content)
@@ -685,26 +683,145 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	mode := os.FileMode(p.Mode)
 	if mode == 0 {
 		mode = 0o644
+	} else if mode.Perm() != mode {
+		return nil, invalidRequestError("write mode must contain permission bits only")
 	}
-	flags := os.O_WRONLY | os.O_CREATE
+	path := expandHome(p.Path)
+	if !filepath.IsAbs(path) {
+		path, _ = filepath.Abs(path)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	if st, err := os.Lstat(dir); err != nil {
+		return nil, err
+	} else if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return nil, invalidRequestError("write parent must be a directory")
+	}
 	if p.Append {
-		flags |= os.O_APPEND
-	} else {
-		flags |= os.O_TRUNC
+		return doAppend(path, data, mode, p.Mode != 0)
 	}
+	if st, statErr := os.Lstat(path); statErr == nil {
+		if st.Mode()&os.ModeSymlink != 0 {
+			return nil, invalidRequestError("write target must not be a symlink")
+		}
+		if !st.Mode().IsRegular() {
+			return nil, invalidRequestError("write target must be a regular file")
+		}
+		// Historically an overwrite without an explicit mode retained the
+		// target's permissions. Preserve that behavior while still making the
+		// replacement itself atomic.
+		if p.Mode == 0 {
+			mode = st.Mode().Perm()
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, statErr
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".rdev-write-*")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(mode.Perm()); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	n, err := tmp.Write(data)
+	if err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return nil, err
+	}
+	cleanup = false
+	// Persist the directory entry so a crash after rename cannot lose the name.
+	df, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	if err := df.Sync(); err != nil {
+		_ = df.Close()
+		return nil, err
+	}
+	if err := df.Close(); err != nil {
+		return nil, err
+	}
+	return &proto.WriteResult{Path: path, BytesWritten: n}, nil
+}
 
-	f, err := os.OpenFile(path, flags, mode)
+func doAppend(path string, data []byte, mode os.FileMode, explicitMode bool) (*proto.WriteResult, error) {
+	dir := filepath.Dir(path)
+	created := false
+	if st, err := os.Lstat(path); err == nil {
+		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+			return nil, invalidRequestError("append target must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_EXCL, mode.Perm())
+	if errors.Is(err, os.ErrExist) {
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, mode.Perm())
+	} else if err == nil {
+		created = true
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// Re-check after opening: a path can be replaced by a symlink between the
+	// preflight Lstat and OpenFile. The descriptor's metadata is authoritative
+	// for the write, while the path check prevents following a swapped link.
+	if st, statErr := os.Lstat(path); statErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		_ = f.Close()
+		if statErr != nil {
+			return nil, statErr
+		}
+		return nil, invalidRequestError("append target must be a regular file")
+	}
+	if explicitMode {
+		if err := f.Chmod(mode.Perm()); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
 	n, err := f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
 	if err != nil {
 		return nil, err
 	}
-	// Re-apply the mode: O_CREATE only honors it when the file is new.
-	if p.Mode != 0 {
-		os.Chmod(path, mode)
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if created {
+		df, err := os.Open(dir)
+		if err != nil {
+			return nil, err
+		}
+		if err := df.Sync(); err != nil {
+			_ = df.Close()
+			return nil, err
+		}
+		if err := df.Close(); err != nil {
+			return nil, err
+		}
 	}
 	return &proto.WriteResult{Path: path, BytesWritten: n}, nil
 }
@@ -746,15 +863,34 @@ func isJSONSafeText(b []byte) bool {
 // not blow up the reply.
 const defaultListLimit = 1000
 
+const (
+	defaultListBytes = 1 << 20
+	hardListBytes    = 8 << 20
+	hardListEntries  = 10_000
+)
+
 // doList reads a directory into structured entries.
 //
 // This exists so callers stop running `ls -la` and parsing its output: the format
 // varies by platform and locale, and filenames with spaces or newlines make the
 // parse ambiguous. Entries here carry real types.
 func doList(p *proto.ListParams) (*proto.ListResult, error) {
+	if p == nil {
+		return nil, invalidRequestError("list parameters required")
+	}
 	path := expandHome(p.Path)
 	if path == "" {
 		path = "."
+	}
+	root, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if root.Mode()&os.ModeSymlink != 0 {
+		return nil, invalidRequestError("list path must not be a symlink")
+	}
+	if !root.IsDir() {
+		return nil, invalidRequestError("list path is not a directory")
 	}
 	dir, err := os.Open(path)
 	if err != nil {
@@ -763,33 +899,33 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 	defer dir.Close()
 
 	limit := p.Limit
-	if limit < 0 || limit > 10_000 {
+	if p.MaxEntries != 0 {
+		if limit != 0 && limit != p.MaxEntries {
+			return nil, invalidRequestError("list limit and max_entries disagree")
+		}
+		limit = p.MaxEntries
+	}
+	if limit < 0 || limit > hardListEntries {
 		return nil, limitExceededError("list limit is outside the hard limit")
 	}
 	if limit == 0 {
 		limit = defaultListLimit
 	}
 
-	res := &proto.ListResult{Path: path, Entries: make([]proto.DirEntry, 0, limit)}
+	maxBytes := p.MaxBytes
+	if maxBytes < 0 || maxBytes > hardListBytes {
+		return nil, limitExceededError("list max_bytes is outside the hard limit")
+	}
+	if maxBytes == 0 {
+		maxBytes = defaultListBytes
+	}
+	// Read names only, in bounded chunks, then sort. Metadata is fetched solely
+	// for the page that will be returned, so a million-entry directory does not
+	// allocate a million FileInfo values or retain open descriptors.
+	var names []string
 	for {
-		entries, readErr := dir.ReadDir(256)
-		for _, e := range entries {
-			res.Total++
-			if len(res.Entries) >= limit {
-				res.Truncated = true
-				continue
-			}
-			de := proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
-			// Report the link itself rather than its target: resolving it may dangle
-			// or cross a mount, and the caller can stat the target if it cares.
-			de.Symlink = e.Type()&os.ModeSymlink != 0
-			if info, infoErr := e.Info(); infoErr == nil {
-				de.Size = info.Size()
-				de.Mode = info.Mode().String()
-				de.ModTime = info.ModTime().UTC().Format(time.RFC3339)
-			}
-			res.Entries = append(res.Entries, de)
-		}
+		chunk, readErr := dir.Readdirnames(256)
+		names = append(names, chunk...)
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
@@ -797,7 +933,64 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 			return nil, readErr
 		}
 	}
+	sort.Strings(names)
+	res := &proto.ListResult{Path: path, Entries: make([]proto.DirEntry, 0, limit), Total: len(names)}
+	entriesBytes := 2 // JSON array delimiters
+	start := 0
+	if p.Cursor != "" {
+		cur, decErr := base64.RawURLEncoding.DecodeString(p.Cursor)
+		if decErr != nil {
+			return nil, invalidRequestError("invalid list cursor")
+		}
+		start = sort.SearchStrings(names, string(cur))
+		for start < len(names) && names[start] == string(cur) {
+			start++
+		}
+	}
+	for i := start; i < len(names); i++ {
+		name := names[i]
+		info, infoErr := os.Lstat(filepath.Join(path, name))
+		if infoErr != nil {
+			// Entries can disappear while listing; omit the vanished item and keep
+			// pagination stable for the remaining names.
+			if errors.Is(infoErr, os.ErrNotExist) {
+				continue
+			}
+			return nil, infoErr
+		}
+		de := proto.DirEntry{Name: name, IsDir: info.IsDir(), Symlink: info.Mode()&os.ModeSymlink != 0,
+			Size: info.Size(), Mode: info.Mode().String(), ModTime: info.ModTime().UTC().Format(time.RFC3339)}
+		entryBytes, marshalErr := listEntryBytes(de)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		// Account for the JSON array delimiters and commas. This is exact for the
+		// entries payload (including escaping of Unicode/control characters), not
+		// a hand-wavy name-length estimate that can exceed MaxBytes on the wire.
+		projected := entriesBytes + entryBytes
+		if len(res.Entries) > 0 {
+			projected++ // comma separating this entry from the previous one
+		}
+		if len(res.Entries) >= limit || projected > maxBytes {
+			res.Truncated = true
+			if len(res.Entries) == 0 {
+				return nil, limitExceededError("list max_bytes is too small for one entry")
+			}
+			res.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(res.Entries[len(res.Entries)-1].Name))
+			break
+		}
+		res.Entries = append(res.Entries, de)
+		entriesBytes = projected
+	}
 	return res, nil
+}
+
+func listEntryBytes(entry proto.DirEntry) (int, error) {
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 // stateFlag is the argv[1] value that overrides the agent's state directory.

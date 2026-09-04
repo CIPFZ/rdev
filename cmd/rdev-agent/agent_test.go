@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -289,6 +290,53 @@ func TestWriteAppend(t *testing.T) {
 	b, _ := os.ReadFile(path)
 	if string(b) != "first\nsecond\n" {
 		t.Errorf("content = %q, want both lines", string(b))
+	}
+}
+
+func TestWriteAtomicOverwriteRetainsModeByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mode")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doWrite(&proto.WriteParams{Path: path, Content: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o, want existing mode 600", info.Mode().Perm())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "new" {
+		t.Fatalf("content = %q, want new", b)
+	}
+}
+
+func TestWriteRejectsSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doWrite(&proto.WriteParams{Path: link, Content: "overwrite"}); err == nil {
+		t.Fatal("writing through a symlink should fail")
+	}
+	b, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "keep" {
+		t.Fatalf("symlink target changed to %q", b)
 	}
 }
 
@@ -1255,6 +1303,50 @@ func TestListLimitReportsTruncation(t *testing.T) {
 	// Total reports the real count so the caller knows what it did not see.
 	if res.Total != 5 {
 		t.Errorf("Total = %d, want 5", res.Total)
+	}
+}
+
+func TestListCursorPaginatesDeterministically(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"c", "a", "d", "b"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := doList(&proto.ListParams{Path: dir, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{first.Entries[0].Name, first.Entries[1].Name}; !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("first page = %v, want [a b]", got)
+	}
+	if !first.Truncated || first.NextCursor == "" {
+		t.Fatalf("first page = %+v, want a continuation cursor", first)
+	}
+	second, err := doList(&proto.ListParams{Path: dir, Limit: 2, Cursor: first.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{second.Entries[0].Name, second.Entries[1].Name}; !reflect.DeepEqual(got, []string{"c", "d"}) {
+		t.Fatalf("second page = %v, want [c d]", got)
+	}
+	if second.NextCursor != "" || second.Truncated {
+		t.Fatalf("final page = %+v, want no continuation", second)
+	}
+}
+
+func TestListMaxBytesUsesEncodedEntrySize(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "汉字"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := json.Marshal(proto.DirEntry{Name: "汉字", Size: 1, Mode: "-rw-r--r--", ModTime: "0001-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One byte below the exact JSON entry size must not return an oversized page.
+	if _, err := doList(&proto.ListParams{Path: dir, MaxBytes: len(entry) - 1}); err == nil {
+		t.Fatal("max_bytes below one encoded entry should fail clearly")
 	}
 }
 
