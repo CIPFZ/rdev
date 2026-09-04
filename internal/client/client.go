@@ -6,6 +6,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -1443,6 +1444,38 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	defer release()
 
 	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
+	// A mutating conflict=fail transfer must first perform a read-only rsync
+	// plan.  Treat any itemized update to an existing path as a conflict and
+	// never proceed to the mutating invocation when the preflight is uncertain.
+	// This is intentionally done after leasing the connection so both probes use
+	// the same validated host identity and ControlMaster.
+	if opts.ConflictPolicy == "fail" && !opts.DryRun {
+		preflightArgs := buildSyncArgsWith(pooled.conn.Host(), pooled.conn.SSHArgs(), opts, true)
+		preflightOut := newBoundedCapture(limit)
+		preflightErrOut := newBoundedCapture(limit)
+		var preflightErr error
+		if c.rsync != nil {
+			preflightErr = c.rsync(ctx, preflightArgs, preflightOut, preflightErrOut)
+		} else {
+			cmd := exec.CommandContext(ctx, "rsync", preflightArgs...)
+			cmd.Stdout = preflightOut
+			cmd.Stderr = preflightErrOut
+			preflightErr = cmd.Run()
+		}
+		if preflightErr != nil {
+			if ctx.Err() != nil {
+				return nil, c.redactErrWith(redactionSnapshot, ctx.Err())
+			}
+			return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("sync conflict preflight: %w", preflightErr))
+		}
+		preflightRaw, preflightTruncation := preflightOut.payload()
+		// A bounded capture that dropped any part of the plan cannot establish
+		// that no conflict exists. Refuse the mutation rather than allowing a
+		// conflict hidden after the retention boundary to proceed.
+		if preflightTruncation.Truncated || syncPlanHasConflicts(preflightRaw) {
+			return nil, proto.NewError(proto.CodeInvalidRequest, "sync conflict detected", proto.StateNotSent)
+		}
+	}
 	manifest := syncManifest{}
 	if opts.Direction == "" || opts.Direction == "push" {
 		manifest, err = buildSyncManifest(opts.Local, opts.SymlinkPolicy)
@@ -1547,16 +1580,23 @@ func encodeCapturedOutput(raw []byte) (string, bool) {
 }
 
 func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []string {
+	return buildSyncArgsWith(host, sshArgs, opts, false)
+}
+
+func buildSyncArgsWith(host transport.Host, sshArgs []string, opts SyncOptions, preflight bool) []string {
 	sshCmd := append([]string{"ssh"}, sshArgs...)
 	// Only long-standing flags: macOS ships openrsync, which rejects newer
 	// options like --info=stats1 that samba rsync accepts. -v gives a
 	// transferred-file list on both implementations.
 	args := []string{"-az", "-v", "-e", strings.Join(sshCmd, " ")}
-	if opts.DryRun {
+	if opts.DryRun || preflight {
 		args = append(args, "--dry-run")
 	}
 	if opts.Delete {
 		args = append(args, "--delete")
+	}
+	if preflight {
+		args = append(args, "--itemize-changes", "--out-format=%i %n%L")
 	}
 	switch opts.SymlinkPolicy {
 	case "follow":
@@ -1580,6 +1620,36 @@ func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []st
 	}
 
 	return args
+}
+
+// syncPlanHasConflicts examines rsync's itemized dry-run output.  New paths
+// are represented by a ten-character run of '+' after the two-character type
+// prefix (for example >f+++++++++); updates to an existing path contain one or
+// more change markers instead. Deletions are expected under --delete and are
+// not conflicts. Unknown/non-itemized lines are ignored as diagnostics.
+func syncPlanHasConflicts(raw []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 64<<10), int(proto.AbsoluteOutputBytes))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "*deleting") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 || len(fields[0]) != 11 {
+			continue
+		}
+		code := fields[0]
+		if strings.HasSuffix(code, "+++++++++") {
+			continue
+		}
+		// It is an itemized change to an existing object. Fail closed if the
+		// format ever changes in a way we cannot classify.
+		if code[0] == '>' || code[0] == '<' || code[0] == 'c' || code[0] == 'h' || code[0] == '.' {
+			return true
+		}
+	}
+	return scanner.Err() != nil
 }
 
 // validateLocalSyncPath rejects only values that cannot be represented safely as

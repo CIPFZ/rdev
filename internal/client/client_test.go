@@ -214,6 +214,120 @@ func TestBuildSyncArgsPolicies(t *testing.T) {
 	}
 }
 
+func TestSyncConflictFailRunsReadOnlyPreflightAndRefusesUpdate(t *testing.T) {
+	c := syncTestClient(t)
+	local := t.TempDir()
+	if err := os.WriteFile(filepath.Join(local, "file"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	c.rsync = func(_ context.Context, args []string, stdout, _ io.Writer) error {
+		calls++
+		if !containsArg(args, "--itemize-changes") || !containsArg(args, "--dry-run") {
+			t.Fatalf("preflight args missing read-only gates: %v", args)
+		}
+		_, _ = io.WriteString(stdout, ">f.st...... file\n")
+		return nil
+	}
+	_, err := c.Sync(t.Context(), SyncOptions{
+		Host: "dev", Direction: "push", Local: local, Remote: "dst", ConflictPolicy: "fail",
+	})
+	var env *proto.ErrorEnvelope
+	if err == nil || !errors.As(err, &env) || env.Code != proto.CodeInvalidRequest {
+		t.Fatalf("conflict fail error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("mutating rsync ran after conflict preflight: calls=%d", calls)
+	}
+}
+
+func TestSyncConflictFailAllowsOnlyNewPathsThenRunsTransfer(t *testing.T) {
+	c := syncTestClient(t)
+	local := t.TempDir()
+	if err := os.WriteFile(filepath.Join(local, "file"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	c.rsync = func(_ context.Context, args []string, stdout, _ io.Writer) error {
+		calls++
+		if calls == 1 {
+			if !containsArg(args, "--itemize-changes") || !containsArg(args, "--dry-run") {
+				t.Fatalf("preflight args missing read-only gates: %v", args)
+			}
+			_, _ = io.WriteString(stdout, ">f+++++++++ file\n")
+			return nil
+		}
+		if containsArg(args, "--itemize-changes") {
+			t.Fatalf("mutating transfer unexpectedly retained preflight args: %v", args)
+		}
+		return nil
+	}
+	if _, err := c.Sync(t.Context(), SyncOptions{
+		Host: "dev", Direction: "push", Local: local, Remote: "dst", ConflictPolicy: "fail",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d, want preflight plus transfer", calls)
+	}
+}
+
+func TestSyncConflictFailRefusesTruncatedPreflightPlan(t *testing.T) {
+	c := syncTestClient(t)
+	local := t.TempDir()
+	if err := os.WriteFile(filepath.Join(local, "file"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	c.rsync = func(_ context.Context, _ []string, stdout, _ io.Writer) error {
+		calls++
+		// Hide the conflict beyond the bounded preflight capture. The client must
+		// still fail closed based on the truncation ledger.
+		_, _ = io.WriteString(stdout, strings.Repeat("diagnostic\n", 256))
+		_, _ = io.WriteString(stdout, ">f.st...... file\n")
+		return nil
+	}
+	_, err := c.Sync(t.Context(), SyncOptions{
+		Host: "dev", Direction: "push", Local: local, Remote: "dst", ConflictPolicy: "fail", MaxOutputBytes: 1024,
+	})
+	var env *proto.ErrorEnvelope
+	if err == nil || !errors.As(err, &env) || env.Code != proto.CodeInvalidRequest {
+		t.Fatalf("truncated preflight error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("mutating rsync ran after truncated preflight: calls=%d", calls)
+	}
+}
+
+func TestSyncPlanHasConflicts(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{name: "new file", out: ">f+++++++++ file\n", want: false},
+		{name: "new directory", out: "cd+++++++++ dir/\n", want: false},
+		{name: "delete", out: "*deleting   old\n", want: false},
+		{name: "existing update", out: ">f.st...... file\n", want: true},
+		{name: "diagnostic", out: "sending incremental file list\n", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := syncPlanHasConflicts([]byte(tt.out)); got != tt.want {
+				t.Fatalf("syncPlanHasConflicts(%q)=%v, want %v", tt.out, got, tt.want)
+			}
+		})
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildSyncManifestDeterministicAndSymlinkPolicy(t *testing.T) {
 	d := t.TempDir()
 	if err := os.WriteFile(filepath.Join(d, "a"), []byte("x"), 0o600); err != nil {
