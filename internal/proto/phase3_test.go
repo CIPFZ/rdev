@@ -15,6 +15,7 @@ func TestOperationRegistryIsCompleteAndConservative(t *testing.T) {
 		OpJobStatus, OpJobLogs, OpJobStop, OpJobWait, OpJobRm, OpList, OpCancel,
 		OpStorageStatus, OpStorageGC, OpStorageDoctor,
 		OpStateInspect, OpStateMigrate, OpStateRepair,
+		OpCapabilityProbe,
 	}
 	if got := len(Operations()); got != len(want) {
 		t.Fatalf("registry has %d operations, want %d", got, len(want))

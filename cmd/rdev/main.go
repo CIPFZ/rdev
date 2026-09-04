@@ -123,6 +123,8 @@ func main() {
 		err = cmdHosts(ctx, c, os.Args[2:])
 	case "ping":
 		err = cmdPing(ctx, c, os.Args[2:])
+	case "capability":
+		err = cmdCapability(ctx, c, os.Args[2:])
 	case "version", "-version", "--version":
 		printVersion()
 	case "support":
@@ -160,6 +162,7 @@ func usage() {
 USAGE
   rdev serve                              run as an MCP server (for Claude Code)
   rdev ping    <host>
+  rdev capability <host> [-refresh]
   rdev exec    <host> [-cwd DIR] [-timeout N] -- <argv...>
   rdev job     start  <host> [-cwd DIR] [-label L] -- <argv...>
   rdev job     list   <host> [-limit N]
@@ -867,6 +870,21 @@ func cmdPing(ctx context.Context, c *client.Client, args []string) error {
 		return errors.New("usage: rdev ping <host>")
 	}
 	res, err := c.Ping(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	return printJSON(c, res)
+}
+
+func cmdCapability(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: rdev capability <host> [-refresh]")
+	}
+	fs, err := parseFlags(args[1:], map[string]bool{"refresh": true}, nil)
+	if err != nil {
+		return err
+	}
+	res, err := c.CapabilityProbe(ctx, args[0], fs.bools["refresh"])
 	if err != nil {
 		return err
 	}
