@@ -66,6 +66,10 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.Spec == nil || len(p.Spec.Argv) == 0 {
 		return nil, invalidRequestError("job spec with argv required")
 	}
+	effective, err := enforceJobEnvelope(p, state)
+	if err != nil {
+		return nil, limitExceededError(err.Error())
+	}
 
 	// The jobs directory is shared by multiple agent processes. The directory
 	// creation itself is the uniqueness commit point; Mkdir (rather than
@@ -90,7 +94,7 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 				return err
 			}
 			var err error
-			result, err = startJobTransaction(p, id, dir)
+			result, err = startJobTransaction(p, id, dir, effective)
 			return err
 		})
 		if errors.Is(err, errJobIDCollision) {
@@ -117,7 +121,7 @@ var writeJobMeta = func(path string, v any) error { return writeJSON(path, v) }
 // visible job record is committed until meta.json is atomically published. If
 // any post-Start step fails, the whole process group is killed and reaped before
 // the directory is removed, so metadata failures cannot strand a runnable job.
-func startJobTransaction(p *proto.JobParams, id, dir string) (*proto.JobResult, error) {
+func startJobTransaction(p *proto.JobParams, id, dir string, effective proto.ResourceEnvelope) (*proto.JobResult, error) {
 	cmd, err := buildCmd(p.Spec)
 	if err != nil {
 		os.RemoveAll(dir)
@@ -176,15 +180,17 @@ func startJobTransaction(p *proto.JobParams, id, dir string) (*proto.JobResult, 
 	}
 
 	meta := &jobMeta{
-		SchemaVersion:   statepkg.CurrentSchemaVersion,
-		ID:              id,
-		Label:           p.Label,
-		Argv:            p.Spec.Argv,
-		Cwd:             p.Spec.Cwd,
-		PID:             cmd.Process.Pid,
-		ProcessIdentity: identity,
-		StartedAt:       time.Now().UTC().Format(time.RFC3339Nano),
-		StoragePolicy:   policy.PerJob,
+		SchemaVersion:      statepkg.CurrentSchemaVersion,
+		ID:                 id,
+		Label:              p.Label,
+		Argv:               p.Spec.Argv,
+		Cwd:                p.Spec.Cwd,
+		PID:                cmd.Process.Pid,
+		ProcessIdentity:    identity,
+		StartedAt:          time.Now().UTC().Format(time.RFC3339Nano),
+		StoragePolicy:      policy.PerJob,
+		RequestedResources: resourceOrZero(p.Resources),
+		EffectiveResources: effective,
 	}
 	if err := writeJobMeta(filepath.Join(dir, "meta.json"), meta); err != nil {
 		rbErr := rollbackStartedJob(cmd, dir)
@@ -199,6 +205,13 @@ func startJobTransaction(p *proto.JobParams, id, dir string) (*proto.JobResult, 
 	// supervisor independently writes status.json, so this is only a fast path.
 	go func() { _ = cmd.Wait() }()
 	return &proto.JobResult{Info: metaToInfo(meta, dir)}, nil
+}
+
+func resourceOrZero(r *proto.ResourceEnvelope) proto.ResourceEnvelope {
+	if r == nil {
+		return proto.ResourceEnvelope{}
+	}
+	return *r
 }
 
 func rollbackStartedJob(cmd *exec.Cmd, dir string) error {

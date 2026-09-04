@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -92,6 +93,13 @@ type Client struct {
 	// connection from overwriting the security state of a newer one.
 	nextPublication   uint64
 	latestPublication map[string]uint64
+	capabilities      map[string]capabilityCacheEntry
+}
+
+type capabilityCacheEntry struct {
+	result     *proto.CapabilityResult
+	expiresAt  time.Time
+	generation uint64
 }
 
 func New(lookup AgentLookup) *Client {
@@ -112,6 +120,7 @@ func New(lookup AgentLookup) *Client {
 		security:          make(map[string]ConnectionSecurityStatus),
 		dialing:           make(map[string]*sync.Mutex),
 		latestPublication: make(map[string]uint64),
+		capabilities:      make(map[string]capabilityCacheEntry),
 	}
 	c.Hosts.SetHostChangeHook(c.invalidateHost)
 	c.Secrets.SetRedactionHook(c.Hosts.RecordRedactionHit)
@@ -119,6 +128,9 @@ func New(lookup AgentLookup) *Client {
 }
 
 func (c *Client) invalidateHost(name string, generation uint64) {
+	c.mu.Lock()
+	delete(c.capabilities, name)
+	c.mu.Unlock()
 	detached := c.disconnectWithStatus(name, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: generation})
 	if resolved, err := c.Hosts.Resolve(name); err == nil {
 		c.Secrets.DeleteStaleHost(secrets.Scope(resolved.Scope), secretHostIdentity(resolved))
@@ -903,6 +915,7 @@ type JobStartOptions struct {
 	Env        map[string]string
 	LoginShell *bool
 	Label      string
+	Resources  *proto.ResourceEnvelope
 }
 
 // JobStart launches a job that outlives the connection.
@@ -917,7 +930,7 @@ func (c *Client) JobStart(ctx context.Context, opts JobStartOptions) (*proto.Job
 		}
 		return &builtRequest{Request: &proto.Request{
 			Op:  proto.OpJobStart,
-			Job: &proto.JobParams{Spec: params, Label: opts.Label},
+			Job: &proto.JobParams{Spec: params, Label: opts.Label, Resources: opts.Resources},
 		}}, nil
 	})
 	if err != nil {
@@ -1702,6 +1715,21 @@ func (c *Client) Ping(ctx context.Context, host string) (*proto.PingResult, erro
 // execution profile. The result is intentionally read-only; callers can use
 // it to decide whether a requested policy is supported before starting work.
 func (c *Client) CapabilityProbe(ctx context.Context, host string, refresh bool) (*proto.CapabilityResult, error) {
+	resolved, resolveErr := c.Hosts.Resolve(host)
+	if resolveErr != nil {
+		return nil, c.redactErr(resolveErr)
+	}
+	if !refresh {
+		c.mu.Lock()
+		entry, ok := c.capabilities[host]
+		if ok && entry.generation == resolved.Generation && time.Now().Before(entry.expiresAt) {
+			cached := cloneCapability(entry.result)
+			c.mu.Unlock()
+			return cached, nil
+		}
+		delete(c.capabilities, host)
+		c.mu.Unlock()
+	}
 	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpCapabilityProbe, Capability: &proto.CapabilityParams{Refresh: refresh}})
 	if err != nil {
 		return nil, c.redactErr(err)
@@ -1709,7 +1737,26 @@ func (c *Client) CapabilityProbe(ctx context.Context, host string, refresh bool)
 	if resp.Capability == nil {
 		return nil, missingResultError(resp)
 	}
-	return resp.Capability, nil
+	result := cloneCapability(resp.Capability)
+	c.mu.Lock()
+	if c.capabilities == nil {
+		c.capabilities = make(map[string]capabilityCacheEntry)
+	}
+	c.capabilities[host] = capabilityCacheEntry{result: cloneCapability(result), generation: resolved.Generation, expiresAt: time.Now().Add(30 * time.Second)}
+	c.mu.Unlock()
+	return result, nil
+}
+
+func cloneCapability(in *proto.CapabilityResult) *proto.CapabilityResult {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Profile != nil {
+		p := *in.Profile
+		out.Profile = &p
+	}
+	return &out
 }
 
 // JobRmOptions selects jobs to delete. Either ID, or a filtered sweep.

@@ -125,6 +125,8 @@ func main() {
 		err = cmdPing(ctx, c, os.Args[2:])
 	case "capability":
 		err = cmdCapability(ctx, c, os.Args[2:])
+	case "env":
+		err = cmdEnv(ctx, c, os.Args[2:])
 	case "version", "-version", "--version":
 		printVersion()
 	case "support":
@@ -163,6 +165,7 @@ USAGE
   rdev serve                              run as an MCP server (for Claude Code)
   rdev ping    <host>
   rdev capability <host> [-refresh]
+  rdev env inspect <host> [-refresh]
   rdev exec    <host> [-cwd DIR] [-timeout N] -- <argv...>
   rdev job     start  <host> [-cwd DIR] [-label L] -- <argv...>
   rdev job     list   <host> [-limit N]
@@ -394,6 +397,10 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		}
 		opts := client.JobStartOptions{
 			Host: fs.pos[0], Argv: argv, Cwd: fs.str("cwd"), Label: fs.str("label"),
+		}
+		resources := &proto.ResourceEnvelope{FDs: fs.num("fds"), WallTimeoutSec: fs.num("wall-timeout"), JobCount: fs.num("job-count")}
+		if resources.FDs != 0 || resources.WallTimeoutSec != 0 || resources.JobCount != 0 {
+			opts.Resources = resources
 		}
 		if fs.bools["no-login"] {
 			no := false
@@ -885,6 +892,21 @@ func cmdCapability(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	res, err := c.CapabilityProbe(ctx, args[0], fs.bools["refresh"])
+	if err != nil {
+		return err
+	}
+	return printJSON(c, res)
+}
+
+func cmdEnv(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) == 0 || args[0] != "inspect" || len(args) < 2 {
+		return errors.New("usage: rdev env inspect <host> [-refresh]")
+	}
+	fs, err := parseFlags(args[2:], map[string]bool{"refresh": true}, nil)
+	if err != nil {
+		return err
+	}
+	res, err := c.CapabilityProbe(ctx, args[1], fs.bools["refresh"])
 	if err != nil {
 		return err
 	}

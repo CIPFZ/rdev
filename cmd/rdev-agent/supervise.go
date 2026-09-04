@@ -91,6 +91,16 @@ func runSupervisor(jobDir string, argv []string) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	var committed jobMeta
+	_ = readJSON(filepath.Join(jobDir, "meta.json"), &committed)
+	resources := committed.EffectiveResources
+	if resources.FDs > 0 {
+		lim := &syscall.Rlimit{Cur: uint64(resources.FDs), Max: uint64(resources.FDs)}
+		if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, lim); err != nil {
+			_ = writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{"exit_code": -1, "resource_limit": "fd", "ended_at": time.Now().UTC().Format(time.RFC3339)})
+			os.Exit(125)
+		}
+	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = nil
@@ -163,7 +173,22 @@ func runSupervisor(jobDir string, argv []string) {
 			}
 		}()
 	}
-	err = cmd.Wait()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	resourceLimit := ""
+	if resources.WallTimeoutSec > 0 {
+		timer := time.NewTimer(time.Duration(resources.WallTimeoutSec) * time.Second)
+		select {
+		case err = <-waitDone:
+			timer.Stop()
+		case <-timer.C:
+			resourceLimit = "wall_timeout"
+			_ = cmd.Process.Kill()
+			err = <-waitDone
+		}
+	} else {
+		err = <-waitDone
+	}
 	close(stopLimit)
 	close(stopLedger)
 	_ = so.Flush(filepath.Join(jobDir, "stdout"))
@@ -188,10 +213,11 @@ func runSupervisor(jobDir string, argv []string) {
 			return nil
 		}
 		return writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
-			"exit_code":     code,
-			"ended_at":      time.Now().UTC().Format(time.RFC3339),
-			"stdout_ledger": ledgerProto(so.Ledger()),
-			"stderr_ledger": ledgerProto(se.Ledger()),
+			"exit_code":      code,
+			"ended_at":       time.Now().UTC().Format(time.RFC3339),
+			"resource_limit": resourceLimit,
+			"stdout_ledger":  ledgerProto(so.Ledger()),
+			"stderr_ledger":  ledgerProto(se.Ledger()),
 		})
 	}
 	if err := withJobLock(jobDir, writeStatus); err != nil {
