@@ -47,7 +47,7 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -71,6 +71,7 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 
 	res := &proto.JobResult{LogSize: info.Size()}
 	var st struct {
+		ExitCode     *int            `json:"exit_code"`
 		StdoutLedger proto.LogLedger `json:"stdout_ledger"`
 		StderrLedger proto.LogLedger `json:"stderr_ledger"`
 	}
@@ -82,6 +83,28 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		res.LogLedger = st.StdoutLedger
 	} else {
 		res.LogLedger = st.StderrLedger
+	}
+	// The supervisor flushes the bounded sink and then publishes status.json
+	// while holding the job lock. If this call observed a terminal status while
+	// the finalization write was still in flight, the descriptor opened above may
+	// refer to the pre-flush inode. Reacquire the same lock and reopen the stream
+	// so exited jobs never report an empty/stale log merely due to an atomic
+	// rename race. Running jobs keep the non-blocking tail behavior.
+	if st.ExitCode != nil {
+		if err := withJobLock(dir, func() error {
+			if err := f.Close(); err != nil {
+				return err
+			}
+			f, err = os.Open(path)
+			if err != nil {
+				return err
+			}
+			info, err = f.Stat()
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		res.LogSize = info.Size()
 	}
 
 	tail := p.TailLines
