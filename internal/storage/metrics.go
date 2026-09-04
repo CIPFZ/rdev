@@ -17,6 +17,7 @@ import (
 const (
 	MetricsSchemaVersion = 1
 	MaxPressureEvents    = 32
+	MaxMetricsBytes      = 1 << 20
 )
 
 type LogMetrics struct {
@@ -77,6 +78,11 @@ func newMetricsSnapshot() MetricsSnapshot {
 	return MetricsSnapshot{SchemaVersion: MetricsSchemaVersion, GC: GCMetrics{Runs: map[string]uint64{"success": 0, "error": 0, "dry_run": 0}, FailureReasons: map[string]uint64{"io": 0, "unsafe": 0, "budget": 0}}}
 }
 
+// NewMetricsSnapshot returns a schema-valid empty snapshot with every fixed
+// counter vocabulary initialized. It is useful to callers that expose a
+// metrics response before the first GC has been persisted.
+func NewMetricsSnapshot() MetricsSnapshot { return newMetricsSnapshot() }
+
 func (o *Observer) scope(name string) *ScopeMetrics {
 	if name == "local" {
 		return &o.snap.Local
@@ -87,6 +93,12 @@ func (o *Observer) scope(name string) *ScopeMetrics {
 	return nil
 }
 
+func (o *Observer) ensureLocked() {
+	if o.snap.SchemaVersion == 0 {
+		o.snap = newMetricsSnapshot()
+	}
+}
+
 // ObserveUsage records the latest usage and emits an event only on a pressure
 // state transition. Unknown scope names are ignored to preserve cardinality.
 func (o *Observer) ObserveUsage(scope string, used, free, budget int64, pressure bool) {
@@ -95,6 +107,7 @@ func (o *Observer) ObserveUsage(scope string, used, free, budget int64, pressure
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.ensureLocked()
 	s := o.scope(scope)
 	if s == nil {
 		return
@@ -104,7 +117,11 @@ func (o *Observer) ObserveUsage(scope string, used, free, budget int64, pressure
 		if pressure {
 			state = "entered"
 		}
-		e := PressureEvent{Scope: scope, State: state, At: o.now().Format(time.RFC3339Nano)}
+		now := time.Now().UTC()
+		if o.now != nil {
+			now = o.now()
+		}
+		e := PressureEvent{Scope: scope, State: state, At: now.Format(time.RFC3339Nano)}
 		if len(o.events) == MaxPressureEvents {
 			copy(o.events, o.events[1:])
 			o.events[len(o.events)-1] = e
@@ -126,6 +143,7 @@ func (o *Observer) ObserveLedger(l Ledger) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.ensureLocked()
 	add := func(dst *uint64, n int64) {
 		if n > 0 {
 			*dst += uint64(n)
@@ -142,6 +160,7 @@ func (o *Observer) ObserveGC(scanned, removed int, freed int64, errs int) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.ensureLocked()
 	if scanned > 0 {
 		o.snap.GC.ScannedJobs += uint64(scanned)
 	}
@@ -164,6 +183,7 @@ func (o *Observer) ObserveGCRun(result string, duration time.Duration, failureRe
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.ensureLocked()
 	if o.snap.GC.Runs == nil {
 		o.snap.GC.Runs = map[string]uint64{"success": 0, "error": 0, "dry_run": 0}
 	}
@@ -187,6 +207,7 @@ func (o *Observer) ObserveQuotaHit() {
 		return
 	}
 	o.mu.Lock()
+	o.ensureLocked()
 	o.snap.QuotaHits++
 	o.mu.Unlock()
 }
@@ -197,6 +218,7 @@ func (o *Observer) Snapshot() MetricsSnapshot {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.ensureLocked()
 	out := o.snap
 	out.GC.Runs = cloneCounters(o.snap.GC.Runs)
 	out.GC.FailureReasons = cloneCounters(o.snap.GC.FailureReasons)
@@ -219,6 +241,19 @@ func cloneCounters(in map[string]uint64) map[string]uint64 {
 // fail closed to an empty snapshot; the caller may choose to report the error.
 func LoadMetrics(path string) (MetricsSnapshot, error) {
 	zero := newMetricsSnapshot()
+	st, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return zero, nil
+	}
+	if err != nil {
+		return zero, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		return zero, errors.New("storage metrics is not a regular file")
+	}
+	if st.Size() > MaxMetricsBytes {
+		return zero, errors.New("storage metrics exceeds size limit")
+	}
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return zero, nil
@@ -236,12 +271,8 @@ func LoadMetrics(path string) (MetricsSnapshot, error) {
 	if out.SchemaVersion != MetricsSchemaVersion || len(out.PressureEvents) > MaxPressureEvents {
 		return zero, errors.New("invalid storage metrics schema")
 	}
-	defaults := newMetricsSnapshot()
-	if out.GC.Runs == nil {
-		out.GC.Runs = defaults.GC.Runs
-	}
-	if out.GC.FailureReasons == nil {
-		out.GC.FailureReasons = defaults.GC.FailureReasons
+	if err := normalizeMetrics(&out); err != nil {
+		return zero, err
 	}
 	return out, nil
 }
@@ -253,6 +284,9 @@ func SaveMetrics(path string, snapshot MetricsSnapshot) error {
 	if snapshot.SchemaVersion != MetricsSchemaVersion || len(snapshot.PressureEvents) > MaxPressureEvents {
 		return errors.New("invalid storage metrics schema")
 	}
+	if err := normalizeMetrics(&snapshot); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -263,9 +297,6 @@ func SaveMetrics(path string, snapshot MetricsSnapshot) error {
 	// Create a fresh, exclusive temporary file.  A fixed `path+.tmp` would
 	// follow a pre-existing symlink and could overwrite an arbitrary file; it
 	// would also let concurrent writers trample one another's temporary data.
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	tmpFile, err := os.CreateTemp(filepath.Dir(path), ".storage-metrics-*.tmp")
 	if err != nil {
 		return err
@@ -291,6 +322,65 @@ func SaveMetrics(path string, snapshot MetricsSnapshot) error {
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return err
+	}
+	return nil
+}
+
+// normalizeMetrics rejects persisted values that could turn fixed telemetry
+// vocabularies into attacker-controlled labels. Missing fields remain
+// backward-compatible and are populated with their zero-valued fixed keys.
+func normalizeMetrics(s *MetricsSnapshot) error {
+	defaults := newMetricsSnapshot()
+	if s.GC.Runs == nil {
+		s.GC.Runs = defaults.GC.Runs
+	} else {
+		for key := range s.GC.Runs {
+			if key != "success" && key != "error" && key != "dry_run" {
+				return errors.New("invalid storage metrics result label")
+			}
+		}
+		for key := range defaults.GC.Runs {
+			if _, ok := s.GC.Runs[key]; !ok {
+				s.GC.Runs[key] = 0
+			}
+		}
+	}
+	if s.GC.FailureReasons == nil {
+		s.GC.FailureReasons = defaults.GC.FailureReasons
+	} else {
+		for key := range s.GC.FailureReasons {
+			if key != "io" && key != "unsafe" && key != "budget" {
+				return errors.New("invalid storage metrics failure label")
+			}
+		}
+		for key := range defaults.GC.FailureReasons {
+			if _, ok := s.GC.FailureReasons[key]; !ok {
+				s.GC.FailureReasons[key] = 0
+			}
+		}
+	}
+	for _, scope := range []*ScopeMetrics{&s.Local, &s.RemoteState} {
+		if scope.UsedBytes < 0 || scope.BudgetBytes < 0 || scope.FreeBytes < -1 {
+			return errors.New("invalid storage metrics scope values")
+		}
+		if scope.PressureLevel == "" {
+			if scope.Pressure {
+				scope.PressureLevel = "high"
+			} else {
+				scope.PressureLevel = "normal"
+			}
+		}
+		if scope.PressureLevel != "normal" && scope.PressureLevel != "high" {
+			return errors.New("invalid storage metrics pressure level")
+		}
+	}
+	for _, event := range s.PressureEvents {
+		if (event.Scope != "local" && event.Scope != "remote_state") || (event.State != "entered" && event.State != "cleared") {
+			return errors.New("invalid storage metrics pressure event")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, event.At); err != nil {
+			return errors.New("invalid storage metrics pressure event timestamp")
+		}
 	}
 	return nil
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,5 +173,45 @@ func TestStorageRejectsUnsafeScopeAndBounds(t *testing.T) {
 	}
 	if _, err := doStorage(proto.OpStorageGC, &proto.StorageParams{MaxDeleteBytes: storage.HardMaxBytes + 1}, state); err == nil {
 		t.Fatal("oversized budget accepted")
+	}
+}
+
+func TestStorageMetricsConcurrentUpdatesAndLedgerAccounting(t *testing.T) {
+	state := t.TempDir()
+	root := filepath.Join(state, "jobs")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "job")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ledger := map[string]any{
+		"stdout_ledger": map[string]any{"original_bytes": int64(10), "retained_bytes": int64(6), "dropped_bytes": int64(4)},
+		"stderr_ledger": map[string]any{"original_bytes": int64(5), "retained_bytes": int64(5)},
+	}
+	b, _ := json.Marshal(ledger)
+	if err := os.WriteFile(filepath.Join(dir, "ledger.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scope := storage.Default().RemoteState
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			updateStorageMetrics(filepath.Join(state, storageReportMetrics), state, "remote_state", scope, &GCReport{Scanned: 1}, time.Millisecond)
+		}()
+	}
+	wg.Wait()
+	loaded, err := storage.LoadMetrics(filepath.Join(state, storageReportMetrics))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.GC.Runs["success"] != 20 || loaded.GC.ScannedJobs != 20 {
+		t.Fatalf("concurrent updates lost counters: %+v", loaded.GC)
+	}
+	if loaded.Logs.OriginalBytes != 15 || loaded.Logs.RetainedBytes != 11 || loaded.Logs.DroppedBytes != 4 {
+		t.Fatalf("ledger accounting=%+v", loaded.Logs)
 	}
 }

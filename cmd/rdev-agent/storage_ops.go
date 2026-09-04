@@ -6,14 +6,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/storage"
+	"golang.org/x/sys/unix"
 )
 
 // External storage reports intentionally use stable scope-relative labels.
@@ -22,6 +25,46 @@ import (
 const storageReportRoot = "jobs"
 const storageReportPolicy = "storage-policy.json"
 const storageReportMetrics = "storage-metrics.json"
+
+// A metrics update is a load-modify-save transaction.  GC requests may run in
+// parallel inside one agent process, so serialize the transaction to avoid
+// losing counters or pressure transitions to a stale writer.
+var storageMetricsUpdateMu sync.Mutex
+
+func tryStorageMetricsLock(state string, fn func()) bool {
+	if err := secureDir(state, 0o700); err != nil {
+		return false
+	}
+	path := filepath.Join(state, ".storage-metrics.lock")
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return false
+	}
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = unix.Close(fd)
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+		return false
+	}
+	if st.Mode().Perm() != 0o600 && f.Chmod(0o600) != nil {
+		return false
+	}
+	// Metrics are best effort and must never delay GC behind another agent.
+	// Skipping one contested sample is preferable to blocking a user operation.
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return false
+		}
+		return false
+	}
+	defer unix.Flock(fd, unix.LOCK_UN)
+	fn()
+	return true
+}
 
 func storageScope(p *proto.StorageParams) (storage.ScopePolicy, string, error) {
 	if p == nil {
@@ -193,11 +236,22 @@ func storageGC(p *proto.StorageParams, state string) (*proto.StorageGCReport, er
 	if err != nil {
 		return nil, err
 	}
+	// runStorageGC plans from a pre-deletion usage snapshot. Refresh the report
+	// after execution so both the response and persisted gauges describe the
+	// post-GC state rather than falsely reporting that pressure is still active.
+	if !p.DryRun {
+		root := filepath.Join(state, storageReportRoot)
+		if used, sizeErr := safeTreeSize(root); sizeErr == nil {
+			gc.UsedBytes = used
+		}
+		gc.FreeBytes = filesystemFreeBytes(root)
+		gc.Pressure, gc.TargetBytes = gcPressure(scope, gc.UsedBytes, gc.FreeBytes)
+	}
 	var metrics *proto.StorageMetrics
 	if p.DryRun {
 		metrics = storageMetricsSnapshot(state, policy, name, gc.UsedBytes, gc.FreeBytes, gc.Pressure)
 	} else {
-		metrics = updateStorageMetrics(filepath.Join(state, storageReportMetrics), name, scope, gc, time.Since(started))
+		metrics = updateStorageMetrics(filepath.Join(state, storageReportMetrics), state, name, scope, gc, time.Since(started))
 	}
 	out := storageGCProto(gc)
 	out.Metrics = metrics
@@ -233,6 +287,14 @@ func storageMetricsSnapshot(state string, policy storage.Policy, scopeName strin
 	} else {
 		selected.PressureLevel = "normal"
 	}
+	snap.Logs = storageLedgerMetrics(state)
+	return protoStorageMetrics(snap)
+}
+
+// storageLedgerMetrics derives current log totals from authoritative ledgers.
+// It accepts only owner-safe job directories and ledger files and never emits
+// a job identifier or path as a metric dimension.
+func storageLedgerMetrics(state string) storage.LogMetrics {
 	var logs storage.LogMetrics
 	root := filepath.Join(state, storageReportRoot)
 	if entries, err := os.ReadDir(root); err == nil {
@@ -240,7 +302,12 @@ func storageMetricsSnapshot(state string, policy storage.Policy, scopeName strin
 			if !e.IsDir() || validateJobID(e.Name()) != nil {
 				continue
 			}
-			path := filepath.Join(root, e.Name(), "ledger.json")
+			dir := filepath.Join(root, e.Name())
+			dirInfo, err := os.Lstat(dir)
+			if err != nil || dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() || !pathOwnedByCurrentUser(dirInfo) {
+				continue
+			}
+			path := filepath.Join(dir, "ledger.json")
 			st, err := os.Lstat(path)
 			if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
 				continue
@@ -267,24 +334,39 @@ func storageMetricsSnapshot(state string, policy storage.Policy, scopeName strin
 			}
 		}
 	}
-	snap.Logs = logs
-	return protoStorageMetrics(snap)
+	return logs
 }
 
 func loadStorageMetricsReadOnly(state string) storage.MetricsSnapshot {
 	path := filepath.Join(state, storageReportMetrics)
 	if st, err := os.Lstat(path); err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
-		return storage.MetricsSnapshot{SchemaVersion: storage.MetricsSchemaVersion}
+		return storage.NewMetricsSnapshot()
 	}
 	snap, err := storage.LoadMetrics(path)
 	if err != nil {
-		return storage.MetricsSnapshot{SchemaVersion: storage.MetricsSchemaVersion}
+		return storage.NewMetricsSnapshot()
 	}
 	return snap
 }
 
-func updateStorageMetrics(path, scopeName string, scope storage.ScopePolicy, report *GCReport, duration time.Duration) *proto.StorageMetrics {
-	snap := storage.MetricsSnapshot{SchemaVersion: storage.MetricsSchemaVersion}
+func updateStorageMetrics(path, state, scopeName string, scope storage.ScopePolicy, report *GCReport, duration time.Duration) *proto.StorageMetrics {
+	storageMetricsUpdateMu.Lock()
+	defer storageMetricsUpdateMu.Unlock()
+	var out *proto.StorageMetrics
+	if !tryStorageMetricsLock(state, func() {
+		out = updateStorageMetricsLocked(path, state, scopeName, scope, report, duration)
+	}) {
+		// Another agent owns the short telemetry transaction (or the metrics
+		// file is unavailable). Do not block/fail the storage operation; return
+		// the last readable snapshot and skip this best-effort sample.
+		return protoStorageMetrics(loadStorageMetricsReadOnly(state))
+	}
+	return out
+}
+
+func updateStorageMetricsLocked(path, state, scopeName string, scope storage.ScopePolicy, report *GCReport, duration time.Duration) *proto.StorageMetrics {
+
+	snap := storage.NewMetricsSnapshot()
 	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink == 0 && st.Mode().IsRegular() && pathOwnedByCurrentUser(st) {
 		if loaded, loadErr := storage.LoadMetrics(path); loadErr == nil {
 			snap = loaded
@@ -293,6 +375,7 @@ func updateStorageMetrics(path, scopeName string, scope storage.ScopePolicy, rep
 	if report == nil {
 		return protoStorageMetrics(snap)
 	}
+	snap.Logs = storageLedgerMetrics(state)
 	previous := false
 	if scopeName == "local" {
 		previous = snap.Local.Pressure
