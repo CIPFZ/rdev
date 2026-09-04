@@ -17,9 +17,15 @@ import (
 	"sync"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	"golang.org/x/sys/unix"
 )
 
 const maxTransferBytes int64 = 1 << 30
+
+// Keep each request bounded even when a caller declares a large transfer.
+// This protects the JSON/base64 decoder and the staging writer from a single
+// request consuming the entire transfer quota.
+const maxTransferChunkBytes int64 = 1 << 20
 
 var transferLocks sync.Map
 
@@ -57,6 +63,9 @@ func doTransferChunk(p *proto.WriteParams) (*proto.WriteResult, error) {
 	if int64(len(data)) > p.TotalSize-p.Offset {
 		return nil, invalidRequestError("transfer chunk exceeds declared size")
 	}
+	if int64(len(data)) > maxTransferChunkBytes {
+		return nil, limitExceededError("transfer chunk exceeds limit")
+	}
 	path := expandHome(p.Path)
 	if !filepath.IsAbs(path) {
 		path, _ = filepath.Abs(path)
@@ -76,23 +85,37 @@ func doTransferChunk(p *proto.WriteParams) (*proto.WriteResult, error) {
 	mu := transferLock(path)
 	mu.Lock()
 	defer mu.Unlock()
+	flock, err := acquireTransferLock(base + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = unix.Flock(int(flock.Fd()), unix.LOCK_UN)
+		_ = flock.Close()
+	}()
 	meta := transferMeta{Path: path, TotalSize: p.TotalSize, Digest: p.Digest, Mode: p.Mode}
 	resumed := false
-	if b, err := os.ReadFile(metaPath); err == nil {
-		if json.Unmarshal(b, &meta) != nil || meta.Path != path || meta.TotalSize != p.TotalSize || meta.Digest != p.Digest {
+	b, metaErr := readTransferMeta(metaPath)
+	if metaErr == nil {
+		if json.Unmarshal(b, &meta) != nil || meta.Path != path || meta.TotalSize != p.TotalSize || meta.Digest != p.Digest || meta.Mode != p.Mode {
 			return nil, invalidRequestError("transfer metadata conflict")
 		}
 		resumed = true
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	} else if !errors.Is(metaErr, os.ErrNotExist) {
+		return nil, invalidRequestError("transfer metadata is not a private regular file")
 	}
 	if p.Offset == 0 && !resumed {
 		if err := writeTransferMeta(metaPath, meta); err != nil {
 			return nil, err
 		}
 	}
-	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := openTransferArtifact(part, unix.O_WRONLY|unix.O_CREAT)
 	if err != nil {
+		if errors.Is(err, os.ErrExist) || !errors.Is(err, os.ErrNotExist) {
+			// Keep the protocol error stable and avoid exposing a platform-specific
+			// ELOOP/path detail when an artifact is replaced by a symlink.
+			return nil, invalidRequestError("transfer staging is not a private regular file")
+		}
 		return nil, err
 	}
 	st, err := f.Stat()
@@ -166,7 +189,90 @@ func transferLock(path string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// acquireTransferLock extends the in-process mutex with an inter-process lock.
+// A transfer ID can be retried by two agent processes after a reconnect; both
+// must not append to the same staging inode concurrently. O_NOFOLLOW keeps a
+// pre-planted lock symlink from redirecting the open outside the destination.
+func acquireTransferLock(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("failed to create transfer lock")
+	}
+	st, statErr := f.Stat()
+	if statErr != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
+		_ = f.Close()
+		if statErr != nil {
+			return nil, statErr
+		}
+		return nil, errors.New("transfer lock is not a private regular file")
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 func decodeTransferB64(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
+
+func validateTransferArtifact(path string) error {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
+		return errors.New("transfer artifact is not private regular file")
+	}
+	return nil
+}
+
+// openTransferArtifact opens a staging/metadata artifact without following a
+// symlink. The lstat-before-open check alone is insufficient because another
+// process can swap the inode between those operations.
+func openTransferArtifact(path string, flags int) (*os.File, error) {
+	fd, err := unix.Open(path, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("failed to open transfer artifact")
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
+		_ = f.Close()
+		return nil, errors.New("transfer artifact is not a private regular file")
+	}
+	return f, nil
+}
+
+func readTransferMeta(path string) ([]byte, error) {
+	f, err := openTransferArtifact(path, unix.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Metadata is generated by us and should remain tiny. Bound the read so a
+	// hostile regular file cannot turn a retry into an unbounded allocation.
+	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == 64<<10 {
+		return nil, errors.New("transfer metadata too large")
+	}
+	return b, nil
+}
 
 func writeTransferMeta(path string, m transferMeta) error {
 	b, err := json.Marshal(m)
@@ -194,7 +300,16 @@ func writeTransferMeta(path string, m transferMeta) error {
 	if err = os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-	return nil
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	closeErr := d.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 func verifyTransferDigest(path string, size int64, want string) error {

@@ -57,3 +57,49 @@ func TestTransferRejectsDigestMismatchWithoutPublishing(t *testing.T) {
 		t.Fatalf("destination changed: %q", got)
 	}
 }
+
+func TestTransferRejectsSymlinkedStagingArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out")
+	id := "op_0123456789abcdef"
+	base := filepath.Join(dir, ".rdev-transfer-"+id)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("must remain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, base+".part"); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("payload"))
+	_, err := doTransferChunk(&proto.WriteParams{Path: target, TransferID: id, Offset: 0, TotalSize: 7, Digest: hex.EncodeToString(sum[:]), Content: "payload", Final: true})
+	if err == nil {
+		t.Fatal("symlinked staging artifact accepted")
+	}
+	got, readErr := os.ReadFile(outside)
+	if readErr != nil || string(got) != "must remain" {
+		t.Fatalf("symlink target modified: %q, err=%v", got, readErr)
+	}
+}
+
+func TestTransferRejectsSymlinkedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out")
+	id := "op_0123456789abcdef"
+	base := filepath.Join(dir, ".rdev-transfer-"+id)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte(`{"path":"/tmp/secret"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, base+".json"); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("payload"))
+	_, err := doTransferChunk(&proto.WriteParams{Path: target, TransferID: id, Offset: 0, TotalSize: 7, Digest: hex.EncodeToString(sum[:]), Content: "payload", Final: true})
+	if err == nil {
+		t.Fatal("symlinked metadata accepted")
+	}
+	got, readErr := os.ReadFile(outside)
+	if readErr != nil || string(got) != `{"path":"/tmp/secret"}` {
+		t.Fatalf("symlink target modified: %q, err=%v", got, readErr)
+	}
+}

@@ -1416,7 +1416,7 @@ func (c *Client) TransferFile(ctx context.Context, opts TransferFileOptions) (*p
 	const chunk = 48 << 10
 	// Probe the managed staging object. This is read-only with respect to the
 	// destination and lets retries resume from the server's committed prefix.
-	probe, callErr := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: opts.Remote, ContentB64: true, TransferID: id, Offset: 0, TotalSize: st.Size(), Digest: digest, Final: false}})
+	probe, callErr := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: opts.Remote, ContentB64: true, Mode: opts.Mode, TransferID: id, Offset: 0, TotalSize: st.Size(), Digest: digest, Final: false}})
 	if callErr != nil {
 		return nil, c.redactErr(callErr)
 	}
