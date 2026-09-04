@@ -5,6 +5,7 @@ package main
 // sole authority for scope and all mutations reuse the owner/lock-safe GC.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +44,35 @@ func loadStoragePolicy(state string) (storage.Policy, string, error) {
 		return storage.Policy{}, path, err
 	}
 	return p, path, nil
+}
+
+// readMetaReadOnly validates ownership/object type without repairing file
+// permissions. readMeta uses secureRecordFile, which chmods legacy records;
+// status and doctor must not mutate those records while inspecting them.
+func readMetaReadOnly(dir string) (*jobMeta, error) {
+	path := filepath.Join(dir, "meta.json")
+	st, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+		return nil, fmt.Errorf("%s is not an owned regular file", path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m jobMeta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	if m.ID == "" {
+		return nil, processStateError("invalid job metadata")
+	}
+	if err := validateJobID(m.ID); err != nil || m.ID != filepath.Base(dir) {
+		return nil, processStateError("invalid job metadata id")
+	}
+	return &m, nil
 }
 
 func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, error) {
@@ -90,7 +120,7 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 		if e1 != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
 			continue
 		}
-		meta, e1 := readMeta(dir)
+		meta, e1 := readMetaReadOnly(dir)
 		if e1 != nil {
 			continue
 		}
@@ -122,7 +152,34 @@ func storageGC(p *proto.StorageParams, state string) (*proto.StorageGCReport, er
 	} else {
 		scope = policy.Local
 	}
+	// A caller may further lower a configured cleanup budget, but may never
+	// widen it through the remote API. Zero means "use the persisted/default
+	// budget", matching the package GC options convention.
+	cleanup := policy.Cleanup
+	if cleanup.MaxScanJobs <= 0 {
+		cleanup.MaxScanJobs = defaultGCMaxScanJobs
+	}
+	if cleanup.MaxDeleteJobs <= 0 {
+		cleanup.MaxDeleteJobs = defaultGCMaxDeleteJobs
+	}
+	if cleanup.MaxDeleteBytes <= 0 {
+		cleanup.MaxDeleteBytes = defaultGCMaxDeleteBytes
+	}
+	if (p.MaxScanJobs > 0 && p.MaxScanJobs > cleanup.MaxScanJobs) ||
+		(p.MaxDeleteJobs > 0 && p.MaxDeleteJobs > cleanup.MaxDeleteJobs) ||
+		(p.MaxDeleteBytes > 0 && p.MaxDeleteBytes > cleanup.MaxDeleteBytes) {
+		return nil, limitExceededError("storage gc bounds exceed the configured cleanup policy")
+	}
 	opts := GCOptions{DryRun: p.DryRun, MaxScanJobs: p.MaxScanJobs, MaxDeleteJobs: p.MaxDeleteJobs, MaxDeleteBytes: p.MaxDeleteBytes}
+	if opts.MaxScanJobs == 0 {
+		opts.MaxScanJobs = cleanup.MaxScanJobs
+	}
+	if opts.MaxDeleteJobs == 0 {
+		opts.MaxDeleteJobs = cleanup.MaxDeleteJobs
+	}
+	if opts.MaxDeleteBytes == 0 {
+		opts.MaxDeleteBytes = cleanup.MaxDeleteBytes
+	}
 	gc, err := runStorageGC(state, scope, opts)
 	if err != nil {
 		return nil, err
@@ -204,6 +261,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 		if strings.HasPrefix(name, ".rdev-gc-") {
 			st, e1 := os.Lstat(path)
 			if e1 != nil || st.Mode()&os.ModeSymlink != 0 || !pathOwnedByCurrentUser(st) {
+				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "unsafe_gc_tombstone", Severity: "error", Path: name, Message: "GC tombstone is missing, a symlink, or not owned by the current user", Action: "do not remove automatically; inspect and quarantine it manually"})
 				continue
 			}
 			if now.Sub(st.ModTime()) > time.Hour {
@@ -228,7 +286,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 			report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_entry_unsafe", Severity: "error", Path: name, Message: "job entry is not a private owned directory", Action: "quarantine manually; automatic GC will skip it"})
 			continue
 		}
-		if _, e1 := readMeta(path); e1 != nil {
+		if _, e1 := readMetaReadOnly(path); e1 != nil {
 			report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_metadata_invalid", Severity: "warning", Path: name, Message: "job metadata cannot be read", Action: "inspect record; automatic GC will skip it"})
 		}
 	}
@@ -247,7 +305,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 			if now.Sub(st.ModTime()) <= time.Hour {
 				continue
 			}
-			acquired, _ := tryExistingJobLock(filepath.Join(root, strings.TrimSuffix(e.Name(), ".lock")), func() error { return nil })
+			acquired, _ := probeExistingJobLock(filepath.Join(root, strings.TrimSuffix(e.Name(), ".lock")))
 			if acquired {
 				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "stale_job_lock", Severity: "warning", Path: e.Name(), Message: "lock file is old and not held by another process", Action: "it is safe to remove after confirming no concurrent agent"})
 			}
