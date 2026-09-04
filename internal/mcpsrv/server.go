@@ -396,6 +396,23 @@ type JobRmOut struct {
 	FreedBytes   int64    `json:"freed_bytes"`
 }
 
+type StorageStatusIn struct {
+	Host  string `json:"host"`
+	Scope string `json:"scope,omitempty" jsonschema:"local or remote_state; defaults to remote_state"`
+}
+type StorageGCIn struct {
+	Host           string `json:"host"`
+	Scope          string `json:"scope,omitempty"`
+	DryRun         bool   `json:"dry_run,omitempty"`
+	MaxScanJobs    int    `json:"max_scan_jobs,omitempty"`
+	MaxDeleteJobs  int    `json:"max_delete_jobs,omitempty"`
+	MaxDeleteBytes int64  `json:"max_delete_bytes,omitempty"`
+}
+type StorageDoctorIn struct {
+	Host  string `json:"host"`
+	Scope string `json:"scope,omitempty"`
+}
+
 func registerJobs(s *mcp.Server, c *client.Client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "rdev_job_start",
@@ -524,6 +541,27 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 			Removed: res.Removed, Skipped: res.Skipped, Missing: res.Missing,
 			FreedBytes: res.FreedBytes, RemovedCount: len(res.Removed),
 		}, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_storage_status", Description: "Report managed storage usage, budgets, free space, job counts, and pressure state."}, func(ctx context.Context, _ *mcp.CallToolRequest, in StorageStatusIn) (*mcp.CallToolResult, proto.StorageScope, error) {
+		res, err := c.StorageStatus(ctx, in.Host, in.Scope)
+		if err != nil {
+			return nil, proto.StorageScope{}, err
+		}
+		return nil, *res, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_storage_gc", Description: "Run owner-safe bounded storage reclamation. Use dry_run to preview exactly the candidates; limits cap scan, jobs, and bytes."}, func(ctx context.Context, _ *mcp.CallToolRequest, in StorageGCIn) (*mcp.CallToolResult, proto.StorageGCReport, error) {
+		res, err := c.StorageGC(ctx, client.StorageOptions{Host: in.Host, Scope: in.Scope, DryRun: in.DryRun, MaxScanJobs: in.MaxScanJobs, MaxDeleteJobs: in.MaxDeleteJobs, MaxDeleteBytes: in.MaxDeleteBytes})
+		if err != nil {
+			return nil, proto.StorageGCReport{}, err
+		}
+		return nil, *res, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_storage_doctor", Description: "Produce a non-mutating, owner-safe storage diagnosis including policy, permissions, stale tombstones/locks, and free-space findings."}, func(ctx context.Context, _ *mcp.CallToolRequest, in StorageDoctorIn) (*mcp.CallToolResult, proto.StorageDoctorReport, error) {
+		res, err := c.StorageDoctor(ctx, in.Host, in.Scope)
+		if err != nil {
+			return nil, proto.StorageDoctorReport{}, err
+		}
+		return nil, *res, nil
 	})
 }
 

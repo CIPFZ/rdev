@@ -30,19 +30,22 @@ const MinVersion = 2
 
 // Op names carried in Request.Op.
 const (
-	OpPing      = "ping"
-	OpExec      = "exec"
-	OpReadFile  = "read_file"
-	OpWriteFile = "write_file"
-	OpJobStart  = "job_start"
-	OpJobList   = "job_list"
-	OpJobStatus = "job_status"
-	OpJobLogs   = "job_logs"
-	OpJobStop   = "job_stop"
-	OpJobWait   = "job_wait"
-	OpJobRm     = "job_rm"
-	OpList      = "list"
-	OpCancel    = "cancel"
+	OpPing          = "ping"
+	OpExec          = "exec"
+	OpReadFile      = "read_file"
+	OpWriteFile     = "write_file"
+	OpJobStart      = "job_start"
+	OpJobList       = "job_list"
+	OpJobStatus     = "job_status"
+	OpJobLogs       = "job_logs"
+	OpJobStop       = "job_stop"
+	OpJobWait       = "job_wait"
+	OpJobRm         = "job_rm"
+	OpStorageStatus = "storage_status"
+	OpStorageGC     = "storage_gc"
+	OpStorageDoctor = "storage_doctor"
+	OpList          = "list"
+	OpCancel        = "cancel"
 )
 
 // Job states reported by the agent.
@@ -75,14 +78,15 @@ type Request struct {
 	// StreamWindowBytes is the maximum total data-frame payload the agent may
 	// emit before the final frame. Zero disables data frames (accepted/progress/
 	// final still apply). It may only lower the shared hard window.
-	StreamWindowBytes int64         `json:"stream_window_bytes,omitempty"`
-	Hello             *HelloParams  `json:"hello,omitempty"`
-	Cancel            *CancelParams `json:"cancel,omitempty"`
-	Exec              *ExecParams   `json:"exec,omitempty"`
-	Read              *ReadParams   `json:"read,omitempty"`
-	Cat               *WriteParams  `json:"write,omitempty"`
-	Job               *JobParams    `json:"job,omitempty"`
-	List              *ListParams   `json:"list,omitempty"`
+	StreamWindowBytes int64          `json:"stream_window_bytes,omitempty"`
+	Hello             *HelloParams   `json:"hello,omitempty"`
+	Cancel            *CancelParams  `json:"cancel,omitempty"`
+	Exec              *ExecParams    `json:"exec,omitempty"`
+	Read              *ReadParams    `json:"read,omitempty"`
+	Cat               *WriteParams   `json:"write,omitempty"`
+	Job               *JobParams     `json:"job,omitempty"`
+	List              *ListParams    `json:"list,omitempty"`
+	Storage           *StorageParams `json:"storage,omitempty"`
 }
 
 // CancelParams targets one foreground operation. Detached jobs are controlled
@@ -194,6 +198,18 @@ type JobParams struct {
 	Limit int `json:"limit,omitempty"`
 }
 
+// StorageParams controls bounded storage inspection and reclamation. Scope is
+// "remote_state" (the agent's managed state root) or "local" (an alias kept
+// for callers that use local/remote policy terminology). Unknown scopes fail
+// closed; no arbitrary filesystem path is accepted.
+type StorageParams struct {
+	Scope          string `json:"scope,omitempty"`
+	DryRun         bool   `json:"dry_run,omitempty"`
+	MaxScanJobs    int    `json:"max_scan_jobs,omitempty"`
+	MaxDeleteJobs  int    `json:"max_delete_jobs,omitempty"`
+	MaxDeleteBytes int64  `json:"max_delete_bytes,omitempty"`
+}
+
 // Response is one JSON-encoded line read from the agent's stdout.
 type Response struct {
 	ID          string         `json:"id"`
@@ -210,12 +226,13 @@ type Response struct {
 	Data     *DataFrame     `json:"data,omitempty"`
 	Progress *ProgressFrame `json:"progress,omitempty"`
 
-	Ping *PingResult  `json:"ping,omitempty"`
-	Exec *ExecResult  `json:"exec,omitempty"`
-	Read *ReadResult  `json:"read,omitempty"`
-	Cat  *WriteResult `json:"write,omitempty"`
-	Job  *JobResult   `json:"job,omitempty"`
-	List *ListResult  `json:"list,omitempty"`
+	Ping    *PingResult    `json:"ping,omitempty"`
+	Exec    *ExecResult    `json:"exec,omitempty"`
+	Read    *ReadResult    `json:"read,omitempty"`
+	Cat     *WriteResult   `json:"write,omitempty"`
+	Job     *JobResult     `json:"job,omitempty"`
+	Storage *StorageResult `json:"storage,omitempty"`
+	List    *ListResult    `json:"list,omitempty"`
 }
 
 type DataFrame struct {
@@ -412,6 +429,71 @@ type JobResult struct {
 	Total int `json:"total,omitempty"`
 	// Truncated reports that Limit hid some jobs.
 	Truncated bool `json:"truncated,omitempty"`
+}
+
+type StorageScope struct {
+	Name          string  `json:"name"`
+	Root          string  `json:"root"`
+	UsedBytes     int64   `json:"used_bytes"`
+	FreeBytes     int64   `json:"free_bytes,omitempty"`
+	MaxBytes      int64   `json:"max_bytes"`
+	TargetBytes   int64   `json:"target_bytes,omitempty"`
+	MinFreeBytes  int64   `json:"min_free_bytes,omitempty"`
+	HighWatermark float64 `json:"high_watermark"`
+	LowWatermark  float64 `json:"low_watermark"`
+	RetentionSec  int64   `json:"retention_sec"`
+	KeepLastJobs  int     `json:"keep_last_jobs"`
+	JobCount      int     `json:"job_count"`
+	RunningJobs   int     `json:"running_jobs"`
+	Pressure      bool    `json:"pressure"`
+	PolicySource  string  `json:"policy_source"`
+}
+
+type StorageResult struct {
+	OperationID string               `json:"operation_id,omitempty"`
+	Terminal    bool                 `json:"terminal"`
+	Execution   ExecutionState       `json:"execution_state"`
+	Status      *StorageScope        `json:"status,omitempty"`
+	GC          *StorageGCReport     `json:"gc,omitempty"`
+	Doctor      *StorageDoctorReport `json:"doctor,omitempty"`
+}
+
+type StorageGCItem struct {
+	ID        string `json:"id"`
+	Bytes     int64  `json:"bytes"`
+	Reason    string `json:"reason"`
+	StartedAt string `json:"started_at,omitempty"`
+	EndedAt   string `json:"ended_at,omitempty"`
+}
+
+type StorageGCReport struct {
+	Root          string          `json:"root"`
+	UsedBytes     int64           `json:"used_bytes"`
+	FreeBytes     int64           `json:"free_bytes,omitempty"`
+	TargetBytes   int64           `json:"target_bytes,omitempty"`
+	Scanned       int             `json:"scanned"`
+	ScanTruncated bool            `json:"scan_truncated,omitempty"`
+	Pressure      bool            `json:"pressure"`
+	DryRun        bool            `json:"dry_run"`
+	Candidates    []StorageGCItem `json:"candidates,omitempty"`
+	Removed       []StorageGCItem `json:"removed,omitempty"`
+	Skipped       []string        `json:"skipped,omitempty"`
+	FreedBytes    int64           `json:"freed_bytes"`
+	Errors        []string        `json:"errors,omitempty"`
+}
+
+type StorageDoctorFinding struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Path     string `json:"path,omitempty"`
+	Message  string `json:"message"`
+	Action   string `json:"action,omitempty"`
+}
+
+type StorageDoctorReport struct {
+	Root     string                 `json:"root"`
+	OK       bool                   `json:"ok"`
+	Findings []StorageDoctorFinding `json:"findings,omitempty"`
 }
 
 // WaitedJob is one job's outcome in a multi-job wait.

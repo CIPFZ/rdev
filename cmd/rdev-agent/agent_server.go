@@ -381,6 +381,9 @@ func stampResultMetadata(response *proto.Response) {
 			}
 		}
 	}
+	if response.Storage != nil {
+		stamp(&response.Storage.OperationID, &response.Storage.Terminal, &response.Storage.Execution)
+	}
 	if response.List != nil {
 		stamp(&response.List.OperationID, &response.List.Terminal, &response.List.Execution)
 	}
@@ -581,6 +584,12 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 			err = proto.NewError(proto.CodeInvalidRequest, request.OperationID, proto.StateNotSent)
 		} else {
 			response.List, err = doList(request.List)
+		}
+	case proto.OpStorageStatus, proto.OpStorageGC, proto.OpStorageDoctor:
+		if request.Storage == nil {
+			err = proto.NewError(proto.CodeInvalidRequest, request.OperationID, proto.StateNotSent)
+		} else {
+			response.Storage, err = doStorage(request.Op, request.Storage, state)
 		}
 	default:
 		descriptor, ok := proto.LookupOperation(request.Op)
