@@ -1,5 +1,6 @@
 // Package storage contains the persisted storage policy and bounded log
-// accounting used by detached jobs.  It deliberately does not implement GC.
+// accounting used by detached jobs. Incremental GC lives at the agent boundary
+// where process identity and the shared job lock are available.
 package storage
 
 import (
@@ -41,10 +42,22 @@ type PerJobPolicy struct {
 	OnLogLimit     string `json:"on_log_limit"`
 }
 
+// CleanupPolicy bounds one incremental garbage-collection pass.  The agent
+// deliberately keeps these controls in the persisted policy so every process
+// sharing a state directory applies the same work budget.
+type CleanupPolicy struct {
+	IntervalSec    int64 `json:"interval_sec"`
+	MaxDeleteBytes int64 `json:"max_delete_bytes"`
+	MaxDeleteJobs  int   `json:"max_delete_jobs"`
+	MaxScanJobs    int   `json:"max_scan_jobs"`
+	DryRun         bool  `json:"dry_run"`
+}
+
 type Policy struct {
-	Local       ScopePolicy  `json:"local"`
-	RemoteState ScopePolicy  `json:"remote_state"`
-	PerJob      PerJobPolicy `json:"per_job"`
+	Local       ScopePolicy   `json:"local"`
+	RemoteState ScopePolicy   `json:"remote_state"`
+	PerJob      PerJobPolicy  `json:"per_job"`
+	Cleanup     CleanupPolicy `json:"cleanup"`
 }
 
 func Default() Policy {
@@ -52,6 +65,7 @@ func Default() Policy {
 		Local:       ScopePolicy{MaxBytes: DefaultLocalMaxBytes, RetentionSec: 7 * 24 * 3600, Retention: "168h", KeepLastJobs: 100, HighWatermark: .85, LowWatermark: .70},
 		RemoteState: ScopePolicy{MaxBytes: DefaultRemoteMaxBytes, RetentionSec: 7 * 24 * 3600, Retention: "168h", KeepLastJobs: 100, HighWatermark: .85, LowWatermark: .70, MinFreeBytes: DefaultMinFreeBytes},
 		PerJob:      PerJobPolicy{MaxStdoutBytes: DefaultPerJobBytes, MaxStderrBytes: DefaultPerJobBytes, OnLogLimit: "truncate_oldest"},
+		Cleanup:     CleanupPolicy{IntervalSec: 300, MaxDeleteBytes: 1 << 30, MaxDeleteJobs: 100, MaxScanJobs: 1000},
 	}
 }
 
@@ -64,6 +78,9 @@ func (p Policy) Validate() error {
 	}
 	if p.PerJob.MaxStdoutBytes <= 0 || p.PerJob.MaxStdoutBytes > HardPerJobBytes || p.PerJob.MaxStderrBytes <= 0 || p.PerJob.MaxStderrBytes > HardPerJobBytes {
 		return errors.New("per_job byte limits exceed hard cap")
+	}
+	if p.Cleanup.IntervalSec < 0 || p.Cleanup.MaxDeleteBytes < 0 || p.Cleanup.MaxDeleteBytes > HardMaxBytes || p.Cleanup.MaxDeleteJobs < 0 || p.Cleanup.MaxDeleteJobs > HardKeepLastJobs || p.Cleanup.MaxScanJobs < 0 || p.Cleanup.MaxScanJobs > HardKeepLastJobs {
+		return errors.New("invalid cleanup limits")
 	}
 	switch p.PerJob.OnLogLimit {
 	case "truncate_oldest", "discard_new", "stop_job":
@@ -135,11 +152,29 @@ func Resolve(global, override Policy) (Policy, error) {
 	if override.PerJob.OnLogLimit != "" {
 		r.PerJob.OnLogLimit = override.PerJob.OnLogLimit
 	}
+	if override.Cleanup.IntervalSec != 0 {
+		r.Cleanup.IntervalSec = override.Cleanup.IntervalSec
+	}
+	if override.Cleanup.MaxDeleteBytes != 0 {
+		r.Cleanup.MaxDeleteBytes = override.Cleanup.MaxDeleteBytes
+	}
+	if override.Cleanup.MaxDeleteJobs != 0 {
+		r.Cleanup.MaxDeleteJobs = override.Cleanup.MaxDeleteJobs
+	}
+	if override.Cleanup.MaxScanJobs != 0 {
+		r.Cleanup.MaxScanJobs = override.Cleanup.MaxScanJobs
+	}
+	if override.Cleanup.DryRun {
+		r.Cleanup.DryRun = true
+	}
 	if err := r.Validate(); err != nil {
 		return Policy{}, err
 	}
 	if r.Local.MaxBytes > global.Local.MaxBytes || r.RemoteState.MaxBytes > global.RemoteState.MaxBytes || r.PerJob.MaxStdoutBytes > global.PerJob.MaxStdoutBytes || r.PerJob.MaxStderrBytes > global.PerJob.MaxStderrBytes {
 		return Policy{}, errors.New("override cannot widen global hard limit")
+	}
+	if r.Cleanup.MaxDeleteBytes > global.Cleanup.MaxDeleteBytes || r.Cleanup.MaxDeleteJobs > global.Cleanup.MaxDeleteJobs || r.Cleanup.MaxScanJobs > global.Cleanup.MaxScanJobs {
+		return Policy{}, errors.New("override cannot widen global cleanup limit")
 	}
 	return r, nil
 }

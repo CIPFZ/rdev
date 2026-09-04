@@ -118,6 +118,33 @@ func acquireJobLock(f *os.File, path string) error {
 	return nil
 }
 
+// tryJobLock runs fn only when the per-job lock can be acquired immediately.
+// GC uses this non-blocking form: a lock held by job_start, job_stop, the
+// supervisor, or job_rm is evidence that the record is in-flight and must be
+// left for a later pass rather than delaying unrelated work.
+func tryJobLock(jobDir string, fn func() error) (bool, error) {
+	path := lockPath(jobDir)
+	if err := secureDir(filepath.Dir(path), 0o700); err != nil {
+		return false, err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	if err := secureRecordFile(path); err != nil {
+		return false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true, fn()
+}
+
 // jobExists reports whether a job's directory survived, and is how a locked
 // section re-checks what it read outside the lock.
 //
