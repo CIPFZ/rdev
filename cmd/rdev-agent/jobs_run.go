@@ -231,7 +231,10 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if p.GraceSec < 0 || p.GraceSec > hardExecTimeoutSec {
 		return nil, limitExceededError("grace_sec is outside the hard limit")
 	}
-	dir := jobDir(state, p.ID)
+	dir, err := validatedJobDir(state, p.ID)
+	if err != nil {
+		return nil, err
+	}
 	meta, err := readMeta(dir)
 	if err != nil {
 		return nil, fmt.Errorf("job %s: %w", p.ID, err)
@@ -245,6 +248,22 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	default:
 		return nil, invalidRequestError("signal must be TERM or KILL")
 	}
+	// A PID can be recycled after a job exits. Never signal a new process that
+	// happens to occupy the recorded PID; the immutable kernel start token is
+	// checked immediately before every stop request.
+	if meta.ProcessIdentity != "" {
+		current, identityErr := processIdentity(meta.PID)
+		if identityErr != nil || current != meta.ProcessIdentity {
+			return nil, processStateError("job process identity no longer matches")
+		}
+	}
+	childPID, childIdentity := readChildProcess(dir)
+	if childPID > 0 && childIdentity != "" {
+		current, identityErr := processIdentity(childPID)
+		if identityErr != nil || current != childIdentity {
+			childPID = 0
+		}
+	}
 
 	// Signal the whole process group (negative pid). Because jobStart used
 	// Setsid, the supervisor pid is also the pgid, so this reaches every
@@ -257,7 +276,7 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		// still running, and that child is exactly what a caller wants to stop.
 		pidErr := syscall.Kill(meta.PID, sig)
 		if pidErr != nil {
-			child := readChildPID(dir)
+			child := childPID
 			if child <= 0 || syscall.Kill(child, sig) != nil {
 				return nil, processStateError("job process is unavailable")
 			}
@@ -276,7 +295,7 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		}
 		if jobAlive(meta, dir) {
 			syscall.Kill(-meta.PID, syscall.SIGKILL)
-			if child := readChildPID(dir); child > 0 {
+			if child := childPID; child > 0 {
 				syscall.Kill(child, syscall.SIGKILL)
 				syscall.Kill(-child, syscall.SIGKILL)
 			}
