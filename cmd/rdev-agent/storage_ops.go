@@ -52,9 +52,16 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 	} else {
 		scope = policy.Local
 	}
-	root, err := secureJobRoot(state)
+	root, err := filepath.Abs(filepath.Join(state, "jobs"))
 	if err != nil {
 		return nil, err
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return nil, err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() || !pathOwnedByCurrentUser(rootInfo) {
+		return nil, fmt.Errorf("job root is not a private directory")
 	}
 	used, err := safeTreeSize(root)
 	if err != nil {
@@ -167,7 +174,11 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 	if free := filesystemFreeBytes(root); free >= 0 {
 		if used, e1 := safeTreeSize(root); e1 == nil {
 			policy, _, _ := loadStoragePolicy(state)
-			if pressure, _ := gcPressure(policy.RemoteState, used, free); pressure {
+			selected := policy.RemoteState
+			if strings.EqualFold(strings.TrimSpace(p.Scope), "local") {
+				selected = policy.Local
+			}
+			if pressure, _ := gcPressure(selected, used, free); pressure {
 				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "storage_pressure", Severity: "warning", Message: "storage is above the configured high watermark or minimum free space", Action: "run storage_gc dry-run, then execute a bounded cleanup"})
 			}
 		}
@@ -194,6 +205,9 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 			continue
 		}
 		if validateJobID(name) != nil || !e.IsDir() {
+			if name != lockDirName && !strings.HasPrefix(name, ".rdev-gc-") {
+				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "unknown_state_entry", Severity: "warning", Path: name, Message: "unmanaged entry is present under the jobs root", Action: "inspect manually; automatic GC will not remove it"})
+			}
 			continue
 		}
 		st, e1 := os.Lstat(path)
