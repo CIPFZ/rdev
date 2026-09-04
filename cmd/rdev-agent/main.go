@@ -18,6 +18,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -683,7 +684,7 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	mode := os.FileMode(p.Mode)
 	if mode == 0 {
 		mode = 0o644
-	} else if mode.Perm() != mode {
+	} else if mode&^0o7777 != 0 {
 		return nil, invalidRequestError("write mode must contain permission bits only")
 	}
 	path := expandHome(p.Path)
@@ -729,7 +730,7 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if err := tmp.Chmod(mode.Perm()); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return nil, err
 	}
@@ -774,9 +775,9 @@ func doAppend(path string, data []byte, mode os.FileMode, explicitMode bool) (*p
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_EXCL, mode.Perm())
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_EXCL, mode)
 	if errors.Is(err, os.ErrExist) {
-		f, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, mode.Perm())
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, mode)
 	} else if err == nil {
 		created = true
 	}
@@ -786,15 +787,20 @@ func doAppend(path string, data []byte, mode os.FileMode, explicitMode bool) (*p
 	// Re-check after opening: a path can be replaced by a symlink between the
 	// preflight Lstat and OpenFile. The descriptor's metadata is authoritative
 	// for the write, while the path check prevents following a swapped link.
-	if st, statErr := os.Lstat(path); statErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+	openedInfo, openedErr := f.Stat()
+	pathInfo, statErr := os.Lstat(path)
+	if openedErr != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !os.SameFile(openedInfo, pathInfo) {
 		_ = f.Close()
+		if openedErr != nil {
+			return nil, openedErr
+		}
 		if statErr != nil {
 			return nil, statErr
 		}
-		return nil, invalidRequestError("append target must be a regular file")
+		return nil, invalidRequestError("append target changed while opening")
 	}
 	if explicitMode {
-		if err := f.Chmod(mode.Perm()); err != nil {
+		if err := f.Chmod(mode); err != nil {
 			_ = f.Close()
 			return nil, err
 		}
@@ -919,13 +925,40 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 	if maxBytes == 0 {
 		maxBytes = defaultListBytes
 	}
-	// Read names only, in bounded chunks, then sort. Metadata is fetched solely
-	// for the page that will be returned, so a million-entry directory does not
-	// allocate a million FileInfo values or retain open descriptors.
-	var names []string
+	// Read names only, in bounded chunks, retaining at most one page plus one
+	// continuation candidate. This keeps memory proportional to the response
+	// bounds even for directories containing millions of entries.
+	cursor := ""
+	if p.Cursor != "" {
+		cur, decErr := base64.RawURLEncoding.DecodeString(p.Cursor)
+		if decErr != nil {
+			return nil, invalidRequestError("invalid list cursor")
+		}
+		cursor = string(cur)
+	}
+	candidates := &listNameHeap{}
+	heap.Init(candidates)
+	candidateLimit := limit + 1 // one extra name proves continuation
+	total := 0
+	candidateOverflow := false
 	for {
 		chunk, readErr := dir.Readdirnames(256)
-		names = append(names, chunk...)
+		for _, name := range chunk {
+			total++
+			if cursor != "" && name <= cursor {
+				continue
+			}
+			if candidates.Len() < candidateLimit {
+				heap.Push(candidates, name)
+				continue
+			}
+			if name < (*candidates)[0] {
+				heap.Pop(candidates)
+				heap.Push(candidates, name)
+			} else {
+				candidateOverflow = true
+			}
+		}
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
@@ -933,22 +966,11 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 			return nil, readErr
 		}
 	}
+	names := candidates.items()
 	sort.Strings(names)
-	res := &proto.ListResult{Path: path, Entries: make([]proto.DirEntry, 0, limit), Total: len(names)}
+	res := &proto.ListResult{Path: path, Entries: make([]proto.DirEntry, 0, limit), Total: total}
 	entriesBytes := 2 // JSON array delimiters
-	start := 0
-	if p.Cursor != "" {
-		cur, decErr := base64.RawURLEncoding.DecodeString(p.Cursor)
-		if decErr != nil {
-			return nil, invalidRequestError("invalid list cursor")
-		}
-		start = sort.SearchStrings(names, string(cur))
-		for start < len(names) && names[start] == string(cur) {
-			start++
-		}
-	}
-	for i := start; i < len(names); i++ {
-		name := names[i]
+	for _, name := range names {
 		info, infoErr := os.Lstat(filepath.Join(path, name))
 		if infoErr != nil {
 			// Entries can disappear while listing; omit the vanished item and keep
@@ -982,6 +1004,10 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 		res.Entries = append(res.Entries, de)
 		entriesBytes = projected
 	}
+	if candidateOverflow && !res.Truncated && len(res.Entries) > 0 {
+		res.Truncated = true
+		res.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(res.Entries[len(res.Entries)-1].Name))
+	}
 	return res, nil
 }
 
@@ -992,6 +1018,24 @@ func listEntryBytes(entry proto.DirEntry) (int, error) {
 	}
 	return len(b), nil
 }
+
+// listNameHeap is a lexical max-heap. Keeping the largest candidate at the
+// root lets us discard it whenever a smaller name arrives, retaining only the
+// lexically earliest page and one continuation candidate.
+type listNameHeap []string
+
+func (h listNameHeap) Len() int           { return len(h) }
+func (h listNameHeap) Less(i, j int) bool { return h[i] > h[j] }
+func (h listNameHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *listNameHeap) Push(x any)        { *h = append(*h, x.(string)) }
+func (h *listNameHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+func (h listNameHeap) items() []string { return append([]string(nil), h...) }
 
 // stateFlag is the argv[1] value that overrides the agent's state directory.
 const stateFlag = "-state"

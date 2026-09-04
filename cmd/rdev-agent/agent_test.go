@@ -1350,6 +1350,26 @@ func TestListMaxBytesUsesEncodedEntrySize(t *testing.T) {
 	}
 }
 
+func TestListLargeDirectoryKeepsPageBounded(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 12_000; i++ {
+		name := fmt.Sprintf("%05d", i)
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := doList(&proto.ListParams{Path: dir, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != 12_000 || len(res.Entries) != 2 || !res.Truncated || res.NextCursor == "" {
+		t.Fatalf("large listing = total=%d entries=%d truncated=%v cursor=%q", res.Total, len(res.Entries), res.Truncated, res.NextCursor)
+	}
+	if got := []string{res.Entries[0].Name, res.Entries[1].Name}; !reflect.DeepEqual(got, []string{"00000", "00001"}) {
+		t.Fatalf("first page = %v", got)
+	}
+}
+
 func TestListMissingDirErrors(t *testing.T) {
 	if _, err := doList(&proto.ListParams{Path: filepath.Join(t.TempDir(), "nope")}); err == nil {
 		t.Error("listing a missing directory should error")
