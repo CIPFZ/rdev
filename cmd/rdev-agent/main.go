@@ -955,6 +955,9 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 			if name < (*candidates)[0] {
 				heap.Pop(candidates)
 				heap.Push(candidates, name)
+				// The evicted root is a valid continuation candidate even
+				// though this newly seen name is lexically earlier.
+				candidateOverflow = true
 			} else {
 				candidateOverflow = true
 			}
