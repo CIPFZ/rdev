@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -1356,6 +1357,116 @@ func (c *Client) WriteFile(ctx context.Context, opts WriteFileOptions) (*proto.W
 	})
 	if err != nil {
 		return nil, c.redactErr(err)
+	}
+	if resp.Cat == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.Cat, nil
+}
+
+// TransferFileOptions configures a resumable, digest-verified upload.
+type TransferFileOptions struct {
+	Host       string
+	Local      string
+	Remote     string
+	Mode       uint32
+	TransferID string // optional stable ID; generated when empty
+}
+
+// TransferFile streams a local regular file in bounded chunks. Remote writes
+// remain in a same-directory staging file until the final SHA-256 matches, so
+// interruption never exposes a partial destination.
+func (c *Client) TransferFile(ctx context.Context, opts TransferFileOptions) (*proto.WriteResult, error) {
+	if opts.Local == "" || opts.Remote == "" {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	st, err := os.Lstat(opts.Local)
+	if err != nil {
+		return nil, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	if st.Size() > 1<<30 {
+		return nil, proto.NewError(proto.CodeLimitExceeded, "", proto.StateNotSent)
+	}
+	f, err := os.Open(opts.Local)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	digest := fmt.Sprintf("%x", h.Sum(nil))
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	id := opts.TransferID
+	if id == "" {
+		id, err = proto.NewOperationID()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if proto.ValidateOperationID(id) != nil {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	const chunk = 48 << 10
+	// Probe the managed staging object. This is read-only with respect to the
+	// destination and lets retries resume from the server's committed prefix.
+	probe, callErr := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: opts.Remote, ContentB64: true, TransferID: id, Offset: 0, TotalSize: st.Size(), Digest: digest, Final: false}})
+	if callErr != nil {
+		return nil, c.redactErr(callErr)
+	}
+	if probe.Cat == nil || probe.Cat.Offset < 0 || probe.Cat.Offset > st.Size() {
+		return nil, proto.NewError(proto.CodeInvalidFrame, "", proto.StateCompleted)
+	}
+	if _, err = f.Seek(probe.Cat.Offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, chunk)
+	offset := probe.Cat.Offset
+	var last *proto.WriteResult
+	if offset == st.Size() && st.Size() == 0 {
+		resp, callErr := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: opts.Remote, ContentB64: true, Mode: opts.Mode, TransferID: id, Offset: 0, TotalSize: 0, Digest: digest, Final: true}})
+		if callErr != nil {
+			return nil, c.redactErr(callErr)
+		}
+		if resp.Cat == nil {
+			return nil, missingResultError(resp)
+		}
+		return resp.Cat, nil
+	}
+	for {
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			final := readErr == io.EOF || offset+int64(n) == st.Size()
+			resp, callErr := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: opts.Remote, Content: base64.StdEncoding.EncodeToString(buf[:n]), ContentB64: true, Mode: opts.Mode, TransferID: id, Offset: offset, TotalSize: st.Size(), Digest: digest, Final: final}})
+			if callErr != nil {
+				return nil, c.redactErr(callErr)
+			}
+			if resp.Cat == nil || resp.Cat.Offset != offset+int64(n) {
+				return nil, proto.NewError(proto.CodeInvalidFrame, "", proto.StateCompleted)
+			}
+			last = resp.Cat
+			offset += int64(n)
+			if final {
+				return last, nil
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return nil, readErr
+		}
+	}
+	// Empty files still require an authenticated final commit.
+	resp, callErr := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: opts.Remote, ContentB64: true, Mode: opts.Mode, TransferID: id, Offset: offset, TotalSize: st.Size(), Digest: digest, Final: true}})
+	if callErr != nil {
+		return nil, c.redactErr(callErr)
 	}
 	if resp.Cat == nil {
 		return nil, missingResultError(resp)
