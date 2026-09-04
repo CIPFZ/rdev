@@ -350,6 +350,66 @@ func TestBuildSyncManifestDeterministicAndSymlinkPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildSyncManifestFollowRejectsEscapingSymlink(t *testing.T) {
+	d := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(d, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildSyncManifest(d, "follow"); err == nil {
+		t.Fatal("follow policy must reject a symlink escaping the sync root")
+	}
+}
+
+func TestSyncDeleteRequiresBoundedPlanAndReturnsDigest(t *testing.T) {
+	c := syncTestClient(t)
+	local := t.TempDir()
+	if err := os.WriteFile(filepath.Join(local, "file"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	c.rsync = func(_ context.Context, args []string, stdout, _ io.Writer) error {
+		calls++
+		if calls == 1 {
+			if !containsArg(args, "--dry-run") || !containsArg(args, "--itemize-changes") {
+				t.Fatalf("delete preflight missing bounded plan flags: %v", args)
+			}
+			_, _ = io.WriteString(stdout, ">f+++++++++ file\n")
+			return nil
+		}
+		if containsArg(args, "--dry-run") || containsArg(args, "--itemize-changes") {
+			t.Fatalf("mutating transfer retained preflight flags: %v", args)
+		}
+		return nil
+	}
+	res, err := c.Sync(t.Context(), SyncOptions{Host: "dev", Direction: "push", Local: local, Remote: "dst", Delete: true, ConfirmDelete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || res.PlanDigest == "" {
+		t.Fatalf("calls=%d plan_digest=%q, want two calls and digest", calls, res.PlanDigest)
+	}
+}
+
+func TestSyncRejectsSourceChangedDuringTransfer(t *testing.T) {
+	c := syncTestClient(t)
+	local := t.TempDir()
+	path := filepath.Join(local, "file")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.rsync = func(_ context.Context, _ []string, _, _ io.Writer) error {
+		return os.WriteFile(path, []byte("new"), 0o600)
+	}
+	res, err := c.Sync(t.Context(), SyncOptions{Host: "dev", Direction: "push", Local: local, Remote: "dst"})
+	if err == nil || res == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("source mutation result=%+v err=%v, want conflict error with result", res, err)
+	}
+}
+
 func TestBuildSyncArgsTerminatesOptionsBeforeOperands(t *testing.T) {
 	opts := SyncOptions{
 		Direction: "push", Local: "-leading-local", Remote: "~/dst",
