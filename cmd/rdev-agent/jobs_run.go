@@ -147,12 +147,14 @@ func startJobTransaction(p *proto.JobParams, id, dir string) (*proto.JobResult, 
 		os.RemoveAll(dir)
 		return nil, err
 	}
+	_ = stdout.Chmod(0o600)
 	stderr, err := os.Create(filepath.Join(dir, "stderr"))
 	if err != nil {
 		stdout.Close()
 		os.RemoveAll(dir)
 		return nil, err
 	}
+	_ = stderr.Chmod(0o600)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Stdin = nil
@@ -164,15 +166,23 @@ func startJobTransaction(p *proto.JobParams, id, dir string) (*proto.JobResult, 
 		os.RemoveAll(dir)
 		return nil, processStartError(err)
 	}
+	identity, err := processIdentity(cmd.Process.Pid)
+	if err != nil {
+		_ = rollbackStartedJob(cmd, dir)
+		stdout.Close()
+		stderr.Close()
+		return nil, processStartError(fmt.Errorf("record process identity: %w", err))
+	}
 
 	meta := &jobMeta{
-		ID:            id,
-		Label:         p.Label,
-		Argv:          p.Spec.Argv,
-		Cwd:           p.Spec.Cwd,
-		PID:           cmd.Process.Pid,
-		StartedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		StoragePolicy: policy.PerJob,
+		ID:              id,
+		Label:           p.Label,
+		Argv:            p.Spec.Argv,
+		Cwd:             p.Spec.Cwd,
+		PID:             cmd.Process.Pid,
+		ProcessIdentity: identity,
+		StartedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+		StoragePolicy:   policy.PerJob,
 	}
 	if err := writeJobMeta(filepath.Join(dir, "meta.json"), meta); err != nil {
 		rbErr := rollbackStartedJob(cmd, dir)
