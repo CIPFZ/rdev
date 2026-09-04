@@ -260,9 +260,37 @@ func SaveMetrics(path string, snapshot MetricsSnapshot) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// Create a fresh, exclusive temporary file.  A fixed `path+.tmp` would
+	// follow a pre-existing symlink and could overwrite an arbitrary file; it
+	// would also let concurrent writers trample one another's temporary data.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), ".storage-metrics-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+	}()
+	if err := tmpFile.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmpFile.Write(b); err != nil {
+		return err
+	}
+	// Flush the file before the atomic rename so a successful response does
+	// not acknowledge telemetry that is still only in the page cache.
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return nil
 }
