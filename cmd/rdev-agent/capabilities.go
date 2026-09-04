@@ -23,6 +23,12 @@ func executionProfile() proto.ExecutionProfile {
 	if p.Shell == "" {
 		p.Shell = os.Getenv("COMSPEC")
 	}
+	if p.Shell == "" && runtime.GOOS != "windows" {
+		// buildCmd uses the same fallback for login-shell execution. Reporting
+		// it here keeps the profile digest aligned with the effective command
+		// environment when SSH did not provide SHELL.
+		p.Shell = "/bin/bash"
+	}
 	if p.Locale == "" {
 		p.Locale = os.Getenv("LANG")
 	}
