@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/storage"
 )
 
 // isJobOp reports whether op is dispatched by doJob.
@@ -68,8 +69,9 @@ type jobMeta struct {
 	PID   int      `json:"pid"`
 	// ProcessIdentity is an immutable kernel-provided start token for PID. A
 	// PID alone is reusable; this token is checked before every signal.
-	ProcessIdentity string `json:"process_identity,omitempty"`
-	StartedAt       string `json:"started_at"`
+	ProcessIdentity string               `json:"process_identity,omitempty"`
+	StartedAt       string               `json:"started_at"`
+	StoragePolicy   storage.PerJobPolicy `json:"storage_policy,omitempty"`
 }
 
 func jobDir(state, id string) string {
@@ -171,10 +173,17 @@ func metaToInfo(m *jobMeta, dir string) *proto.JobInfo {
 	}
 
 	var st struct {
-		ExitCode *int   `json:"exit_code"`
-		EndedAt  string `json:"ended_at"`
-		Killed   bool   `json:"killed"`
+		ExitCode     *int            `json:"exit_code"`
+		EndedAt      string          `json:"ended_at"`
+		Killed       bool            `json:"killed"`
+		StdoutLedger proto.LogLedger `json:"stdout_ledger"`
+		StderrLedger proto.LogLedger `json:"stderr_ledger"`
 	}
+	_ = readJSON(filepath.Join(dir, "status.json"), &st)
+	if st.StdoutLedger.LimitBytes == 0 && st.StderrLedger.LimitBytes == 0 {
+		_ = readJSON(filepath.Join(dir, "ledger.json"), &st)
+	}
+	info.StdoutLedger, info.StderrLedger = st.StdoutLedger, st.StderrLedger
 	if err := readJSON(filepath.Join(dir, "status.json"), &st); err == nil && st.ExitCode != nil {
 		info.ExitCode = *st.ExitCode
 		info.EndedAt = st.EndedAt

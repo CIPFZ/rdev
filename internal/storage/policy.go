@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,7 +85,7 @@ func validateScope(name string, s ScopePolicy) error {
 			return fmt.Errorf("invalid %s retention", name)
 		}
 	}
-	if s.HighWatermark <= 0 || s.HighWatermark > 1 || s.LowWatermark <= 0 || s.LowWatermark > s.HighWatermark {
+	if math.IsNaN(s.HighWatermark) || math.IsInf(s.HighWatermark, 0) || math.IsNaN(s.LowWatermark) || math.IsInf(s.LowWatermark, 0) || s.HighWatermark <= 0 || s.HighWatermark > 1 || s.LowWatermark <= 0 || s.LowWatermark > s.HighWatermark {
 		return fmt.Errorf("invalid %s watermarks", name)
 	}
 	if s.MinFreeBytes < 0 || s.MinFreeBytes > HardMaxBytes {
@@ -103,6 +104,12 @@ func Resolve(global, override Policy) (Policy, error) {
 		}
 		if src.RetentionSec != 0 {
 			dst.RetentionSec = src.RetentionSec
+		}
+		if src.Retention != "" {
+			dst.Retention = src.Retention
+			if d, err := time.ParseDuration(src.Retention); err == nil {
+				dst.RetentionSec = int64(d / time.Second)
+			}
 		}
 		if src.KeepLastJobs != 0 {
 			dst.KeepLastJobs = src.KeepLastJobs
@@ -148,6 +155,19 @@ func Load(path string) (Policy, error) {
 	}
 	if err := json.Unmarshal(b, &p); err != nil {
 		return Policy{}, err
+	}
+	// Retention is the human-readable form exposed in configuration. Keep the
+	// legacy integer field populated as the canonical value so callers do not
+	// need to parse it themselves.
+	for name, scope := range map[string]*ScopePolicy{"local": &p.Local, "remote_state": &p.RemoteState} {
+		if scope.Retention == "" {
+			continue
+		}
+		d, parseErr := time.ParseDuration(scope.Retention)
+		if parseErr != nil || d < 0 {
+			return Policy{}, fmt.Errorf("invalid %s retention", name)
+		}
+		scope.RetentionSec = int64(d / time.Second)
 	}
 	if err := p.Validate(); err != nil {
 		return Policy{}, err

@@ -74,7 +74,10 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		StdoutLedger proto.LogLedger `json:"stdout_ledger"`
 		StderrLedger proto.LogLedger `json:"stderr_ledger"`
 	}
-	_ = readJSON(filepath.Join(jobDir(state, p.ID), "status.json"), &st)
+	_ = readJSON(filepath.Join(dir, "status.json"), &st)
+	if st.StdoutLedger.LimitBytes == 0 && st.StderrLedger.LimitBytes == 0 {
+		_ = readJSON(filepath.Join(dir, "ledger.json"), &st)
+	}
 	if stream == "stdout" {
 		res.LogLedger = st.StdoutLedger
 	} else {

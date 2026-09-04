@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/storage"
 )
 
 // Wait polling bounds. The interval backs off so a job that runs for an hour
@@ -76,6 +77,15 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, err
 	}
 	if err := secureJobDir(dir); err != nil {
+		return nil, err
+	}
+	policy, err := storage.Load(filepath.Join(state, "storage-policy.json"))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	if err := storage.Save(filepath.Join(dir, "storage-policy.json"), policy); err != nil {
+		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 
@@ -138,6 +148,7 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		PID:             cmd.Process.Pid,
 		ProcessIdentity: identity,
 		StartedAt:       startedAt,
+		StoragePolicy:   policy.PerJob,
 	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), meta); err != nil {
 		return nil, err

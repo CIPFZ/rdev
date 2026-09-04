@@ -70,17 +70,30 @@ func (s *Sink) Write(p []byte) (int, error) {
 		}
 		return len(p), nil
 	}
-	// truncate_oldest: append and discard the oldest prefix when needed.
-	s.buf.Write(p)
-	if int64(s.buf.Len()) > s.limit {
-		drop := int64(s.buf.Len()) - s.limit
-		b := s.buf.Bytes()
+	// truncate_oldest: retain only the suffix that fits. Do not append the
+	// whole input first: io.Writer callers are allowed to pass very large
+	// slices, and doing so would defeat the bounded-memory guarantee.
+	if int64(len(p)) >= s.limit {
+		drop := int64(s.buf.Len()) + int64(len(p)) - s.limit
 		s.buf.Reset()
-		s.buf.Write(b[drop:])
+		s.buf.Write(p[len(p)-int(s.limit):])
 		s.ledger.DroppedBytes += drop
 		s.markTruncated()
 		s.reached = true
+		return len(p), nil
 	}
+	if int64(s.buf.Len())+int64(len(p)) > s.limit {
+		drop := int64(s.buf.Len()) + int64(len(p)) - s.limit
+		b := s.buf.Bytes()
+		s.buf.Reset()
+		s.buf.Write(b[drop:])
+		s.buf.Write(p)
+		s.ledger.DroppedBytes += drop
+		s.markTruncated()
+		s.reached = true
+		return len(p), nil
+	}
+	s.buf.Write(p)
 	return len(p), nil
 }
 
@@ -107,7 +120,7 @@ func (s *Sink) Drain(r io.Reader) error { _, err := io.Copy(s, r); return err }
 func (s *Sink) Flush(path string) error {
 	b := s.Bytes()
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
