@@ -151,9 +151,17 @@ func planStorageGC(state string, scope storage.ScopePolicy, options GCOptions) (
 			if freshErr != nil {
 				return errGCSkip
 			}
+			if fresh.ID != meta.ID || fresh.StartedAt != meta.StartedAt {
+				return errGCSkip
+			}
 			if jobAlive(fresh, dir) {
 				return errGCSkip
 			}
+			freshSize, sizeErr := managedJobSize(dir)
+			if sizeErr != nil {
+				return errGCSkip
+			}
+			size = freshSize
 			return nil
 		})
 		if lockErr != nil || !locked {
@@ -258,8 +266,22 @@ func runStorageGC(state string, scope storage.ScopePolicy, options GCOptions) (*
 			if metaErr != nil || jobAlive(meta, dir) {
 				return errGCSkip
 			}
-			if _, sizeErr := managedJobSize(dir); sizeErr != nil {
+			// A directory can disappear and be recreated with the same ID
+			// between planning and execution (notably with a deterministic test
+			// generator, and in practice after a failed/manual restore). The
+			// immutable start timestamp binds this deletion to the record that
+			// was actually planned; without it GC could remove a newly-started
+			// job while its PID is still in a short pre-publication window.
+			if meta.ID != item.ID || meta.StartedAt != item.StartedAt {
 				return errGCSkip
+			}
+			size, sizeErr := managedJobSize(dir)
+			if sizeErr != nil {
+				return errGCSkip
+			}
+			maxDeleteBytes := normalizeGCOptions(options).MaxDeleteBytes
+			if maxDeleteBytes > 0 && report.FreedBytes+size > maxDeleteBytes {
+				return errGCBudget
 			}
 			tombstone := filepath.Join(report.Root, fmt.Sprintf(".rdev-gc-%s-%d", item.ID, time.Now().UnixNano()))
 			rel, relErr := filepath.Rel(report.Root, tombstone)
@@ -275,11 +297,19 @@ func runStorageGC(state string, scope storage.ScopePolicy, options GCOptions) (*
 				_ = os.Rename(tombstone, dir)
 				return removeErr
 			}
-			report.Removed = append(report.Removed, item)
-			report.FreedBytes += item.Bytes
+			removed := item
+			// Account the bytes observed while holding the lock, rather than the
+			// potentially stale plan estimate. This keeps the delete-byte budget
+			// and the report honest if a log changed after planning.
+			removed.Bytes = size
+			report.Removed = append(report.Removed, removed)
+			report.FreedBytes += size
 			removeJobLock(dir)
 			return nil
 		})
+		if errors.Is(lockErr, errGCBudget) {
+			break
+		}
 		if lockErr != nil && !errors.Is(lockErr, errGCSkip) {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: %v", item.ID, lockErr))
 		} else if errors.Is(lockErr, errGCSkip) {
@@ -292,6 +322,7 @@ func runStorageGC(state string, scope storage.ScopePolicy, options GCOptions) (*
 }
 
 var errGCSkip = errors.New("gc candidate changed or is unsafe")
+var errGCBudget = errors.New("gc delete byte budget exhausted")
 
 func normalizeGCOptions(options GCOptions) GCOptions {
 	if options.MaxScanJobs <= 0 {
