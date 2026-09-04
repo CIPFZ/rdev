@@ -215,3 +215,28 @@ func TestStorageMetricsConcurrentUpdatesAndLedgerAccounting(t *testing.T) {
 		t.Fatalf("ledger accounting=%+v", loaded.Logs)
 	}
 }
+
+func TestStorageMetricsLockRejectsSymlink(t *testing.T) {
+	state := t.TempDir()
+	victim := filepath.Join(state, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(state, ".storage-metrics.lock")); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if tryStorageMetricsLock(state, func() { called = true }) {
+		t.Fatal("acquired symlinked metrics lock")
+	}
+	if called {
+		t.Fatal("ran callback while lock path was unsafe")
+	}
+	b, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "keep" {
+		t.Fatalf("lock acquisition changed symlink target: %q", b)
+	}
+}
