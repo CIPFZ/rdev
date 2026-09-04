@@ -40,6 +40,15 @@ func TestStorageOpsStatusGCAndDoctor(t *testing.T) {
 	if err != nil || doc.Doctor == nil || !doc.Doctor.OK {
 		t.Fatalf("doctor=%+v err=%v findings=%+v", doc, err, doc.Doctor.Findings)
 	}
+	if status.Status.Root != storageReportRoot || status.Status.PolicySource != storageReportPolicy {
+		t.Fatalf("status leaked filesystem paths: %+v", status.Status)
+	}
+	if dry.GC.Root != storageReportRoot {
+		t.Fatalf("gc leaked filesystem path: %+v", dry.GC)
+	}
+	if doc.Doctor.Root != storageReportRoot {
+		t.Fatalf("doctor leaked filesystem path: %+v", doc.Doctor)
+	}
 }
 
 func TestStorageDoctorIsNonMutatingAndFindsTombstone(t *testing.T) {
@@ -72,12 +81,86 @@ func TestStorageDoctorIsNonMutatingAndFindsTombstone(t *testing.T) {
 	if !found {
 		t.Fatalf("stale tombstone not reported: %+v", res.Findings)
 	}
+	for _, f := range res.Findings {
+		if filepath.IsAbs(f.Path) {
+			t.Fatalf("doctor exposed absolute finding path: %+v", f)
+		}
+	}
 	st, err := os.Stat(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st.Mode().Perm() != 0o755 {
 		t.Fatalf("doctor mutated permissions: %o", st.Mode().Perm())
+	}
+}
+
+func TestStorageReadOnlyOperationsDoNotRepairModesOrCreateRoots(t *testing.T) {
+	state := t.TempDir()
+	root := filepath.Join(state, "jobs")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := writeGCJob(t, state, "legacy", time.Now().Add(-time.Hour), time.Now().Add(-time.Hour), "x", false)
+	meta := filepath.Join(dir, "meta.json")
+	if err := os.Chmod(meta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storageStatus(&proto.StorageParams{}, state); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("status repaired metadata mode: %o", st.Mode().Perm())
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := storageStatus(&proto.StorageParams{}, missing); err == nil {
+		t.Fatal("status unexpectedly created a missing jobs root")
+	}
+}
+
+func TestStorageDoctorDoesNotRepairExistingLockMode(t *testing.T) {
+	state := t.TempDir()
+	root := filepath.Join(state, "jobs")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockRoot := filepath.Join(state, lockDirName)
+	if err := os.Mkdir(lockRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(lockRoot, "old.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storageDoctor(&proto.StorageParams{}, state); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("doctor repaired lock mode: %o", st.Mode().Perm())
+	}
+}
+
+func TestStorageGCHonorsConfiguredCleanupBudget(t *testing.T) {
+	state := t.TempDir()
+	p := storage.Default()
+	p.Cleanup.MaxDeleteJobs = 1
+	if err := storage.Save(filepath.Join(state, "storage-policy.json"), p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storageGC(&proto.StorageParams{MaxDeleteJobs: 2}, state); err == nil {
+		t.Fatal("gc widened configured cleanup job budget")
 	}
 }
 

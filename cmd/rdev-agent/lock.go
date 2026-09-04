@@ -134,6 +134,51 @@ func tryExistingJobLock(jobDir string, fn func() error) (bool, error) {
 	return tryJobLockMode(jobDir, false, fn)
 }
 
+// probeExistingJobLock is a strictly read-only stale-lock probe for storage
+// doctor. Unlike tryExistingJobLock it never calls secureRecordFile (which may
+// chmod a broad lock file), and it takes a shared flock solely to determine
+// whether an exclusive writer currently owns the descriptor.
+func probeExistingJobLock(jobDir string) (bool, error) {
+	path := lockPath(jobDir)
+	parent := filepath.Dir(path)
+	st, err := os.Lstat(parent)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+		return false, errors.New("job lock directory is not private")
+	}
+	st, err = os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+		return false, errors.New("job lock is not a private owned regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true, nil
+}
+
 func tryJobLockMode(jobDir string, create bool, fn func() error) (bool, error) {
 	path := lockPath(jobDir)
 	parent := filepath.Dir(path)

@@ -111,6 +111,18 @@ func TestLockedBuilderConcurrentWritesStayBounded(t *testing.T) {
 	}
 }
 
+func TestTerminalMetadataMatchesStorageResult(t *testing.T) {
+	base := &proto.Response{OperationID: "op_0123456789abcdef", Terminal: true, Execution: proto.StateCompleted}
+	base.Storage = &proto.StorageResult{OperationID: base.OperationID, Terminal: true, Execution: proto.StateCompleted}
+	if !terminalMetadataMatches(base) {
+		t.Fatal("matching storage metadata rejected")
+	}
+	base.Storage.OperationID = "op_fedcba9876543210"
+	if terminalMetadataMatches(base) {
+		t.Fatal("mismatched storage metadata accepted")
+	}
+}
+
 func TestAuxiliaryStdoutCaptureIsBoundedAndAccounted(t *testing.T) {
 	var capture boundedHeadBuilder
 	capture.limit = 5

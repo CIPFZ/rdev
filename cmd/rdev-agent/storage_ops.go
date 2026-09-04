@@ -16,6 +16,12 @@ import (
 	"github.com/CIPFZ/rdev/internal/storage"
 )
 
+// External storage reports intentionally use stable scope-relative labels.
+// Absolute state paths would disclose remote filesystem layout through the
+// protocol/MCP surface and are not needed to act on a report.
+const storageReportRoot = "jobs"
+const storageReportPolicy = "storage-policy.json"
+
 func storageScope(p *proto.StorageParams) (storage.ScopePolicy, string, error) {
 	if p == nil {
 		return storage.ScopePolicy{}, "", invalidRequestError("storage parameters required")
@@ -76,7 +82,7 @@ func readMetaReadOnly(dir string) (*jobMeta, error) {
 }
 
 func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, error) {
-	policy, policyPath, err := loadStoragePolicy(state)
+	policy, _, err := loadStoragePolicy(state)
 	if err != nil {
 		return nil, fmt.Errorf("storage policy: %w", err)
 	}
@@ -129,10 +135,10 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 			running++
 		}
 	}
-	return &proto.StorageScope{Name: name, Root: root, UsedBytes: used, FreeBytes: free, MaxBytes: scope.MaxBytes,
+	return &proto.StorageScope{Name: name, Root: storageReportRoot, UsedBytes: used, FreeBytes: free, MaxBytes: scope.MaxBytes,
 		TargetBytes: target, MinFreeBytes: scope.MinFreeBytes, HighWatermark: scope.HighWatermark,
 		LowWatermark: scope.LowWatermark, RetentionSec: scope.RetentionSec, KeepLastJobs: scope.KeepLastJobs,
-		JobCount: jobs, RunningJobs: running, Pressure: pressure, PolicySource: policyPath}, nil
+		JobCount: jobs, RunningJobs: running, Pressure: pressure, PolicySource: storageReportPolicy}, nil
 }
 
 func storageGC(p *proto.StorageParams, state string) (*proto.StorageGCReport, error) {
@@ -191,7 +197,7 @@ func storageGCProto(in *GCReport) *proto.StorageGCReport {
 	if in == nil {
 		return nil
 	}
-	out := &proto.StorageGCReport{Root: in.Root, UsedBytes: in.UsedBytes, FreeBytes: in.FreeBytes, TargetBytes: in.TargetBytes,
+	out := &proto.StorageGCReport{Root: storageReportRoot, UsedBytes: in.UsedBytes, FreeBytes: in.FreeBytes, TargetBytes: in.TargetBytes,
 		Scanned: in.Scanned, ScanTruncated: in.ScanTruncated, Pressure: in.Pressure, DryRun: in.DryRun, FreedBytes: in.FreedBytes,
 		Skipped: append([]string(nil), in.Skipped...), Errors: append([]string(nil), in.Errors...)}
 	conv := func(items []GCCandidate) []proto.StorageGCItem {
@@ -214,26 +220,26 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 	if err != nil {
 		return nil, err
 	}
-	report.Root = filepath.Join(stateAbs, "jobs")
+	report.Root = storageReportRoot
 	stateInfo, stateErr := os.Lstat(stateAbs)
 	if stateErr != nil || stateInfo.Mode()&os.ModeSymlink != 0 || !stateInfo.IsDir() || !pathOwnedByCurrentUser(stateInfo) {
-		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "state_root_invalid", Severity: "error", Path: stateAbs, Message: "state root is missing, not a private owned directory, or is a symlink", Action: "create a private owner-only state directory"})
+		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "state_root_invalid", Severity: "error", Path: "state", Message: "state root is missing, not a private owned directory, or is a symlink", Action: "create a private owner-only state directory"})
 		return report, nil
 	}
 	if stateInfo.Mode().Perm() != 0o700 {
-		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "state_root_permissions", Severity: "warning", Path: stateAbs, Message: "state root permissions are broader than 0700", Action: "chmod the state root to 0700"})
+		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "state_root_permissions", Severity: "warning", Path: "state", Message: "state root permissions are broader than 0700", Action: "chmod the state root to 0700"})
 	}
-	jobRootInfo, jobRootErr := os.Lstat(report.Root)
+	root := filepath.Join(stateAbs, "jobs")
+	jobRootInfo, jobRootErr := os.Lstat(root)
 	if jobRootErr != nil || jobRootInfo.Mode()&os.ModeSymlink != 0 || !jobRootInfo.IsDir() || !pathOwnedByCurrentUser(jobRootInfo) {
-		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_root_invalid", Severity: "error", Path: report.Root, Message: "jobs root is missing, not a private owned directory, or is a symlink", Action: "create or repair the jobs root with owner-only permissions"})
+		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_root_invalid", Severity: "error", Path: storageReportRoot, Message: "jobs root is missing, not a private owned directory, or is a symlink", Action: "create or repair the jobs root with owner-only permissions"})
 		return report, nil
 	}
 	if jobRootInfo.Mode().Perm() != 0o700 {
-		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_root_permissions", Severity: "warning", Path: report.Root, Message: "jobs root permissions are broader than 0700", Action: "chmod the jobs root to 0700"})
+		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_root_permissions", Severity: "warning", Path: storageReportRoot, Message: "jobs root permissions are broader than 0700", Action: "chmod the jobs root to 0700"})
 	}
-	root := report.Root
 	if _, _, err := loadStoragePolicy(state); err != nil {
-		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "policy_invalid", Severity: "error", Path: filepath.Join(state, "storage-policy.json"), Message: err.Error(), Action: "restore a valid policy or remove the file to use defaults"})
+		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "policy_invalid", Severity: "error", Path: storageReportPolicy, Message: err.Error(), Action: "restore a valid policy or remove the file to use defaults"})
 	}
 	if policyPath := filepath.Join(state, "storage-policy.json"); func() bool { st, e := os.Lstat(policyPath); return e == nil && st.Mode().Perm() != 0o600 }() {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "policy_permissions", Severity: "warning", Path: "storage-policy.json", Message: "storage policy permissions are broader than 0600", Action: "chmod the policy file to 0600"})
@@ -261,11 +267,11 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 		if strings.HasPrefix(name, ".rdev-gc-") {
 			st, e1 := os.Lstat(path)
 			if e1 != nil || st.Mode()&os.ModeSymlink != 0 || !pathOwnedByCurrentUser(st) {
-				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "unsafe_gc_tombstone", Severity: "error", Path: name, Message: "GC tombstone is missing, a symlink, or not owned by the current user", Action: "do not remove automatically; inspect and quarantine it manually"})
+				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "unsafe_gc_tombstone", Severity: "error", Message: "GC tombstone is missing, a symlink, or not owned by the current user", Action: "do not remove automatically; inspect and quarantine it manually"})
 				continue
 			}
 			if now.Sub(st.ModTime()) > time.Hour {
-				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "stale_gc_tombstone", Severity: "warning", Path: name, Message: "owner-safe GC tombstone is older than one hour", Action: "inspect and remove only after confirming no GC process is active"})
+				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "stale_gc_tombstone", Severity: "warning", Message: "owner-safe GC tombstone is older than one hour", Action: "inspect and remove only after confirming no GC process is active"})
 			}
 			continue
 		}
@@ -274,7 +280,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 		}
 		if validateJobID(name) != nil || !e.IsDir() {
 			if name != lockDirName && !strings.HasPrefix(name, ".rdev-gc-") {
-				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "unknown_state_entry", Severity: "warning", Path: name, Message: "unmanaged entry is present under the jobs root", Action: "inspect manually; automatic GC will not remove it"})
+				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "unknown_state_entry", Severity: "warning", Message: "unmanaged entry is present under the jobs root", Action: "inspect manually; automatic GC will not remove it"})
 			}
 			continue
 		}
@@ -283,11 +289,11 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 			continue
 		}
 		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
-			report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_entry_unsafe", Severity: "error", Path: name, Message: "job entry is not a private owned directory", Action: "quarantine manually; automatic GC will skip it"})
+			report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_entry_unsafe", Severity: "error", Message: "job entry is not a private owned directory", Action: "quarantine manually; automatic GC will skip it"})
 			continue
 		}
 		if _, e1 := readMetaReadOnly(path); e1 != nil {
-			report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_metadata_invalid", Severity: "warning", Path: name, Message: "job metadata cannot be read", Action: "inspect record; automatic GC will skip it"})
+			report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_metadata_invalid", Severity: "warning", Message: "job metadata cannot be read", Action: "inspect record; automatic GC will skip it"})
 		}
 	}
 	// A lock file that can be acquired is not active; report only stale files.
@@ -307,7 +313,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 			}
 			acquired, _ := probeExistingJobLock(filepath.Join(root, strings.TrimSuffix(e.Name(), ".lock")))
 			if acquired {
-				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "stale_job_lock", Severity: "warning", Path: e.Name(), Message: "lock file is old and not held by another process", Action: "it is safe to remove after confirming no concurrent agent"})
+				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "stale_job_lock", Severity: "warning", Message: "lock file is old and not held by another process", Action: "it is safe to remove after confirming no concurrent agent"})
 			}
 		}
 	}
