@@ -55,6 +55,20 @@ func main() {
 	ready.SetReady(true)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				if service.ReapIdle(now) {
+					log.Printf("rdevd: reaped idle broker connections")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
