@@ -39,11 +39,11 @@ func main() {
 			}
 			continue
 		}
-		go serveConn(conn)
+		go serveConn(conn, service)
 	}
 }
 
-func serveConn(conn net.Conn) {
+func serveConn(conn net.Conn, service *broker.Service) {
 	defer conn.Close()
 	var hello proto.BrokerHello
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&hello); err != nil {
@@ -57,4 +57,22 @@ func serveConn(conn net.Conn) {
 		resp.OK = true
 	}
 	_ = json.NewEncoder(conn).Encode(resp)
+	dec := json.NewDecoder(bufio.NewReader(conn))
+	enc := json.NewEncoder(conn)
+	for {
+		var req broker.Request
+		if err := dec.Decode(&req); err != nil {
+			return
+		}
+		if err := req.Owner.Validate(); err != nil {
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+			continue
+		}
+		decision := service.Decide(req.Owner, req.Operation)
+		if !decision.Allow {
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: decision.Reason})
+			continue
+		}
+		_ = enc.Encode(broker.Response{ID: req.ID, OK: true})
+	}
 }
