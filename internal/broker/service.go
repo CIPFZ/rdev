@@ -146,6 +146,9 @@ func (s *Service) SetOwnerWeight(owner string, weight int) {
 	s.weights[owner] = weight
 	s.weightMu.Unlock()
 }
+func (s *Service) SubscribeJob(key string) (<-chan any, func()) {
+	return s.Watches.Subscribe(key)
+}
 
 // DispatchShared coalesces concurrent observations of the same detached job
 // set. Only the first caller performs remote work; followers receive its result.
@@ -164,6 +167,9 @@ func (s *Service) DispatchShared(ctx context.Context, key string, fn func() (*pr
 	s.shared[key] = current
 	s.sharedMu.Unlock()
 	current.resp, current.err = fn()
+	if current.err == nil && current.resp != nil {
+		s.Watches.Publish(key, current.resp)
+	}
 	s.sharedMu.Lock()
 	delete(s.shared, key)
 	close(current.done)
