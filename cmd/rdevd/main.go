@@ -169,6 +169,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		for {
 			var req broker.Request
 			if err := dec.Decode(&req); err != nil {
+				cancel()
 				decodeErr <- err
 				return
 			}
