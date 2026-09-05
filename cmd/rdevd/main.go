@@ -67,7 +67,13 @@ func main() {
 		log.Printf("rdevd: warning: host registry not loaded: %v", err)
 	}
 	service.SetReady(true)
-	defer service.Close(context.Background())
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := service.Close(shutdownCtx); err != nil {
+			log.Printf("rdevd: shutdown: %v", err)
+		}
+	}()
 	_ = service.Jobs.Load(*socket + ".jobs")
 	defer service.Jobs.Save(*socket + ".jobs")
 	var ready broker.Readiness
