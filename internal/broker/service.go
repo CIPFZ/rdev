@@ -37,6 +37,7 @@ type Service struct {
 	sharedMu        sync.Mutex
 	shared          map[string]*sharedDispatch
 	Jobs            *JobRegistry
+	fair            map[Lane]*fairDispatcher
 }
 
 type sharedDispatch struct {
@@ -45,9 +46,51 @@ type sharedDispatch struct {
 	err  error
 }
 
+type fairItem struct {
+	ctx    context.Context
+	fn     func() (*proto.Response, error)
+	result chan dispatchResult
+}
+type dispatchResult struct {
+	resp *proto.Response
+	err  error
+}
+type fairDispatcher struct {
+	queue *FairQueue
+	wake  chan struct{}
+	stop  chan struct{}
+}
+
+func newFairDispatcher() *fairDispatcher {
+	f := &fairDispatcher{queue: NewFairQueue(), wake: make(chan struct{}, 1), stop: make(chan struct{})}
+	go func() {
+		for {
+			select {
+			case <-f.wake:
+			case <-f.stop:
+				return
+			}
+			for {
+				value, ok := f.queue.Next()
+				if !ok {
+					break
+				}
+				item := value.(fairItem)
+				if err := item.ctx.Err(); err != nil {
+					item.result <- dispatchResult{err: err}
+					continue
+				}
+				resp, err := item.fn()
+				item.result <- dispatchResult{resp: resp, err: err}
+			}
+		}
+	}()
+	return f
+}
+
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry()}
+	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry(), fair: map[Lane]*fairDispatcher{LaneControl: newFairDispatcher(), LaneExec: newFairDispatcher(), LaneBulk: newFairDispatcher()}}
 	s.SetReady(true)
 	return s
 }
@@ -62,6 +105,29 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 		return nil, errors.New("broker service closed")
 	}
 	return s.client.DoProtocol(ctx, host, req)
+}
+func (s *Service) DispatchFair(ctx context.Context, owner string, lane Lane, fn func() (*proto.Response, error)) (*proto.Response, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	f := s.fair[lane]
+	if f == nil {
+		return fn()
+	}
+	result := make(chan dispatchResult, 1)
+	f.queue.Enqueue(owner, fairItem{ctx: ctx, fn: fn, result: result}, 1)
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
+	select {
+	case out := <-result:
+		return out.resp, out.err
+	case <-f.stop:
+		return nil, ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // DispatchShared coalesces concurrent observations of the same detached job
@@ -186,6 +252,9 @@ func (s *Service) Close(ctx context.Context) error {
 		return ErrClosed
 	}
 	_ = s.Drain(ctx)
+	for _, f := range s.fair {
+		close(f.stop)
+	}
 	s.client.Close()
 	return nil
 }

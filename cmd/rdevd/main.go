@@ -277,7 +277,9 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		if req.Wire != nil {
-			dispatch := func() (*proto.Response, error) { return service.Dispatch(connCtx, req.Host, req.Wire) }
+			dispatch := func() (*proto.Response, error) {
+				return service.DispatchFair(connCtx, req.Owner.Key(), lane, func() (*proto.Response, error) { return service.Dispatch(connCtx, req.Host, req.Wire) })
+			}
 			var wireResp *proto.Response
 			var err error
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
