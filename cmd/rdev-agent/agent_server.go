@@ -622,5 +622,10 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 		return response
 	}
 	response.OK = true
+	if request.Op == proto.OpPing || request.Op == proto.OpCapabilityProbe {
+		response.Type = proto.EventFinal
+		response.Terminal = true
+		response.Execution = proto.StateCompleted
+	}
 	return response
 }
