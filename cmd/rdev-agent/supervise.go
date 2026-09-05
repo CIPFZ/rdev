@@ -33,6 +33,18 @@ import (
 // mode instead of serving the JSON protocol.
 const superviseFlag = "-supervise"
 
+// killJobChildGroup terminates the child and every descendant in its private
+// process group. The supervisor itself remains outside that group so it can
+// reap the child and persist a terminal status after an enforced limit.
+func killJobChildGroup(pid int) {
+	if pid <= 0 {
+		return
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
 // runSupervisor executes args[0:] as a child, waits for it, and records the
 // outcome in <jobDir>/status.json. It never returns; it exits with the child's
 // code so `ps` and any outer waiter see a faithful status.
@@ -91,13 +103,25 @@ func runSupervisor(jobDir string, argv []string) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	var committed jobMeta
+	_ = readJSON(filepath.Join(jobDir, "meta.json"), &committed)
+	resources := committed.EffectiveResources
+	if resources.FDs > 0 {
+		lim := &syscall.Rlimit{Cur: uint64(resources.FDs), Max: uint64(resources.FDs)}
+		if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, lim); err != nil {
+			_ = writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{"exit_code": -1, "resource_limit": "fd", "ended_at": time.Now().UTC().Format(time.RFC3339)})
+			os.Exit(125)
+		}
+	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = nil
 	cmd.Env = withoutEnvValue(os.Environ(), supervisorParentEnv)
-	// Keep the child in the supervisor's process group so that signalling the
-	// group (job_stop uses -pgid) reaches supervisor and child together.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: false}
+	// Isolate the child in its own process group. This lets timeout and log-limit
+	// enforcement kill the complete descendant tree while keeping the
+	// supervisor alive long enough to publish a terminal status. job_stop
+	// explicitly signals both the supervisor and child groups.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	so := storage.NewSink(policy.PerJob.MaxStdoutBytes, policy.PerJob.OnLogLimit)
 	se := storage.NewSink(policy.PerJob.MaxStderrBytes, policy.PerJob.OnLogLimit)
@@ -125,12 +149,26 @@ func runSupervisor(jobDir string, argv []string) {
 	// participates in the same transaction lock as job_start/job_rm: a starter
 	// that is still committing metadata, or a remover that is tearing the record
 	// down, must not race a child.json write into a half-removed directory.
-	_ = withJobLock(jobDir, func() error {
+	childPublishErr := withJobLock(jobDir, func() error {
 		if !jobExists(jobDir) {
 			return nil
 		}
 		return writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
 	})
+	if childPublishErr != nil {
+		// Without child.json a later stop cannot address this isolated process
+		// group after the supervisor exits. Never continue with an unobservable
+		// runnable job: terminate and reap the complete tree, then make a best
+		// effort to publish a terminal failure.
+		killJobChildGroup(cmd.Process.Pid)
+		_ = cmd.Wait()
+		_ = writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
+			"exit_code": -1,
+			"ended_at":  time.Now().UTC().Format(time.RFC3339),
+			"error":     fmt.Sprintf("publish child identity: %v", childPublishErr),
+		})
+		os.Exit(125)
+	}
 
 	stopLedger := make(chan struct{})
 	go func() {
@@ -154,7 +192,7 @@ func runSupervisor(jobDir string, argv []string) {
 				select {
 				case <-ticker.C:
 					if so.LimitReached() || se.LimitReached() {
-						_ = cmd.Process.Kill()
+						killJobChildGroup(cmd.Process.Pid)
 						return
 					}
 				case <-stopLimit:
@@ -163,7 +201,22 @@ func runSupervisor(jobDir string, argv []string) {
 			}
 		}()
 	}
-	err = cmd.Wait()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	resourceLimit := ""
+	if resources.WallTimeoutSec > 0 {
+		timer := time.NewTimer(time.Duration(resources.WallTimeoutSec) * time.Second)
+		select {
+		case err = <-waitDone:
+			timer.Stop()
+		case <-timer.C:
+			resourceLimit = "wall_timeout"
+			killJobChildGroup(cmd.Process.Pid)
+			err = <-waitDone
+		}
+	} else {
+		err = <-waitDone
+	}
 	close(stopLimit)
 	close(stopLedger)
 	_ = so.Flush(filepath.Join(jobDir, "stdout"))
@@ -188,10 +241,11 @@ func runSupervisor(jobDir string, argv []string) {
 			return nil
 		}
 		return writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
-			"exit_code":     code,
-			"ended_at":      time.Now().UTC().Format(time.RFC3339),
-			"stdout_ledger": ledgerProto(so.Ledger()),
-			"stderr_ledger": ledgerProto(se.Ledger()),
+			"exit_code":      code,
+			"ended_at":       time.Now().UTC().Format(time.RFC3339),
+			"resource_limit": resourceLimit,
+			"stdout_ledger":  ledgerProto(so.Ledger()),
+			"stderr_ledger":  ledgerProto(se.Ledger()),
 		})
 	}
 	if err := withJobLock(jobDir, writeStatus); err != nil {

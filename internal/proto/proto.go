@@ -163,6 +163,9 @@ type JobParams struct {
 	// Spec starts a new job. Its TimeoutSec and MaxOutputBytes are ignored:
 	// jobs outlive the request, and their output goes to files on disk.
 	Spec *ExecParams `json:"spec,omitempty"`
+	// Resources requests a bounded process envelope. Zero fields are
+	// unspecified; the agent returns the effective values in JobInfo.
+	Resources *ResourceEnvelope `json:"resources,omitempty"`
 	// Label is a human-readable tag recorded with the job.
 	Label string `json:"label,omitempty"`
 	// WaitAny returns as soon as one of IDs finishes, instead of waiting for all
@@ -451,6 +454,11 @@ type JobInfo struct {
 	EndedAt      string    `json:"ended_at,omitempty"`
 	StdoutLedger LogLedger `json:"stdout_ledger"`
 	StderrLedger LogLedger `json:"stderr_ledger"`
+	// Requested and Effective preserve the admission decision for retries and
+	// inspection. Effective is never broader than the remote hard policy.
+	Requested     ResourceEnvelope `json:"requested_resources"`
+	Effective     ResourceEnvelope `json:"effective_resources"`
+	ResourceLimit string           `json:"resource_limit,omitempty"`
 }
 
 // LogLedger is the durable accounting for a bounded job log stream.
