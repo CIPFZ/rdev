@@ -63,6 +63,10 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		resp.OK = true
 	}
 	_ = json.NewEncoder(conn).Encode(resp)
+	if !service.AttachClient() {
+		return
+	}
+	defer service.DetachClient()
 	dec := json.NewDecoder(bufio.NewReader(conn))
 	enc := json.NewEncoder(conn)
 	for {
