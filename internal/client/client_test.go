@@ -309,6 +309,7 @@ func TestSyncPlanHasConflicts(t *testing.T) {
 		{name: "new directory", out: "cd+++++++++ dir/\n", want: false},
 		{name: "delete", out: "*deleting   old\n", want: false},
 		{name: "existing update", out: ">f.st...... file\n", want: true},
+		{name: "unknown deletion-like item", out: "*f......... file\n", want: true},
 		{name: "diagnostic", out: "sending incremental file list\n", want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -347,6 +348,83 @@ func TestBuildSyncManifestDeterministicAndSymlinkPolicy(t *testing.T) {
 	c, err := buildSyncManifest(d, "skip")
 	if err != nil || c.Entries >= a.Entries {
 		t.Fatalf("skip symlink manifest = %+v preserve=%+v err=%v", c, a, err)
+	}
+}
+
+func TestBuildSyncManifestFollowRejectsEscapingSymlink(t *testing.T) {
+	d := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(d, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildSyncManifest(d, "follow"); err == nil {
+		t.Fatal("follow policy must reject a symlink escaping the sync root")
+	}
+}
+
+func TestOpenManifestFileDoesNotFollowFinalSymlink(t *testing.T) {
+	d := t.TempDir()
+	target := filepath.Join(d, "target")
+	link := filepath.Join(d, "link")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openManifestFile(link)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("manifest digest open unexpectedly followed symlink")
+	}
+}
+
+func TestSyncDeleteRequiresBoundedPlanAndReturnsDigest(t *testing.T) {
+	c := syncTestClient(t)
+	local := t.TempDir()
+	if err := os.WriteFile(filepath.Join(local, "file"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	c.rsync = func(_ context.Context, args []string, stdout, _ io.Writer) error {
+		calls++
+		if calls == 1 {
+			if !containsArg(args, "--dry-run") || !containsArg(args, "--itemize-changes") {
+				t.Fatalf("delete preflight missing bounded plan flags: %v", args)
+			}
+			_, _ = io.WriteString(stdout, ">f+++++++++ file\n")
+			return nil
+		}
+		if containsArg(args, "--dry-run") || containsArg(args, "--itemize-changes") {
+			t.Fatalf("mutating transfer retained preflight flags: %v", args)
+		}
+		return nil
+	}
+	res, err := c.Sync(t.Context(), SyncOptions{Host: "dev", Direction: "push", Local: local, Remote: "dst", Delete: true, ConfirmDelete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || res.PlanDigest == "" {
+		t.Fatalf("calls=%d plan_digest=%q, want two calls and digest", calls, res.PlanDigest)
+	}
+}
+
+func TestSyncRejectsSourceChangedDuringTransfer(t *testing.T) {
+	c := syncTestClient(t)
+	local := t.TempDir()
+	path := filepath.Join(local, "file")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.rsync = func(_ context.Context, _ []string, _, _ io.Writer) error {
+		return os.WriteFile(path, []byte("new"), 0o600)
+	}
+	res, err := c.Sync(t.Context(), SyncOptions{Host: "dev", Direction: "push", Local: local, Remote: "dst"})
+	if err == nil || res == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("source mutation result=%+v err=%v, want conflict error with result", res, err)
 	}
 }
 

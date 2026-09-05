@@ -1510,6 +1510,8 @@ type SyncResult struct {
 	Command          string           `json:"command"`
 	ManifestDigest   string           `json:"manifest_digest,omitempty"`
 	ManifestEntries  int              `json:"manifest_entries,omitempty"`
+	ManifestComplete bool             `json:"manifest_complete,omitempty"`
+	PlanDigest       string           `json:"plan_digest,omitempty"`
 }
 
 const defaultSyncOutputBytes int64 = 256 << 10
@@ -1568,12 +1570,26 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	defer release()
 
 	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
+	manifest := syncManifest{}
+	if opts.Direction == "" || opts.Direction == "push" {
+		manifest, err = buildSyncManifest(opts.Local, opts.SymlinkPolicy)
+		if err != nil {
+			// Preserve rsync's own diagnostics for a missing source path. The
+			// manifest is an audit aid, not a second path-validation mechanism.
+			if os.IsNotExist(err) {
+				manifest = syncManifest{}
+			} else {
+				return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("build sync manifest: %w", err))
+			}
+		}
+	}
 	// A mutating conflict=fail transfer must first perform a read-only rsync
 	// plan.  Treat any itemized update to an existing path as a conflict and
 	// never proceed to the mutating invocation when the preflight is uncertain.
 	// This is intentionally done after leasing the connection so both probes use
 	// the same validated host identity and ControlMaster.
-	if opts.ConflictPolicy == "fail" && !opts.DryRun {
+	planDigest := ""
+	if !opts.DryRun && (opts.ConflictPolicy == "fail" || opts.Delete) {
 		preflightArgs := buildSyncArgsWith(pooled.conn.Host(), pooled.conn.SSHArgs(), opts, true)
 		preflightOut := newBoundedCapture(limit)
 		preflightErrOut := newBoundedCapture(limit)
@@ -1596,21 +1612,17 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		// A bounded capture that dropped any part of the plan cannot establish
 		// that no conflict exists. Refuse the mutation rather than allowing a
 		// conflict hidden after the retention boundary to proceed.
-		if preflightTruncation.Truncated || syncPlanHasConflicts(preflightRaw) {
-			return nil, proto.NewError(proto.CodeInvalidRequest, "sync conflict detected", proto.StateNotSent)
-		}
-	}
-	manifest := syncManifest{}
-	if opts.Direction == "" || opts.Direction == "push" {
-		manifest, err = buildSyncManifest(opts.Local, opts.SymlinkPolicy)
-		if err != nil {
-			// Preserve rsync's own diagnostics for a missing source path. The
-			// manifest is an audit aid, not a second path-validation mechanism.
-			if os.IsNotExist(err) {
-				manifest = syncManifest{}
-			} else {
-				return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("build sync manifest: %w", err))
+		if preflightTruncation.Truncated {
+			code := proto.CodeLimitExceeded
+			if opts.ConflictPolicy == "fail" {
+				code = proto.CodeInvalidRequest
 			}
+			return nil, proto.NewError(code, "sync manifest plan exceeded output limit", proto.StateNotSent)
+		}
+		h := sha256.Sum256(preflightRaw)
+		planDigest = fmt.Sprintf("%x", h[:])
+		if opts.ConflictPolicy == "fail" && syncPlanHasConflicts(preflightRaw) {
+			return nil, proto.NewError(proto.CodeInvalidRequest, "sync conflict detected", proto.StateNotSent)
 		}
 	}
 
@@ -1643,6 +1655,7 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		// per field, or the next field added inherits the gap.
 		Command:        c.redactTextWith(redactionSnapshot, "rsync "+strings.Join(args, " ")),
 		ManifestDigest: manifest.Digest, ManifestEntries: manifest.Entries,
+		ManifestComplete: manifest.Complete, PlanDigest: planDigest,
 	}
 	var ee *exec.ExitError
 	if errors.As(runErr, &ee) {
@@ -1652,6 +1665,11 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 			return nil, c.redactErrWith(redactionSnapshot, ctx.Err())
 		}
 		return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("run rsync: %w", runErr))
+	}
+	if manifest.Digest != "" {
+		if verifyErr := verifySyncManifest(opts.Local, opts.SymlinkPolicy, manifest); verifyErr != nil {
+			return res, c.redactErrWith(redactionSnapshot, proto.NewError(proto.CodeInvalidRequest, "sync source changed during transfer", proto.StateCompleted))
+		}
 	}
 	return res, nil
 }
@@ -1769,7 +1787,7 @@ func syncPlanHasConflicts(raw []byte) bool {
 		}
 		// It is an itemized change to an existing object. Fail closed if the
 		// format ever changes in a way we cannot classify.
-		if code[0] == '>' || code[0] == '<' || code[0] == 'c' || code[0] == 'h' || code[0] == '.' {
+		if code[0] == '>' || code[0] == '<' || code[0] == 'c' || code[0] == 'h' || code[0] == '.' || code[0] == '*' {
 			return true
 		}
 	}

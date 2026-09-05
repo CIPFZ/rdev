@@ -715,6 +715,9 @@ type SyncIn struct {
 	Exclude        []string `json:"exclude,omitempty" jsonschema:"rsync exclude patterns, e.g. ['.git','*.pyc','.venv']."`
 	DryRun         bool     `json:"dry_run,omitempty" jsonschema:"Show what would transfer without changing anything."`
 	Delete         bool     `json:"delete,omitempty" jsonschema:"Delete destination files missing from the source. Destructive: prefer a dry_run first."`
+	ConfirmDelete  bool     `json:"confirm_delete,omitempty" jsonschema:"Required acknowledgement for a mutating delete; always preview with dry_run first."`
+	SymlinkPolicy  string   `json:"symlink_policy,omitempty" jsonschema:"Symlink handling: preserve (default), follow only within the source root, or skip."`
+	ConflictPolicy string   `json:"conflict_policy,omitempty" jsonschema:"Conflict handling: overwrite (default), skip, or fail closed after a bounded preflight."`
 	MaxOutputBytes int64    `json:"max_output_bytes,omitempty" jsonschema:"Per-stream stdout/stderr retention cap. Zero uses the bounded default; values may only lower the hard cap."`
 }
 
@@ -729,6 +732,10 @@ type SyncOut struct {
 	ExitCode         int              `json:"exit_code"`
 	DryRun           bool             `json:"dry_run,omitempty"`
 	Command          string           `json:"command"`
+	ManifestDigest   string           `json:"manifest_digest,omitempty"`
+	ManifestEntries  int              `json:"manifest_entries,omitempty"`
+	ManifestComplete bool             `json:"manifest_complete,omitempty"`
+	PlanDigest       string           `json:"plan_digest,omitempty"`
 }
 
 func registerSync(s *mcp.Server, c *client.Client) {
@@ -738,7 +745,8 @@ func registerSync(s *mcp.Server, c *client.Client) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SyncIn) (*mcp.CallToolResult, SyncOut, error) {
 		res, err := c.Sync(ctx, client.SyncOptions{
 			Host: in.Host, Direction: in.Direction, Local: in.Local, Remote: in.Remote,
-			Exclude: in.Exclude, DryRun: in.DryRun, Delete: in.Delete, MaxOutputBytes: in.MaxOutputBytes,
+			Exclude: in.Exclude, DryRun: in.DryRun, Delete: in.Delete, ConfirmDelete: in.ConfirmDelete,
+			SymlinkPolicy: in.SymlinkPolicy, ConflictPolicy: in.ConflictPolicy, MaxOutputBytes: in.MaxOutputBytes,
 		})
 		if err != nil {
 			return nil, SyncOut{}, err
@@ -748,6 +756,8 @@ func registerSync(s *mcp.Server, c *client.Client) {
 			StdoutB64: res.StdoutB64, StderrB64: res.StderrB64,
 			StdoutTruncation: res.StdoutTruncation, StderrTruncation: res.StderrTruncation,
 			Truncated: res.Truncated, DryRun: res.DryRun, Command: res.Command,
+			ManifestDigest: res.ManifestDigest, ManifestEntries: res.ManifestEntries,
+			ManifestComplete: res.ManifestComplete, PlanDigest: res.PlanDigest,
 		}, nil
 	})
 }
