@@ -141,7 +141,13 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				endRequest()
 				continue
 			}
+			if (req.Wire.ClientID != "" && req.Wire.ClientID != req.Owner.ClientID) || (req.Wire.ProjectID != "" && req.Wire.ProjectID != req.Owner.ProjectID) {
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: "wire owner mismatch"})
+				endRequest()
+				continue
+			}
 			req.Wire.ClientID = req.Owner.ClientID
+			req.Wire.ProjectID = req.Owner.ProjectID
 		}
 		decision := service.Decide(req.Owner, req.Operation)
 		if !decision.Allow {
