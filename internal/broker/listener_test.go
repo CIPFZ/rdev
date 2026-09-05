@@ -25,3 +25,14 @@ func TestListenPrivateAndSingleInstance(t *testing.T) {
 		t.Fatal("expected second listener to fail")
 	}
 }
+
+func TestListenRecoversStaleSocket(t *testing.T) {
+	p := filepath.Join("/tmp", "rdevd-stale.sock")
+	_ = os.Remove(p)
+	_ = os.WriteFile(p, []byte("stale"), 0o600)
+	l, err := Listen(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+}
