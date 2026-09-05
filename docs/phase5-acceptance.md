@@ -12,10 +12,10 @@ runtime path is exercised.
 | P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch | In progress | Installed frontend adoption and multi-process remote-session benchmark remain |
 | P5-04 | Owner validation and wire client/project binding; persisted job owner | Complete | Capability administration is still internal |
 | P5-05 | Per-connection context cancellation and shared client pool | In progress | Cancellation under an in-flight transport retry needs an integration test |
-| P5-06 | Quota admission held through dispatch | In progress | Host-specific and queued quota pressure needs stress coverage |
+| P5-06 | Quota admission held through dispatch and per-host accounting | In progress | Queued quota pressure needs stress coverage |
 | P5-07 | Per-lane fair queues with owner weights and worker pools | In progress | Weighted fairness benchmark is still required |
 | P5-08 | Control/exec/bulk classification and separate worker pools | In progress | Latency SLO benchmark is still required |
-| P5-09 | Shared job-wait dispatch coalescing | In progress | WatchHub event streaming across reconnects is not yet exposed |
+| P5-09 | Shared job-wait dispatch coalescing and WatchHub publication | In progress | WatchHub event streaming across reconnects is not yet exposed |
 | P5-10 | Atomic job registry and startup remote re-discovery | In progress | Crash/restart mutation integration test is still required |
 | P5-11 | Lease grace and idle connection reaper | Complete | Reaper timing needs long-running service test |
 | P5-12 | Default-deny owner policy, persisted grants, readiness gate | In progress | Capability/principal administration RPC is still required |
