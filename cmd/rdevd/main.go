@@ -75,12 +75,13 @@ func main() {
 	if err := service.Client().Hosts.Load(); err != nil {
 		log.Printf("rdevd: warning: host registry not loaded: %v", err)
 	}
+	jobsPath := *socket + ".jobs"
+	_ = service.Jobs.Load(jobsPath)
+	defer service.Jobs.Save(jobsPath)
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
+	service.RecoverJobs(recoveryCtx)
+	cancelRecovery()
 	service.SetReady(true)
-	go func() {
-		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		service.RecoverJobs(recoveryCtx)
-	}()
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -88,8 +89,6 @@ func main() {
 			log.Printf("rdevd: shutdown: %v", err)
 		}
 	}()
-	_ = service.Jobs.Load(*socket + ".jobs")
-	defer service.Jobs.Save(*socket + ".jobs")
 	var ready broker.Readiness
 	ready.SetReady(true)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
