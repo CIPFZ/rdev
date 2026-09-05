@@ -6,8 +6,11 @@ import (
 )
 
 type AuditEvent struct {
-	At                                 time.Time `json:"at"`
-	Owner, Operation, Decision, Result string    `json:"owner,omitempty"`
+	At        time.Time `json:"at"`
+	Owner     string    `json:"owner,omitempty"`
+	Operation string    `json:"operation,omitempty"`
+	Decision  string    `json:"decision,omitempty"`
+	Result    string    `json:"result,omitempty"`
 }
 type AuditLog struct {
 	mu     sync.RWMutex
