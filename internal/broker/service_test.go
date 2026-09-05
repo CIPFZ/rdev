@@ -23,3 +23,13 @@ func TestServiceLeaseAndPolicy(t *testing.T) {
 		t.Fatal("lease not reapable")
 	}
 }
+
+func TestServiceRejectsAttachAfterClose(t *testing.T) {
+	s := NewService(nil)
+	if err := s.Close(nil); err != nil {
+		t.Fatal(err)
+	}
+	if s.AttachClient() {
+		t.Fatal("attach after close accepted")
+	}
+}
