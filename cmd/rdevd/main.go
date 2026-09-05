@@ -25,6 +25,8 @@ func main() {
 		log.Fatal(err)
 	}
 	defer ln.Close()
+	service := broker.NewService(nil)
+	defer service.Close(context.Background())
 	var ready broker.Readiness
 	ready.SetReady(true)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
