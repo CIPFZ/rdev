@@ -71,7 +71,10 @@ type Request struct {
 	// OperationID to this identity so unrelated clients cannot claim each
 	// other's cached result.
 	ClientID string `json:"client_id,omitempty"`
-	Op       string `json:"op"`
+	// ProjectID scopes shared broker state to a project. It is opaque to the
+	// remote agent and must be stable for the lifetime of a client session.
+	ProjectID string `json:"project_id,omitempty"`
+	Op        string `json:"op"`
 	// Replay distinguishes a retry from a first attempt. A mutating replay whose
 	// deduplication record is missing must return ambiguous_outcome rather than
 	// silently execute again.
