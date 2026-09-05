@@ -9,15 +9,16 @@ type queuedRequest struct {
 
 // FairQueue serves owners round-robin with configurable positive weights.
 type FairQueue struct {
-	mu     sync.Mutex
-	queues map[string][]queuedRequest
-	order  []string
-	weight map[string]int
-	cursor int
+	mu      sync.Mutex
+	queues  map[string][]queuedRequest
+	order   []string
+	weight  map[string]int
+	cursor  int
+	credits map[string]int
 }
 
 func NewFairQueue() *FairQueue {
-	return &FairQueue{queues: make(map[string][]queuedRequest), weight: make(map[string]int)}
+	return &FairQueue{queues: make(map[string][]queuedRequest), weight: make(map[string]int), credits: make(map[string]int)}
 }
 
 func (q *FairQueue) Enqueue(owner string, value any, weight int) {
@@ -41,12 +42,19 @@ func (q *FairQueue) Next() (any, bool) {
 	}
 	for n := 0; n < len(q.order); n++ {
 		owner := q.order[q.cursor%len(q.order)]
-		q.cursor++
 		if len(q.queues[owner]) == 0 {
+			q.cursor++
 			continue
+		}
+		if q.credits[owner] <= 0 {
+			q.credits[owner] = q.weight[owner]
 		}
 		item := q.queues[owner][0]
 		q.queues[owner] = q.queues[owner][1:]
+		q.credits[owner]--
+		if q.credits[owner] == 0 {
+			q.cursor++
+		}
 		return item.Value, true
 	}
 	return nil, false
