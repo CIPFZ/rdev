@@ -3,8 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 func main() {
@@ -23,13 +27,21 @@ func main() {
 		defaultSocket = filepath.Join(home, ".cache", "rdev", "rdevd.sock")
 	}
 	socket := flag.String("socket", defaultSocket, "Unix socket path")
+	defaultAgents := filepath.Join(os.Getenv("HOME"), ".local", "share", "rdev", "agents")
+	if v := os.Getenv("RDEV_AGENT_DIR"); v != "" {
+		defaultAgents = v
+	}
+	agentDir := flag.String("agent-dir", defaultAgents, "directory containing rdev-agent-<os>-<arch> binaries")
 	flag.Parse()
 	ln, err := broker.Listen(*socket)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer ln.Close()
-	service := broker.NewService(nil)
+	service := broker.NewService(agentLookup(*agentDir))
+	if err := service.Client().Hosts.Load(); err != nil {
+		log.Printf("rdevd: warning: host registry not loaded: %v", err)
+	}
 	defer service.Close(context.Background())
 	jobs := broker.NewJobRegistry()
 	_ = jobs.Load(*socket + ".jobs")
@@ -47,6 +59,18 @@ func main() {
 			continue
 		}
 		go serveConn(conn, service)
+	}
+}
+
+func agentLookup(dir string) func(string, string) (*transport.AgentBinary, error) {
+	return func(goos, goarch string) (*transport.AgentBinary, error) {
+		path := filepath.Join(dir, fmt.Sprintf("rdev-agent-%s-%s", goos, goarch))
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("agent %s/%s unavailable: %w", goos, goarch, err)
+		}
+		sum := sha256.Sum256(data)
+		return &transport.AgentBinary{Data: data, SHA256: hex.EncodeToString(sum[:])}, nil
 	}
 }
 
