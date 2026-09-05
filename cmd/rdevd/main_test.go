@@ -37,6 +37,10 @@ func TestServeConnRejectsIncompatible(t *testing.T) {
 	if got.OK || got.Error == "" {
 		t.Fatal("incompatible hello accepted")
 	}
+	var ignored broker.Request
+	if err := json.NewDecoder(a).Decode(&ignored); err == nil {
+		t.Fatal("incompatible connection remained in request loop")
+	}
 }
 
 func TestServeConnAppliesPolicy(t *testing.T) {

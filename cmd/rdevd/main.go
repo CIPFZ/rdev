@@ -59,6 +59,8 @@ func serveConn(conn net.Conn, service *broker.Service) {
 	resp := proto.BrokerHelloResponse{Version: local.Version, MinVersion: local.MinVersion}
 	if err := proto.ValidateBrokerHello(local, hello); err != nil {
 		resp.Error = err.Error()
+		_ = json.NewEncoder(conn).Encode(resp)
+		return
 	} else {
 		resp.OK = true
 	}
