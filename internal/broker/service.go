@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/transport"
@@ -15,15 +16,19 @@ import (
 type Service struct {
 	client *client.Client
 	policy *Policy
+	lease  *Lease
 }
 
 func NewService(lookup client.AgentLookup) *Service {
-	return &Service{client: client.New(lookup), policy: NewPolicy()}
+	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second)}
 }
 
 // Client exposes the broker-owned client for request dispatch and lifecycle
 // integration. It is intentionally stable for the lifetime of Service.
-func (s *Service) Client() *client.Client { return s.client }
+func (s *Service) Client() *client.Client      { return s.client }
+func (s *Service) AttachClient()               { s.lease.Attach() }
+func (s *Service) DetachClient()               { s.lease.Detach() }
+func (s *Service) Reapable(now time.Time) bool { return s.lease.Reapable(now) }
 
 func (s *Service) Decide(owner Owner, operation string) Decision {
 	if err := owner.Validate(); err != nil {
