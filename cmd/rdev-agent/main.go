@@ -772,6 +772,11 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 
 func doAppend(path string, data []byte, mode os.FileMode, explicitMode bool) (*proto.WriteResult, error) {
 	dir := filepath.Dir(path)
+	if !explicitMode {
+		// Match atomic overwrite: an implicit-mode append must not create a
+		// world-readable new file.
+		mode = 0o600
+	}
 	created := false
 	if st, err := os.Lstat(path); err == nil {
 		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
