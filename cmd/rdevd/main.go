@@ -162,27 +162,38 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
-		if !service.Lanes.Acquire(broker.LaneControl) {
+		lane := broker.LaneControl
+		switch req.Operation {
+		case "exec", "job.start", "job.stop", "job.wait":
+			lane = broker.LaneExec
+		case "sync.push", "sync.pull", "write":
+			lane = broker.LaneBulk
+		}
+		if !service.Lanes.Acquire(lane) {
 			service.Quota.Release(req.Owner.Key())
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: "control lane unavailable"})
 			endRequest()
 			continue
 		}
-		service.Lanes.Release(broker.LaneControl)
-		service.Quota.Release(req.Owner.Key())
 		if req.Wire != nil {
 			wireResp, err := service.Dispatch(context.Background(), req.Host, req.Wire)
 			if err != nil {
+				service.Lanes.Release(lane)
+				service.Quota.Release(req.Owner.Key())
 				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "dispatch_error"})
 				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 				endRequest()
 				continue
 			}
+			service.Lanes.Release(lane)
+			service.Quota.Release(req.Owner.Key())
 			service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Wire: wireResp})
 			endRequest()
 			continue
 		}
+		service.Lanes.Release(lane)
+		service.Quota.Release(req.Owner.Key())
 		service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
 		_ = enc.Encode(broker.Response{ID: req.ID, OK: true})
 		endRequest()
