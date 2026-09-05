@@ -60,6 +60,11 @@ func Listen(path string) (*Listener, error) {
 		lock.Close()
 		return nil, err
 	}
+	if err = ValidateSocket(path); err != nil {
+		ln.Close()
+		lock.Close()
+		return nil, err
+	}
 	return &Listener{Listener: ln, lock: lock, path: path}, nil
 }
 
