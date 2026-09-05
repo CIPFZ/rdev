@@ -1698,6 +1698,20 @@ func (c *Client) Ping(ctx context.Context, host string) (*proto.PingResult, erro
 	return resp.Ping, nil
 }
 
+// CapabilityProbe asks the remote agent for its verified resource controls and
+// execution profile. The result is intentionally read-only; callers can use
+// it to decide whether a requested policy is supported before starting work.
+func (c *Client) CapabilityProbe(ctx context.Context, host string, refresh bool) (*proto.CapabilityResult, error) {
+	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpCapabilityProbe, Capability: &proto.CapabilityParams{Refresh: refresh}})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.Capability == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.Capability, nil
+}
+
 // JobRmOptions selects jobs to delete. Either ID, or a filtered sweep.
 type JobRmOptions struct {
 	Host string

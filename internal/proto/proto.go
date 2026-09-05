@@ -30,25 +30,26 @@ const MinVersion = 2
 
 // Op names carried in Request.Op.
 const (
-	OpPing          = "ping"
-	OpExec          = "exec"
-	OpReadFile      = "read_file"
-	OpWriteFile     = "write_file"
-	OpJobStart      = "job_start"
-	OpJobList       = "job_list"
-	OpJobStatus     = "job_status"
-	OpJobLogs       = "job_logs"
-	OpJobStop       = "job_stop"
-	OpJobWait       = "job_wait"
-	OpJobRm         = "job_rm"
-	OpStorageStatus = "storage_status"
-	OpStorageGC     = "storage_gc"
-	OpStorageDoctor = "storage_doctor"
-	OpStateInspect  = "state_inspect"
-	OpStateMigrate  = "state_migrate"
-	OpStateRepair   = "state_repair"
-	OpList          = "list"
-	OpCancel        = "cancel"
+	OpPing            = "ping"
+	OpExec            = "exec"
+	OpReadFile        = "read_file"
+	OpWriteFile       = "write_file"
+	OpJobStart        = "job_start"
+	OpJobList         = "job_list"
+	OpJobStatus       = "job_status"
+	OpJobLogs         = "job_logs"
+	OpJobStop         = "job_stop"
+	OpJobWait         = "job_wait"
+	OpJobRm           = "job_rm"
+	OpStorageStatus   = "storage_status"
+	OpStorageGC       = "storage_gc"
+	OpStorageDoctor   = "storage_doctor"
+	OpStateInspect    = "state_inspect"
+	OpStateMigrate    = "state_migrate"
+	OpStateRepair     = "state_repair"
+	OpCapabilityProbe = "capability_probe"
+	OpList            = "list"
+	OpCancel          = "cancel"
 )
 
 // Job states reported by the agent.
@@ -81,16 +82,17 @@ type Request struct {
 	// StreamWindowBytes is the maximum total data-frame payload the agent may
 	// emit before the final frame. Zero disables data frames (accepted/progress/
 	// final still apply). It may only lower the shared hard window.
-	StreamWindowBytes int64          `json:"stream_window_bytes,omitempty"`
-	Hello             *HelloParams   `json:"hello,omitempty"`
-	Cancel            *CancelParams  `json:"cancel,omitempty"`
-	Exec              *ExecParams    `json:"exec,omitempty"`
-	Read              *ReadParams    `json:"read,omitempty"`
-	Cat               *WriteParams   `json:"write,omitempty"`
-	Job               *JobParams     `json:"job,omitempty"`
-	List              *ListParams    `json:"list,omitempty"`
-	Storage           *StorageParams `json:"storage,omitempty"`
-	State             *StateParams   `json:"state,omitempty"`
+	StreamWindowBytes int64             `json:"stream_window_bytes,omitempty"`
+	Hello             *HelloParams      `json:"hello,omitempty"`
+	Cancel            *CancelParams     `json:"cancel,omitempty"`
+	Exec              *ExecParams       `json:"exec,omitempty"`
+	Read              *ReadParams       `json:"read,omitempty"`
+	Cat               *WriteParams      `json:"write,omitempty"`
+	Job               *JobParams        `json:"job,omitempty"`
+	List              *ListParams       `json:"list,omitempty"`
+	Storage           *StorageParams    `json:"storage,omitempty"`
+	State             *StateParams      `json:"state,omitempty"`
+	Capability        *CapabilityParams `json:"capability,omitempty"`
 }
 
 // CancelParams targets one foreground operation. Detached jobs are controlled
@@ -231,14 +233,52 @@ type Response struct {
 	Data     *DataFrame     `json:"data,omitempty"`
 	Progress *ProgressFrame `json:"progress,omitempty"`
 
-	Ping    *PingResult    `json:"ping,omitempty"`
-	Exec    *ExecResult    `json:"exec,omitempty"`
-	Read    *ReadResult    `json:"read,omitempty"`
-	Cat     *WriteResult   `json:"write,omitempty"`
-	Job     *JobResult     `json:"job,omitempty"`
-	Storage *StorageResult `json:"storage,omitempty"`
-	State   *StateResult   `json:"state,omitempty"`
-	List    *ListResult    `json:"list,omitempty"`
+	Ping       *PingResult       `json:"ping,omitempty"`
+	Exec       *ExecResult       `json:"exec,omitempty"`
+	Read       *ReadResult       `json:"read,omitempty"`
+	Cat        *WriteResult      `json:"write,omitempty"`
+	Job        *JobResult        `json:"job,omitempty"`
+	Storage    *StorageResult    `json:"storage,omitempty"`
+	State      *StateResult      `json:"state,omitempty"`
+	Capability *CapabilityResult `json:"capability,omitempty"`
+	List       *ListResult       `json:"list,omitempty"`
+}
+
+// ResourceEnvelope carries requested and effective process budgets.
+type ResourceEnvelope struct {
+	CPUQuotaMillis int64 `json:"cpu_quota_millis,omitempty"`
+	MemoryBytes    int64 `json:"memory_bytes,omitempty"`
+	PIDs           int   `json:"pids,omitempty"`
+	FDs            int   `json:"fds,omitempty"`
+	WallTimeoutSec int   `json:"wall_timeout_sec,omitempty"`
+	JobCount       int   `json:"job_count,omitempty"`
+}
+
+type CapabilityParams struct {
+	Refresh bool `json:"refresh,omitempty"`
+}
+
+type ExecutionProfile struct {
+	Shell      string `json:"shell,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Home       string `json:"home,omitempty"`
+	Locale     string `json:"locale,omitempty"`
+	Cwd        string `json:"cwd,omitempty"`
+	Umask      string `json:"umask,omitempty"`
+	LoginShell bool   `json:"login_shell"`
+	Digest     string `json:"digest,omitempty"`
+}
+
+type CapabilityResult struct {
+	ProbeVersion string            `json:"probe_version"`
+	ProbedAt     string            `json:"probed_at"`
+	OS           string            `json:"os"`
+	Arch         string            `json:"arch"`
+	Cgroup       bool              `json:"cgroup"`
+	Rlimit       bool              `json:"rlimit"`
+	Resources    ResourceEnvelope  `json:"resources"`
+	Effective    ResourceEnvelope  `json:"effective"`
+	Profile      *ExecutionProfile `json:"profile,omitempty"`
 }
 
 // StateParams controls inspection and maintenance of the agent state root.

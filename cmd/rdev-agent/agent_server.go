@@ -597,6 +597,10 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 		} else {
 			response.State, err = doState(request.Op, request.State, state)
 		}
+	case proto.OpCapabilityProbe:
+		params := request.Capability
+		refresh := params != nil && params.Refresh
+		response.Capability = probeCapabilities(refresh)
 	default:
 		descriptor, ok := proto.LookupOperation(request.Op)
 		if !ok || descriptor.Execution == proto.ExecutionControl {
