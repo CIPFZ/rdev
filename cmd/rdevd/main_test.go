@@ -64,3 +64,30 @@ func TestServeConnAppliesPolicy(t *testing.T) {
 		t.Fatalf("granted request denied: %s", allowed.Error)
 	}
 }
+
+func TestServeConnSharesServiceAcrossClients(t *testing.T) {
+	service := broker.NewService(nil)
+	owner := broker.Owner{ClientID: "shared", ProjectID: "project"}
+	if err := service.Grant(owner, "status"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		a, b := net.Pipe()
+		go serveConn(b, service)
+		if err := json.NewEncoder(a).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}); err != nil {
+			t.Fatal(err)
+		}
+		var hello proto.BrokerHelloResponse
+		if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+			t.Fatalf("hello %v", err)
+		}
+		if err := json.NewEncoder(a).Encode(broker.Request{ID: "status", Owner: owner, Operation: "status"}); err != nil {
+			t.Fatal(err)
+		}
+		var resp broker.Response
+		if err := json.NewDecoder(a).Decode(&resp); err != nil || !resp.OK {
+			t.Fatalf("request %v", resp.Error)
+		}
+		a.Close()
+	}
+}
