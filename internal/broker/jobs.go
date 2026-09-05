@@ -1,6 +1,10 @@
 package broker
 
-import "sync"
+import (
+	"encoding/json"
+	"os"
+	"sync"
+)
 
 type JobRef struct{ ID, Owner, Host string }
 
@@ -27,4 +31,38 @@ func (r *JobRegistry) Snapshot() []JobRef {
 		out = append(out, j)
 	}
 	return out
+}
+
+func (r *JobRegistry) Save(path string) error {
+	data, err := json.Marshal(r.Snapshot())
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+func (r *JobRegistry) Load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var jobs []JobRef
+	if err := json.Unmarshal(data, &jobs); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, j := range jobs {
+		if j.ID != "" {
+			r.jobs[j.ID] = j
+		}
+	}
+	return nil
 }
