@@ -257,6 +257,11 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
+		if req.Operation == "audit_query" {
+			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Audit: service.Audit.Query(req.Since)})
+			endRequest()
+			continue
+		}
 		if err := service.Quota.Acquire(connCtx, req.Owner.Key()); err != nil {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
