@@ -51,6 +51,11 @@ func main() {
 
 func serveConn(conn net.Conn, service *broker.Service) {
 	defer conn.Close()
+	if unixConn, ok := conn.(*net.UnixConn); ok {
+		if same, err := broker.PeerIsCurrentUser(unixConn); err != nil || !same {
+			return
+		}
+	}
 	var hello proto.BrokerHello
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&hello); err != nil {
 		return
