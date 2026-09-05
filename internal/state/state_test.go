@@ -1,0 +1,184 @@
+package state
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestInspectAndMigrateVersionedRecords(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "jobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := filepath.Join(root, "jobs", "j1")
+	if err := os.Mkdir(d, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "meta.json"), []byte(`{"id":"j1"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Findings) != 1 || r.Findings[0].Kind != "manifest_missing" {
+		t.Fatalf("findings=%+v", r.Findings)
+	}
+	dry, err := Migrate(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dry.Changed) != 2 {
+		t.Fatalf("dry changed=%v", dry.Changed)
+	}
+	if _, err := os.Stat(filepath.Join(root, "manifest.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry-run wrote manifest: %v", err)
+	}
+	if _, err := Migrate(root, false); err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	b, _ := os.ReadFile(filepath.Join(d, "meta.json"))
+	if err := json.Unmarshal(b, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["schema_version"] != float64(CurrentSchemaVersion) {
+		t.Fatalf("record=%v", obj)
+	}
+	if _, err := os.Stat(filepath.Join(root, "backup")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFutureSchemaFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	b, _ := json.Marshal(Manifest{SchemaVersion: CurrentSchemaVersion + 1})
+	if err := os.WriteFile(filepath.Join(root, manifestName), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(root, false); !errors.Is(err, ErrFutureSchema) {
+		t.Fatalf("err=%v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, manifestName))
+	if string(got) != string(b) {
+		t.Fatal("future manifest was modified")
+	}
+}
+
+func TestMigrationLockAndRepairQuarantine(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "jobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := filepath.Join(root, "jobs", "bad")
+	if err := os.Mkdir(d, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "meta.json"), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, lockName), []byte("held"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Repair(root, false); !errors.Is(err, ErrMigrationLocked) {
+		t.Fatalf("lock err=%v", err)
+	}
+	os.Remove(filepath.Join(root, lockName))
+	dry, err := Repair(root, true)
+	if err != nil || len(dry.Quarantined) != 1 {
+		t.Fatalf("dry=%+v err=%v", dry, err)
+	}
+	if _, err := Repair(root, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "quarantine")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExplicitZeroSchemaIsCorruptAndNotMigrated(t *testing.T) {
+	root := t.TempDir()
+	d := filepath.Join(root, "jobs", "zero")
+	if err := os.MkdirAll(d, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "meta.json"), []byte(`{"schema_version":0,"id":"zero"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Records) != 1 || r.Records[0].Valid || r.Records[0].SchemaVersion != 0 {
+		t.Fatalf("record=%+v", r.Records)
+	}
+	if _, err := Migrate(root, false); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(d, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"schema_version":0,"id":"zero"}` {
+		t.Fatalf("corrupt record was modified: %s", b)
+	}
+}
+
+func TestStateRejectsRootAndJobsSymlinks(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.MkdirAll(filepath.Join(target, "jobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	rootLink := filepath.Join(parent, "root-link")
+	if err := os.Symlink(target, rootLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Inspect(rootLink); err == nil {
+		t.Fatal("Inspect followed a symlinked state root")
+	}
+	root := filepath.Join(parent, "root")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(target, "jobs"), filepath.Join(root, "jobs")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Inspect(root); err == nil {
+		t.Fatal("Inspect followed a symlinked jobs directory")
+	}
+}
+
+func TestMigrationRejectsBackupSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "jobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := filepath.Join(root, "jobs", "legacy")
+	if err := os.Mkdir(d, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "meta.json"), []byte(`{"id":"legacy"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(root, false); err == nil {
+		t.Fatal("migration wrote through backup symlink")
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("backup symlink target modified: %v", entries)
+	}
+}

@@ -117,6 +117,8 @@ func main() {
 		err = cmdSecrets(ctx, c, os.Args[2:])
 	case "sync":
 		err = cmdSync(ctx, c, os.Args[2:])
+	case "state":
+		err = cmdState(ctx, c, os.Args[2:])
 	case "hosts":
 		err = cmdHosts(ctx, c, os.Args[2:])
 	case "ping":
@@ -170,6 +172,7 @@ USAGE
   rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]
+  rdev state   inspect|migrate|repair <host> [-dry-run]
   rdev hosts   [list|trust|approve-project <sha256>|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
                                        [-env K=V]... [-secret NAME=PATH]...
                                        [-no-login] [-force-agent-upload]
@@ -194,6 +197,33 @@ NOTES
   registered by a CLI command is gone when it exits. The MCP rdev_secrets tool
   does offer it, because "rdev serve" stays alive to use the value.
 `)
+}
+
+func cmdState(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: rdev state inspect|migrate|repair <host> [-dry-run]")
+	}
+	sub, host := args[0], args[1]
+	fs, err := parseFlags(args[2:], map[string]bool{"dry-run": true}, nil)
+	if err != nil {
+		return err
+	}
+	dry := fs.bools["dry-run"]
+	var out any
+	switch sub {
+	case "inspect":
+		out, err = c.StateInspect(ctx, host)
+	case "migrate":
+		out, err = c.StateMigrate(ctx, host, dry)
+	case "repair":
+		out, err = c.StateRepair(ctx, host, dry)
+	default:
+		return fmt.Errorf("unknown state subcommand %q", sub)
+	}
+	if err != nil {
+		return err
+	}
+	return printJSON(c, out)
 }
 
 // splitArgv separates flags from the argv that follows "--".

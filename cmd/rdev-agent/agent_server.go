@@ -591,6 +591,12 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 		} else {
 			response.Storage, err = doStorage(request.Op, request.Storage, state)
 		}
+	case proto.OpStateInspect, proto.OpStateMigrate, proto.OpStateRepair:
+		if request.State == nil {
+			err = proto.NewError(proto.CodeInvalidRequest, request.OperationID, proto.StateNotSent)
+		} else {
+			response.State, err = doState(request.Op, request.State, state)
+		}
 	default:
 		descriptor, ok := proto.LookupOperation(request.Op)
 		if !ok || descriptor.Execution == proto.ExecutionControl {

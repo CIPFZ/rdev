@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	statepkg "github.com/CIPFZ/rdev/internal/state"
 	"github.com/CIPFZ/rdev/internal/storage"
 )
 
@@ -175,6 +176,7 @@ func startJobTransaction(p *proto.JobParams, id, dir string) (*proto.JobResult, 
 	}
 
 	meta := &jobMeta{
+		SchemaVersion:   statepkg.CurrentSchemaVersion,
 		ID:              id,
 		Label:           p.Label,
 		Argv:            p.Spec.Argv,

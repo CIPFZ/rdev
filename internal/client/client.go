@@ -1762,6 +1762,40 @@ func (c *Client) StorageDoctor(ctx context.Context, host, scope string) (*proto.
 	return resp.Storage.Doctor, nil
 }
 
+// StateInspect returns a root-relative, non-mutating state report.
+func (c *Client) StateInspect(ctx context.Context, host string) (*proto.StateResult, error) {
+	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpStateInspect, State: &proto.StateParams{}})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.State == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.State, nil
+}
+
+func (c *Client) StateMigrate(ctx context.Context, host string, dryRun bool) (*proto.StateResult, error) {
+	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpStateMigrate, State: &proto.StateParams{DryRun: dryRun}})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.State == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.State, nil
+}
+
+func (c *Client) StateRepair(ctx context.Context, host string, dryRun bool) (*proto.StateResult, error) {
+	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpStateRepair, State: &proto.StateParams{DryRun: dryRun}})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.State == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.State, nil
+}
+
 // JobRm deletes job records to reclaim disk.
 //
 // Job logs are unbounded, so a machine running batches accumulates them until the

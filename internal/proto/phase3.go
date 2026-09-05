@@ -79,6 +79,9 @@ var operationRegistry = map[string]OperationDescriptor{
 	OpStorageStatus: operation(OpStorageStatus, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
 	OpStorageGC:     operation(OpStorageGC, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
 	OpStorageDoctor: operation(OpStorageDoctor, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
+	OpStateInspect:  operation(OpStateInspect, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
+	OpStateMigrate:  operation(OpStateMigrate, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
+	OpStateRepair:   operation(OpStateRepair, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
 	OpList:          operation(OpList, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
 	OpCancel:        operation(OpCancel, ClassIdempotent, RetrySafe, ExecutionControl, DisconnectComplete, FeatureOperationID, FeatureCancel),
 }

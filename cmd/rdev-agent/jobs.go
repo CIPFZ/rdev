@@ -62,11 +62,12 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 // jobMeta is the on-disk record. It is the single source of truth: a fresh
 // agent process reconstructs everything by reading these files.
 type jobMeta struct {
-	ID    string   `json:"id"`
-	Label string   `json:"label,omitempty"`
-	Argv  []string `json:"argv"`
-	Cwd   string   `json:"cwd,omitempty"`
-	PID   int      `json:"pid"`
+	SchemaVersion int      `json:"schema_version"`
+	ID            string   `json:"id"`
+	Label         string   `json:"label,omitempty"`
+	Argv          []string `json:"argv"`
+	Cwd           string   `json:"cwd,omitempty"`
+	PID           int      `json:"pid"`
 	// ProcessIdentity is an immutable kernel-provided start token for PID. A
 	// PID alone is reusable; this token is checked before every signal.
 	ProcessIdentity string               `json:"process_identity,omitempty"`

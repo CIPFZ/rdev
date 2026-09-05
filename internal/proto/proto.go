@@ -44,6 +44,9 @@ const (
 	OpStorageStatus = "storage_status"
 	OpStorageGC     = "storage_gc"
 	OpStorageDoctor = "storage_doctor"
+	OpStateInspect  = "state_inspect"
+	OpStateMigrate  = "state_migrate"
+	OpStateRepair   = "state_repair"
 	OpList          = "list"
 	OpCancel        = "cancel"
 )
@@ -87,6 +90,7 @@ type Request struct {
 	Job               *JobParams     `json:"job,omitempty"`
 	List              *ListParams    `json:"list,omitempty"`
 	Storage           *StorageParams `json:"storage,omitempty"`
+	State             *StateParams   `json:"state,omitempty"`
 }
 
 // CancelParams targets one foreground operation. Detached jobs are controlled
@@ -233,7 +237,46 @@ type Response struct {
 	Cat     *WriteResult   `json:"write,omitempty"`
 	Job     *JobResult     `json:"job,omitempty"`
 	Storage *StorageResult `json:"storage,omitempty"`
+	State   *StateResult   `json:"state,omitempty"`
 	List    *ListResult    `json:"list,omitempty"`
+}
+
+// StateParams controls inspection and maintenance of the agent state root.
+// Mutating operations require DryRun=false explicitly; callers should preview
+// the returned Changed/Quarantined paths before applying them.
+type StateParams struct {
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+type StateResult struct {
+	Root          string         `json:"root"`
+	DryRun        bool           `json:"dry_run"`
+	SchemaVersion int            `json:"schema_version"`
+	Manifest      *StateManifest `json:"manifest,omitempty"`
+	Records       []StateRecord  `json:"records,omitempty"`
+	Findings      []StateFinding `json:"findings,omitempty"`
+	Changed       []string       `json:"changed,omitempty"`
+	Quarantined   []string       `json:"quarantined,omitempty"`
+}
+
+type StateManifest struct {
+	SchemaVersion int    `json:"schema_version"`
+	WriterVersion string `json:"writer_version,omitempty"`
+	AgentIdentity string `json:"agent_identity,omitempty"`
+	Namespace     string `json:"namespace,omitempty"`
+	LastMigration string `json:"last_migration,omitempty"`
+}
+type StateRecord struct {
+	Path          string `json:"path"`
+	SchemaVersion int    `json:"schema_version"`
+	Valid         bool   `json:"valid"`
+	Bytes         int64  `json:"bytes"`
+}
+type StateFinding struct {
+	Path    string `json:"path"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	Action  string `json:"action,omitempty"`
 }
 
 type DataFrame struct {
