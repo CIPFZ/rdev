@@ -68,9 +68,8 @@ func main() {
 	}
 	service.SetReady(true)
 	defer service.Close(context.Background())
-	jobs := broker.NewJobRegistry()
-	_ = jobs.Load(*socket + ".jobs")
-	defer jobs.Save(*socket + ".jobs")
+	_ = service.Jobs.Load(*socket + ".jobs")
+	defer service.Jobs.Save(*socket + ".jobs")
 	var ready broker.Readiness
 	ready.SetReady(true)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -225,6 +224,24 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			}
 			req.Wire.ClientID = req.Owner.ClientID
 			req.Wire.ProjectID = req.Owner.ProjectID
+			if req.Wire.Job != nil {
+				ids := append([]string{}, req.Wire.Job.IDs...)
+				if req.Wire.Job.ID != "" {
+					ids = append(ids, req.Wire.Job.ID)
+				}
+				ownerMismatch := false
+				for _, id := range ids {
+					if ref, ok := service.Jobs.Get(id); ok && ref.Owner != req.Owner.Key() {
+						ownerMismatch = true
+						break
+					}
+				}
+				if ownerMismatch {
+					_ = enc.Encode(broker.Response{ID: req.ID, Error: "job owner mismatch"})
+					endRequest()
+					continue
+				}
+			}
 		}
 		decision := service.Decide(req.Owner, req.Operation)
 		if !decision.Allow {
@@ -273,6 +290,17 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			service.Lanes.Release(lane)
 			service.Quota.Release(req.Owner.Key())
 			service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
+			if req.Wire.Op == proto.OpJobStart && wireResp.Job != nil && wireResp.Job.Info != nil {
+				service.Jobs.Put(broker.JobRef{ID: wireResp.Job.Info.ID, Owner: req.Owner.Key(), Host: req.Host})
+			}
+			if req.Wire.Op == proto.OpJobRm && req.Wire.Job != nil {
+				if req.Wire.Job.ID != "" {
+					service.Jobs.Remove(req.Wire.Job.ID)
+				}
+				for _, id := range req.Wire.Job.IDs {
+					service.Jobs.Remove(id)
+				}
+			}
 			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Wire: wireResp})
 			endRequest()
 			continue
