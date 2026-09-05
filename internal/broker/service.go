@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,6 +208,25 @@ func (s *Service) Grant(owner Owner, operation string) error {
 }
 func (s *Service) LoadPolicy(path string) error { return s.policy.Load(path) }
 func (s *Service) SavePolicy(path string) error { return s.policy.Save(path) }
+
+// RecoverJobs revalidates persisted detached jobs against their remote hosts
+// after broker restart. Missing jobs are removed; live records remain owned by
+// their original principal.
+func (s *Service) RecoverJobs(ctx context.Context) {
+	for _, ref := range s.Jobs.Snapshot() {
+		clientID, projectID, ok := strings.Cut(ref.Owner, "\x00")
+		if !ok {
+			s.Jobs.Remove(ref.ID)
+			continue
+		}
+		req := &proto.Request{Op: proto.OpJobStatus, ClientID: clientID, ProjectID: projectID, Job: &proto.JobParams{ID: ref.ID}}
+		resp, err := s.client.DoProtocol(ctx, ref.Host, req)
+		if err != nil || resp == nil || resp.Job == nil || resp.Job.Info == nil {
+			s.Jobs.Remove(ref.ID)
+			s.Audit.Append(AuditEvent{At: time.Now(), Owner: ref.Owner, Operation: proto.OpJobStatus, Result: "recovery_missing"})
+		}
+	}
+}
 
 func (s *Service) CreateApproval(owner Owner, operation, target string, ttl time.Duration) (Approval, error) {
 	if err := owner.Validate(); err != nil {

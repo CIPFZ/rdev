@@ -76,6 +76,11 @@ func main() {
 		log.Printf("rdevd: warning: host registry not loaded: %v", err)
 	}
 	service.SetReady(true)
+	go func() {
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		service.RecoverJobs(recoveryCtx)
+	}()
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
