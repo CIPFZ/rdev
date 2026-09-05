@@ -39,6 +39,8 @@ type Service struct {
 	shared          map[string]*sharedDispatch
 	Jobs            *JobRegistry
 	fair            map[Lane]*fairDispatcher
+	weightMu        sync.RWMutex
+	weights         map[string]int
 }
 
 type sharedDispatch struct {
@@ -62,9 +64,9 @@ type fairDispatcher struct {
 	stop  chan struct{}
 }
 
-func newFairDispatcher() *fairDispatcher {
+func newFairDispatcher(workers int) *fairDispatcher {
 	f := &fairDispatcher{queue: NewFairQueue(), wake: make(chan struct{}, 1), stop: make(chan struct{})}
-	go func() {
+	worker := func() {
 		for {
 			select {
 			case <-f.wake:
@@ -85,13 +87,16 @@ func newFairDispatcher() *fairDispatcher {
 				item.result <- dispatchResult{resp: resp, err: err}
 			}
 		}
-	}()
+	}
+	for i := 0; i < workers; i++ {
+		go worker()
+	}
 	return f
 }
 
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry(), fair: map[Lane]*fairDispatcher{LaneControl: newFairDispatcher(), LaneExec: newFairDispatcher(), LaneBulk: newFairDispatcher()}}
+	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry(), fair: map[Lane]*fairDispatcher{LaneControl: newFairDispatcher(2), LaneExec: newFairDispatcher(8), LaneBulk: newFairDispatcher(1)}, weights: make(map[string]int)}
 	s.SetReady(true)
 	return s
 }
@@ -116,7 +121,10 @@ func (s *Service) DispatchFair(ctx context.Context, owner string, lane Lane, fn 
 		return fn()
 	}
 	result := make(chan dispatchResult, 1)
-	f.queue.Enqueue(owner, fairItem{ctx: ctx, fn: fn, result: result}, 1)
+	s.weightMu.RLock()
+	weight := s.weights[owner]
+	s.weightMu.RUnlock()
+	f.queue.Enqueue(owner, fairItem{ctx: ctx, fn: fn, result: result}, weight)
 	select {
 	case f.wake <- struct{}{}:
 	default:
@@ -129,6 +137,14 @@ func (s *Service) DispatchFair(ctx context.Context, owner string, lane Lane, fn 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+func (s *Service) SetOwnerWeight(owner string, weight int) {
+	if weight < 1 {
+		weight = 1
+	}
+	s.weightMu.Lock()
+	s.weights[owner] = weight
+	s.weightMu.Unlock()
 }
 
 // DispatchShared coalesces concurrent observations of the same detached job
