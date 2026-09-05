@@ -97,6 +97,13 @@ type Client struct {
 	capabilities      map[string]capabilityCacheEntry
 }
 
+// DoProtocol is the broker-facing dispatch boundary. It keeps connection
+// pooling, secret redaction, retry identity, and transport ownership inside
+// Client while allowing rdevd to serve multiple local clients.
+func (c *Client) DoProtocol(ctx context.Context, host string, req *proto.Request) (*proto.Response, error) {
+	return c.do(ctx, host, req)
+}
+
 type capabilityCacheEntry struct {
 	result     *proto.CapabilityResult
 	expiresAt  time.Time

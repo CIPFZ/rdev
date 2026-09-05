@@ -8,8 +8,13 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
+
+type ProtocolDispatcher interface {
+	DoProtocol(context.Context, string, *proto.Request) (*proto.Response, error)
+}
 
 // Service is the single owner of connection and secret state for local broker
 // clients. Callers must share one Service instead of constructing one Client
@@ -32,6 +37,12 @@ func NewService(lookup client.AgentLookup) *Service {
 // Client exposes the broker-owned client for request dispatch and lifecycle
 // integration. It is intentionally stable for the lifetime of Service.
 func (s *Service) Client() *client.Client { return s.client }
+func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request) (*proto.Response, error) {
+	if s.closed.Load() {
+		return nil, errors.New("broker service closed")
+	}
+	return s.client.DoProtocol(ctx, host, req)
+}
 func (s *Service) AttachClient() bool {
 	if s.closed.Load() {
 		return false

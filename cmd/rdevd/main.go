@@ -86,6 +86,17 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 			continue
 		}
+		if req.Wire != nil {
+			if req.Host == "" {
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: "host required for wire request"})
+				continue
+			}
+			if req.Operation != "" && req.Wire.Op != req.Operation {
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: "operation mismatch"})
+				continue
+			}
+			req.Wire.ClientID = req.Owner.ClientID
+		}
 		decision := service.Decide(req.Owner, req.Operation)
 		if !decision.Allow {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: decision.Reason, Result: "denied"})
@@ -104,6 +115,17 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		service.Lanes.Release(broker.LaneControl)
 		service.Quota.Release(req.Owner.Key())
+		if req.Wire != nil {
+			wireResp, err := service.Dispatch(context.Background(), req.Host, req.Wire)
+			if err != nil {
+				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "dispatch_error"})
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+				continue
+			}
+			service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
+			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Wire: wireResp})
+			continue
+		}
 		service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
 		_ = enc.Encode(broker.Response{ID: req.ID, OK: true})
 	}
