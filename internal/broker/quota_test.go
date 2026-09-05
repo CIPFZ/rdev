@@ -24,3 +24,20 @@ func TestQuotaPerClientAndHost(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestQuotaTracksHostShares(t *testing.T) {
+	q := NewQuota(2, 2, 2)
+	if err := q.AcquireHost(context.Background(), "h1", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AcquireHost(context.Background(), "h1", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AcquireHost(context.Background(), "h1", "c"); err != ErrQueueFull {
+		t.Fatalf("got %v", err)
+	}
+	q.ReleaseHost("h1", "a")
+	if err := q.AcquireHost(context.Background(), "h1", "c"); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -275,7 +275,8 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
-		if err := service.Quota.Acquire(connCtx, req.Owner.Key()); err != nil {
+		quotaHost := req.Host
+		if err := service.Quota.AcquireHost(connCtx, quotaHost, req.Owner.Key()); err != nil {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 			endRequest()
@@ -289,7 +290,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			lane = broker.LaneBulk
 		}
 		if !service.Lanes.Acquire(lane) {
-			service.Quota.Release(req.Owner.Key())
+			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: "control lane unavailable"})
 			endRequest()
 			continue
@@ -308,14 +309,14 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			}
 			if err != nil {
 				service.Lanes.Release(lane)
-				service.Quota.Release(req.Owner.Key())
+				service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
 				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "dispatch_error"})
 				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 				endRequest()
 				continue
 			}
 			service.Lanes.Release(lane)
-			service.Quota.Release(req.Owner.Key())
+			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
 			service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			if req.Wire.Op == proto.OpJobStart && wireResp.Job != nil && wireResp.Job.Info != nil {
 				service.Jobs.Put(broker.JobRef{ID: wireResp.Job.Info.ID, Owner: req.Owner.Key(), Host: req.Host})
@@ -333,7 +334,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		service.Lanes.Release(lane)
-		service.Quota.Release(req.Owner.Key())
+		service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
 		service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
 		_ = enc.Encode(broker.Response{ID: req.ID, OK: true})
 		endRequest()

@@ -14,13 +14,18 @@ type Quota struct {
 	host, perClient, queued int
 	active                  int
 	owners                  map[string]int
+	hosts                   map[string]int
 }
 
 func NewQuota(host, perClient, queue int) *Quota {
-	return &Quota{host: host, perClient: perClient, queued: queue, owners: make(map[string]int)}
+	return &Quota{host: host, perClient: perClient, queued: queue, owners: make(map[string]int), hosts: make(map[string]int)}
 }
 
 func (q *Quota) Acquire(ctx context.Context, owner string) error {
+	return q.AcquireHost(ctx, "", owner)
+}
+
+func (q *Quota) AcquireHost(ctx context.Context, host, owner string) error {
 	if owner == "" {
 		return errors.New("owner required")
 	}
@@ -29,15 +34,22 @@ func (q *Quota) Acquire(ctx context.Context, owner string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if q.active >= q.host || q.owners[owner] >= q.perClient {
+	if q.active >= q.host || q.owners[owner] >= q.perClient || (host != "" && q.hosts[host] >= q.host) {
 		return ErrQueueFull
 	}
 	q.active++
 	q.owners[owner]++
+	if host != "" {
+		q.hosts[host]++
+	}
 	return nil
 }
 
 func (q *Quota) Release(owner string) {
+	q.ReleaseHost("", owner)
+}
+
+func (q *Quota) ReleaseHost(host, owner string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.active > 0 {
@@ -45,5 +57,8 @@ func (q *Quota) Release(owner string) {
 	}
 	if q.owners[owner] > 0 {
 		q.owners[owner]--
+	}
+	if host != "" && q.hosts[host] > 0 {
+		q.hosts[host]--
 	}
 }
