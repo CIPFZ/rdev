@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -87,9 +88,23 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		decision := service.Decide(req.Owner, req.Operation)
 		if !decision.Allow {
+			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: decision.Reason, Result: "denied"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: decision.Reason})
 			continue
 		}
+		if err := service.Quota.Acquire(context.Background(), req.Owner.Key()); err != nil {
+			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+			continue
+		}
+		if !service.Lanes.Acquire(broker.LaneControl) {
+			service.Quota.Release(req.Owner.Key())
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: "control lane unavailable"})
+			continue
+		}
+		service.Lanes.Release(broker.LaneControl)
+		service.Quota.Release(req.Owner.Key())
+		service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
 		_ = enc.Encode(broker.Response{ID: req.ID, OK: true})
 	}
 }

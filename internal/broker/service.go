@@ -15,14 +15,18 @@ import (
 // clients. Callers must share one Service instead of constructing one Client
 // per frontend process.
 type Service struct {
-	client *client.Client
-	policy *Policy
-	lease  *Lease
-	closed atomic.Bool
+	client  *client.Client
+	policy  *Policy
+	lease   *Lease
+	closed  atomic.Bool
+	Quota   *Quota
+	Lanes   *Lanes
+	Watches *WatchHub
+	Audit   *AuditLog
 }
 
 func NewService(lookup client.AgentLookup) *Service {
-	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second)}
+	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024)}
 }
 
 // Client exposes the broker-owned client for request dispatch and lifecycle
