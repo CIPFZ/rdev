@@ -1608,6 +1608,21 @@ func TestReadTailHugeLine(t *testing.T) {
 	}
 }
 
+func TestReadTailStatusReportsBoundedScan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log")
+	body := bytes.Repeat([]byte{'x'}, int(proto.AbsoluteOutputBytes)+1024)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, truncated, scanned, err := readTailStatus(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || scanned != proto.AbsoluteOutputBytes {
+		t.Fatalf("status truncated=%v scanned=%d", truncated, scanned)
+	}
+}
+
 // The scan cap must not corrupt output when the tail exceeds it.
 func TestReadTailBeyondScanCap(t *testing.T) {
 	dir := t.TempDir()

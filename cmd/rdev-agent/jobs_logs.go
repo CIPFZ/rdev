@@ -123,11 +123,13 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	// size. This is the common shape -- checking on a running batch -- and on a
 	// 50 MB log it is ~40x faster than scanning.
 	if p.Grep == "" && since == 0 {
-		logs, err := readTail(path, tail)
+		logs, tailTruncated, tailScanBytes, err := readTailStatus(path, tail)
 		if err != nil {
 			return nil, err
 		}
 		res.Logs = logs
+		res.TailTruncated = tailTruncated
+		res.TailScanBytes = tailScanBytes
 		res.LogsTruncation, _ = proto.NewTruncation(info.Size(), int64(len(logs)))
 		if res.LogLedger.LimitBytes != 0 {
 			res.LogsTruncation, _ = proto.NewTruncation(res.LogLedger.OriginalBytes, res.LogLedger.RetainedBytes)
@@ -187,17 +189,25 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 // megabytes, and os.ReadFile on one of those would allocate the entire thing to
 // return a handful of lines.
 func readTail(path string, n int) (string, error) {
+	logs, _, _, err := readTailStatus(path, n)
+	return logs, err
+}
+
+// readTailStatus reports when the bounded backward scan could not reach the
+// requested window (for example, a single gigantic line). This is observable
+// so callers can choose a larger strategy instead of assuming completeness.
+func readTailStatus(path string, n int) (string, bool, int64, error) {
 	if n < 1 {
 		n = 1
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", false, 0, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return "", err
+		return "", false, 0, err
 	}
 
 	size := info.Size()
@@ -217,7 +227,7 @@ func readTail(path string, n int) (string, error) {
 
 		buf := make([]byte, step)
 		if _, err := f.ReadAt(buf, pos); err != nil && err != io.EOF {
-			return "", err
+			return "", false, 0, err
 		}
 		tail = append(buf, tail...)
 
@@ -232,7 +242,7 @@ func readTail(path string, n int) (string, error) {
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
-	return strings.Join(lines, "\n"), nil
+	return strings.Join(lines, "\n"), pos > 0 && bytes.Count(tail, []byte("\n")) <= n, size - pos, nil
 }
 
 // lineRing keeps the last n lines seen, discarding earlier ones.
