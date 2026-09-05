@@ -83,6 +83,9 @@ func (s *Service) Close(ctx context.Context) error {
 	if s == nil || s.client == nil {
 		return ErrClosed
 	}
-	s.closed.Store(true)
+	if s.closed.Swap(true) {
+		return ErrClosed
+	}
+	s.client.Close()
 	return nil
 }

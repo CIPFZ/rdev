@@ -11,8 +11,8 @@ Validation currently covers `internal/broker`, `internal/proto`,
 `~/sdk/go1.25.0`. The repository gate `make check` passes after generating the
 four embedded agent artifacts; it runs agent consistency checks, `go vet`, and
 the complete test suite.
-The implementation must still be integrated into the long-running `rdevd`
-process and exercised with multi-client integration and QoS benchmarks before
-the Phase 5 gate can be considered complete. The `cmd/rdevd` entrypoint now
-performs hello negotiation and owner-scoped policy checks; transport execution
-and persistent job re-discovery remain the next integration boundary.
+The `cmd/rdevd` entrypoint now performs hello negotiation, peer credential
+checks, owner-scoped policy checks, QoS admission, audit recording, and wire
+dispatch through the broker-owned `client.Client`; broker shutdown also closes
+the shared client pool. Persistent job re-discovery and multi-client QoS
+benchmarks remain follow-up validation for the final Phase 5 gate.
