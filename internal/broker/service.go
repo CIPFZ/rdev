@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/client"
@@ -17,6 +18,7 @@ type Service struct {
 	client *client.Client
 	policy *Policy
 	lease  *Lease
+	closed atomic.Bool
 }
 
 func NewService(lookup client.AgentLookup) *Service {
@@ -25,8 +27,14 @@ func NewService(lookup client.AgentLookup) *Service {
 
 // Client exposes the broker-owned client for request dispatch and lifecycle
 // integration. It is intentionally stable for the lifetime of Service.
-func (s *Service) Client() *client.Client      { return s.client }
-func (s *Service) AttachClient()               { s.lease.Attach() }
+func (s *Service) Client() *client.Client { return s.client }
+func (s *Service) AttachClient() bool {
+	if s.closed.Load() {
+		return false
+	}
+	s.lease.Attach()
+	return true
+}
 func (s *Service) DetachClient()               { s.lease.Detach() }
 func (s *Service) Reapable(now time.Time) bool { return s.lease.Reapable(now) }
 
@@ -60,5 +68,6 @@ func (s *Service) Close(ctx context.Context) error {
 	if s == nil || s.client == nil {
 		return ErrClosed
 	}
+	s.closed.Store(true)
 	return nil
 }
