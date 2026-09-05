@@ -28,10 +28,12 @@ type Service struct {
 	Lanes   *Lanes
 	Watches *WatchHub
 	Audit   *AuditLog
+	config  *ConfigStore
 }
 
 func NewService(lookup client.AgentLookup) *Service {
-	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024)}
+	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
+	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config}
 }
 
 // Client exposes the broker-owned client for request dispatch and lifecycle
@@ -42,6 +44,21 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 		return nil, errors.New("broker service closed")
 	}
 	return s.client.DoProtocol(ctx, host, req)
+}
+func (s *Service) BeginRequest() bool { return s.config != nil && s.config.BeginRequest() }
+func (s *Service) EndRequest() {
+	if s.config != nil {
+		s.config.EndRequest()
+	}
+}
+func (s *Service) Drain(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.config == nil {
+		return nil
+	}
+	return s.config.Drain(ctx)
 }
 func (s *Service) AttachClient() bool {
 	if s.closed.Load() {
@@ -86,6 +103,7 @@ func (s *Service) Close(ctx context.Context) error {
 	if s.closed.Swap(true) {
 		return ErrClosed
 	}
+	_ = s.Drain(ctx)
 	s.client.Close()
 	return nil
 }

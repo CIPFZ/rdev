@@ -82,17 +82,31 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		if err := dec.Decode(&req); err != nil {
 			return
 		}
+		if !service.BeginRequest() {
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: "broker draining"})
+			continue
+		}
+		admitDone := true
+		endRequest := func() {
+			if admitDone {
+				admitDone = false
+				service.EndRequest()
+			}
+		}
 		if err := req.Owner.Validate(); err != nil {
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+			endRequest()
 			continue
 		}
 		if req.Wire != nil {
 			if req.Host == "" {
 				_ = enc.Encode(broker.Response{ID: req.ID, Error: "host required for wire request"})
+				endRequest()
 				continue
 			}
 			if req.Operation != "" && req.Wire.Op != req.Operation {
 				_ = enc.Encode(broker.Response{ID: req.ID, Error: "operation mismatch"})
+				endRequest()
 				continue
 			}
 			req.Wire.ClientID = req.Owner.ClientID
@@ -101,16 +115,19 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		if !decision.Allow {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: decision.Reason, Result: "denied"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: decision.Reason})
+			endRequest()
 			continue
 		}
 		if err := service.Quota.Acquire(context.Background(), req.Owner.Key()); err != nil {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+			endRequest()
 			continue
 		}
 		if !service.Lanes.Acquire(broker.LaneControl) {
 			service.Quota.Release(req.Owner.Key())
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: "control lane unavailable"})
+			endRequest()
 			continue
 		}
 		service.Lanes.Release(broker.LaneControl)
@@ -120,13 +137,16 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			if err != nil {
 				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "dispatch_error"})
 				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+				endRequest()
 				continue
 			}
 			service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Wire: wireResp})
+			endRequest()
 			continue
 		}
 		service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
 		_ = enc.Encode(broker.Response{ID: req.ID, OK: true})
+		endRequest()
 	}
 }
