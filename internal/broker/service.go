@@ -33,16 +33,21 @@ type Service struct {
 	approvals       *ApprovalStore
 	approvalMu      sync.Mutex
 	approvalByToken map[string]Approval
+	readiness       Readiness
 }
 
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval)}
+	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval)}
+	s.SetReady(true)
+	return s
 }
 
 // Client exposes the broker-owned client for request dispatch and lifecycle
 // integration. It is intentionally stable for the lifetime of Service.
 func (s *Service) Client() *client.Client { return s.client }
+func (s *Service) SetReady(v bool)        { s.readiness.SetReady(v) }
+func (s *Service) Ready() bool            { return s.readiness.Ready() }
 func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request) (*proto.Response, error) {
 	if s.closed.Load() {
 		return nil, errors.New("broker service closed")

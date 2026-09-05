@@ -39,9 +39,11 @@ func main() {
 	}
 	defer ln.Close()
 	service := broker.NewService(agentLookup(*agentDir))
+	service.SetReady(false)
 	if err := service.Client().Hosts.Load(); err != nil {
 		log.Printf("rdevd: warning: host registry not loaded: %v", err)
 	}
+	service.SetReady(true)
 	defer service.Close(context.Background())
 	jobs := broker.NewJobRegistry()
 	_ = jobs.Load(*socket + ".jobs")
@@ -76,6 +78,9 @@ func agentLookup(dir string) func(string, string) (*transport.AgentBinary, error
 
 func serveConn(conn net.Conn, service *broker.Service) {
 	defer conn.Close()
+	if !service.Ready() {
+		return
+	}
 	if unixConn, ok := conn.(*net.UnixConn); ok {
 		if same, err := broker.PeerIsCurrentUser(unixConn); err != nil || !same {
 			return
