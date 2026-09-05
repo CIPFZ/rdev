@@ -27,6 +27,9 @@ func main() {
 	defer ln.Close()
 	service := broker.NewService(nil)
 	defer service.Close(context.Background())
+	jobs := broker.NewJobRegistry()
+	_ = jobs.Load(*socket + ".jobs")
+	defer jobs.Save(*socket + ".jobs")
 	var ready broker.Readiness
 	ready.SetReady(true)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
