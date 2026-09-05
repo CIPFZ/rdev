@@ -123,9 +123,31 @@ func serveConn(conn net.Conn, service *broker.Service) {
 	defer service.DetachClient()
 	dec := json.NewDecoder(bufio.NewReader(conn))
 	enc := json.NewEncoder(conn)
+	connCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requests := make(chan broker.Request, 16)
+	decodeErr := make(chan error, 1)
+	go func() {
+		for {
+			var req broker.Request
+			if err := dec.Decode(&req); err != nil {
+				decodeErr <- err
+				return
+			}
+			select {
+			case requests <- req:
+			case <-connCtx.Done():
+				return
+			}
+		}
+	}()
 	for {
 		var req broker.Request
-		if err := dec.Decode(&req); err != nil {
+		select {
+		case req = <-requests:
+		case <-decodeErr:
+			return
+		case <-connCtx.Done():
 			return
 		}
 		if !service.BeginRequest() {
@@ -178,7 +200,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
-		if err := service.Quota.Acquire(context.Background(), req.Owner.Key()); err != nil {
+		if err := service.Quota.Acquire(connCtx, req.Owner.Key()); err != nil {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 			endRequest()
@@ -198,12 +220,12 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		if req.Wire != nil {
-			dispatch := func() (*proto.Response, error) { return service.Dispatch(context.Background(), req.Host, req.Wire) }
+			dispatch := func() (*proto.Response, error) { return service.Dispatch(connCtx, req.Host, req.Wire) }
 			var wireResp *proto.Response
 			var err error
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
 				jobKey, _ := json.Marshal(req.Wire.Job)
-				wireResp, err = service.DispatchShared(context.Background(), req.Host+":"+string(jobKey), dispatch)
+				wireResp, err = service.DispatchShared(connCtx, req.Host+":"+string(jobKey), dispatch)
 			} else {
 				wireResp, err = dispatch()
 			}
