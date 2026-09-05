@@ -205,6 +205,8 @@ func (s *Service) Grant(owner Owner, operation string) error {
 	s.policy.Grant(owner.Key(), operation)
 	return nil
 }
+func (s *Service) LoadPolicy(path string) error { return s.policy.Load(path) }
+func (s *Service) SavePolicy(path string) error { return s.policy.Save(path) }
 
 func (s *Service) CreateApproval(owner Owner, operation, target string, ttl time.Duration) (Approval, error) {
 	if err := owner.Validate(); err != nil {

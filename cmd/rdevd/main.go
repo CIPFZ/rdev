@@ -60,6 +60,15 @@ func main() {
 		}
 	}
 	loadConfig()
+	policyPath := *socket + ".policy"
+	if err := service.LoadPolicy(policyPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("rdevd: policy load failed: %v", err)
+	}
+	defer func() {
+		if err := service.SavePolicy(policyPath); err != nil {
+			log.Printf("rdevd: policy save failed: %v", err)
+		}
+	}()
 	if err := service.Audit.ConfigureFile(*socket+".audit", 8<<20); err != nil {
 		log.Printf("rdevd: warning: audit persistence disabled: %v", err)
 	}
