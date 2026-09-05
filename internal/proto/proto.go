@@ -151,6 +151,14 @@ type WriteParams struct {
 	Mode uint32 `json:"mode,omitempty"`
 	// Append adds to an existing file instead of truncating it.
 	Append bool `json:"append,omitempty"`
+	// TransferID enables resumable chunked transfer. Chunks are written to a
+	// managed staging file and become visible only when Final verifies Size and
+	// Digest. Offset must equal the currently staged length.
+	TransferID string `json:"transfer_id,omitempty"`
+	Offset     int64  `json:"offset,omitempty"`
+	TotalSize  int64  `json:"total_size,omitempty"`
+	Digest     string `json:"digest,omitempty"`
+	Final      bool   `json:"final,omitempty"`
 }
 
 // JobParams covers the job lifecycle ops.
@@ -428,6 +436,9 @@ type WriteResult struct {
 	Execution    ExecutionState `json:"execution_state"`
 	Path         string         `json:"path"`
 	BytesWritten int            `json:"bytes_written"`
+	Offset       int64          `json:"offset,omitempty"`
+	Committed    bool           `json:"committed,omitempty"`
+	Resumed      bool           `json:"resumed,omitempty"`
 }
 
 // JobInfo is the persisted record of one job.

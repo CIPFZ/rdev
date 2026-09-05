@@ -671,6 +671,9 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	if p.Path == "" {
 		return nil, invalidRequestError("write path required")
 	}
+	if p.TransferID != "" {
+		return doTransferChunk(p)
+	}
 
 	data := []byte(p.Content)
 	if p.ContentB64 {
