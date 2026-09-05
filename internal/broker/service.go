@@ -101,6 +101,12 @@ func (s *Service) Drain(ctx context.Context) error {
 	}
 	return s.config.Drain(ctx)
 }
+func (s *Service) ReloadConfig(c Config) error {
+	if s.config == nil {
+		return errors.New("broker config unavailable")
+	}
+	return s.config.Reload(c)
+}
 func (s *Service) AttachClient() bool {
 	if s.closed.Load() {
 		return false

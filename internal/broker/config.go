@@ -8,8 +8,8 @@ import (
 )
 
 type Config struct {
-	MaxHosts int
-	IdleTTL  time.Duration
+	MaxHosts int           `json:"max_hosts"`
+	IdleTTL  time.Duration `json:"idle_ttl"`
 }
 
 func (c Config) Validate() error {

@@ -32,6 +32,7 @@ func main() {
 		defaultAgents = v
 	}
 	agentDir := flag.String("agent-dir", defaultAgents, "directory containing rdev-agent-<os>-<arch> binaries")
+	configPath := flag.String("config", defaultSocket+".json", "broker JSON config path")
 	flag.Parse()
 	ln, err := broker.Listen(*socket)
 	if err != nil {
@@ -40,6 +41,25 @@ func main() {
 	defer ln.Close()
 	service := broker.NewService(agentLookup(*agentDir))
 	service.SetReady(false)
+	loadConfig := func() {
+		data, err := os.ReadFile(*configPath)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			log.Printf("rdevd: config read failed: %v", err)
+			return
+		}
+		var cfg broker.Config
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			log.Printf("rdevd: config parse failed: %v", err)
+			return
+		}
+		if err := service.ReloadConfig(cfg); err != nil {
+			log.Printf("rdevd: config rejected: %v", err)
+		}
+	}
+	loadConfig()
 	if err := service.Audit.ConfigureFile(*socket+".audit", 8<<20); err != nil {
 		log.Printf("rdevd: warning: audit persistence disabled: %v", err)
 	}
@@ -55,6 +75,19 @@ func main() {
 	ready.SetReady(true)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for {
+			select {
+			case <-hup:
+				loadConfig()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
