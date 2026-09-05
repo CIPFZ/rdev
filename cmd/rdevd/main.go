@@ -98,6 +98,14 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
+		if req.Risk {
+			if err := service.ConsumeApproval(req.Approval, req.Owner.Key(), req.Operation, req.Target); err != nil {
+				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "approval_denied", Result: err.Error()})
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+				endRequest()
+				continue
+			}
+		}
 		if req.Wire != nil {
 			if req.Host == "" {
 				_ = enc.Encode(broker.Response{ID: req.ID, Error: "host required for wire request"})

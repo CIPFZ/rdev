@@ -8,6 +8,9 @@ type Request struct {
 	Operation string         `json:"operation"`
 	Host      string         `json:"host,omitempty"`
 	Wire      *proto.Request `json:"wire,omitempty"`
+	Target    string         `json:"target,omitempty"`
+	Approval  string         `json:"approval,omitempty"`
+	Risk      bool           `json:"risk,omitempty"`
 }
 type Response struct {
 	ID    string          `json:"id"`

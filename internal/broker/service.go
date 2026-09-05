@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,20 +21,23 @@ type ProtocolDispatcher interface {
 // clients. Callers must share one Service instead of constructing one Client
 // per frontend process.
 type Service struct {
-	client  *client.Client
-	policy  *Policy
-	lease   *Lease
-	closed  atomic.Bool
-	Quota   *Quota
-	Lanes   *Lanes
-	Watches *WatchHub
-	Audit   *AuditLog
-	config  *ConfigStore
+	client          *client.Client
+	policy          *Policy
+	lease           *Lease
+	closed          atomic.Bool
+	Quota           *Quota
+	Lanes           *Lanes
+	Watches         *WatchHub
+	Audit           *AuditLog
+	config          *ConfigStore
+	approvals       *ApprovalStore
+	approvalMu      sync.Mutex
+	approvalByToken map[string]Approval
 }
 
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config}
+	return &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval)}
 }
 
 // Client exposes the broker-owned client for request dispatch and lifecycle
@@ -83,6 +87,33 @@ func (s *Service) Grant(owner Owner, operation string) error {
 	}
 	s.policy.Grant(owner.Key(), operation)
 	return nil
+}
+
+func (s *Service) CreateApproval(owner Owner, operation, target string, ttl time.Duration) (Approval, error) {
+	if err := owner.Validate(); err != nil {
+		return Approval{}, err
+	}
+	a, err := NewApproval(owner.Key(), operation, target, ttl)
+	if err != nil {
+		return Approval{}, err
+	}
+	s.approvalMu.Lock()
+	s.approvalByToken[a.Token] = a
+	s.approvalMu.Unlock()
+	return a, nil
+}
+
+func (s *Service) ConsumeApproval(token, owner, operation, target string) error {
+	s.approvalMu.Lock()
+	a, ok := s.approvalByToken[token]
+	if ok {
+		delete(s.approvalByToken, token)
+	}
+	s.approvalMu.Unlock()
+	if !ok {
+		return errors.New("approval token unknown")
+	}
+	return s.approvals.Consume(a, token, owner, operation, target, time.Now())
 }
 
 // SharedConnectionKey is the canonical identity used before a host is pooled.

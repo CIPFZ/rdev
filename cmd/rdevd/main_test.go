@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -22,6 +23,41 @@ func TestServeConnNegotiates(t *testing.T) {
 	}
 	if !got.OK {
 		t.Fatalf("unexpected rejection: %s", got.Error)
+	}
+}
+
+func TestServeConnConsumesRiskApprovalOnce(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	service := broker.NewService(nil)
+	owner := broker.Owner{ClientID: "risk", ProjectID: "p"}
+	if err := service.Grant(owner, "delete"); err != nil {
+		t.Fatal(err)
+	}
+	approval, err := service.CreateApproval(owner, "delete", "target-1", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go serveConn(b, service)
+	_ = json.NewEncoder(a).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion})
+	var hello proto.BrokerHelloResponse
+	if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+		t.Fatal(err)
+	}
+	req := broker.Request{ID: "risk-1", Owner: owner, Operation: "delete", Target: "target-1", Approval: approval.Token, Risk: true}
+	_ = json.NewEncoder(a).Encode(req)
+	var first broker.Response
+	if err := json.NewDecoder(a).Decode(&first); err != nil || !first.OK {
+		t.Fatalf("first approval failed: %v %s", err, first.Error)
+	}
+	req.ID = "risk-2"
+	_ = json.NewEncoder(a).Encode(req)
+	var second broker.Response
+	if err := json.NewDecoder(a).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if second.OK || second.Error == "" {
+		t.Fatal("replayed approval accepted")
 	}
 }
 
