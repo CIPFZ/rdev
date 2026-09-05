@@ -40,6 +40,9 @@ func main() {
 	defer ln.Close()
 	service := broker.NewService(agentLookup(*agentDir))
 	service.SetReady(false)
+	if err := service.Audit.ConfigureFile(*socket+".audit", 8<<20); err != nil {
+		log.Printf("rdevd: warning: audit persistence disabled: %v", err)
+	}
 	if err := service.Client().Hosts.Load(); err != nil {
 		log.Printf("rdevd: warning: host registry not loaded: %v", err)
 	}
