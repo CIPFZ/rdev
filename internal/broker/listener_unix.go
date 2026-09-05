@@ -4,13 +4,29 @@
 package broker
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+func ValidateSocket(path string) error {
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm() != 0o600 {
+		return fmt.Errorf("broker socket mode must be 0600, got %o", st.Mode().Perm())
+	}
+	if info, ok := st.Sys().(*syscall.Stat_t); ok && uint32(info.Uid) != uint32(os.Getuid()) {
+		return errors.New("broker socket owner mismatch")
+	}
+	return nil
+}
 
 // Listener owns a private Unix socket and a process lock.
 type Listener struct {
