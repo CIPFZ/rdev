@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"log"
-	"os"
 	"os/signal"
 	"syscall"
 
@@ -37,5 +36,3 @@ func main() {
 		_ = conn.Close()
 	}
 }
-
-var _ = os.Getuid
