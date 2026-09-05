@@ -1,14 +1,63 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
+
+func TestUnixBrokerMultipleClientsShareService(t *testing.T) {
+	socket := filepath.Join("/tmp", "rdevd-it-"+fmt.Sprint(os.Getpid())+".sock")
+	_ = os.Remove(socket)
+	defer os.Remove(socket)
+	listener, err := broker.Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	service := broker.NewService(nil)
+	ownerA := broker.Owner{ClientID: "a", ProjectID: "p"}
+	ownerB := broker.Owner{ClientID: "b", ProjectID: "p"}
+	if err := service.Grant(ownerA, "status"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Grant(ownerB, "status"); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for i := 0; i < 2; i++ {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go serveConn(conn, service)
+		}
+	}()
+	a, err := broker.DialClient(context.Background(), socket, ownerA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := broker.DialClient(context.Background(), socket, ownerB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	for _, c := range []*broker.Client{a, b} {
+		resp, callErr := c.Do(broker.Request{Operation: "status"})
+		if callErr != nil || !resp.OK {
+			t.Fatalf("shared broker request failed: %v %s", callErr, resp.Error)
+		}
+	}
+}
 
 func TestServeConnNegotiates(t *testing.T) {
 	a, b := net.Pipe()
