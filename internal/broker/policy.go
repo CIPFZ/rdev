@@ -2,6 +2,7 @@ package broker
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 )
@@ -59,6 +60,16 @@ func (p *Policy) Load(path string) error {
 	var grants map[string]map[string]bool
 	if err := json.Unmarshal(data, &grants); err != nil {
 		return err
+	}
+	for owner, operations := range grants {
+		if owner == "" || len(owner) > 512 || len(operations) == 0 {
+			return fmt.Errorf("invalid policy owner")
+		}
+		for operation := range operations {
+			if operation == "" || len(operation) > 256 {
+				return fmt.Errorf("invalid policy operation")
+			}
+		}
 	}
 	p.mu.Lock()
 	p.grants = grants

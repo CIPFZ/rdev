@@ -3,6 +3,7 @@ package broker
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -48,6 +49,10 @@ func (a *AuditLog) ConfigureFile(path string, maxBytes int64) error {
 	return nil
 }
 func (a *AuditLog) Append(e AuditEvent) {
+	e.Owner = auditField(e.Owner)
+	e.Operation = auditField(e.Operation)
+	e.Decision = auditField(e.Decision)
+	e.Result = auditField(e.Result)
 	e.At = e.At.UTC()
 	a.mu.Lock()
 	a.events = append(a.events, e)
@@ -71,6 +76,19 @@ func (a *AuditLog) Append(e AuditEvent) {
 		}
 	}
 	a.mu.Unlock()
+}
+
+func auditField(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	if len(value) > 512 {
+		return value[:512]
+	}
+	return value
 }
 func (a *AuditLog) Query(since time.Time) []AuditEvent {
 	a.mu.RLock()

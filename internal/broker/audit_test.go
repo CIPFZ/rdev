@@ -34,3 +34,12 @@ func TestAuditLogPersistsAndRotatesFile(t *testing.T) {
 		t.Fatal("audit rotation missing")
 	}
 }
+
+func TestAuditLogSanitizesFields(t *testing.T) {
+	a := NewAuditLog(4)
+	a.Append(AuditEvent{At: time.Now(), Owner: "owner\nsecret", Result: string(make([]byte, 600))})
+	events := a.Query(time.Time{})
+	if len(events) != 1 || len(events[0].Result) != 512 || events[0].Owner != "owner secret" {
+		t.Fatalf("audit fields were not bounded/sanitized: %+v", events)
+	}
+}
