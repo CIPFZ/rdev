@@ -1629,6 +1629,9 @@ func terminalMetadataMatches(response *proto.Response) bool {
 			}
 		}
 	}
+	if response.Storage != nil && !match(response.Storage.OperationID, response.Storage.Terminal, response.Storage.Execution) {
+		return false
+	}
 	if response.List != nil && !match(response.List.OperationID, response.List.Terminal, response.List.Execution) {
 		return false
 	}

@@ -65,19 +65,22 @@ type OperationDescriptor struct {
 }
 
 var operationRegistry = map[string]OperationDescriptor{
-	OpPing:      operation(OpPing, ClassReadOnly, RetrySafe, ExecutionControl, DisconnectComplete),
-	OpExec:      operation(OpExec, ClassMutating, RetryDeduplicated, ExecutionForeground, DisconnectCancel, FeatureOperationID, FeatureDeduplication, FeatureCancel, FeatureDeadline),
-	OpReadFile:  operation(OpReadFile, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
-	OpWriteFile: operation(OpWriteFile, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
-	OpJobStart:  jobOperation(OpJobStart, ClassMutating, RetryDeduplicated, ExecutionDetached, DisconnectContinue, FeatureOperationID, FeatureDeduplication),
-	OpJobList:   jobOperation(OpJobList, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
-	OpJobStatus: jobOperation(OpJobStatus, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
-	OpJobLogs:   jobOperation(OpJobLogs, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID, FeatureTruncation),
-	OpJobStop:   jobOperation(OpJobStop, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
-	OpJobWait:   jobOperation(OpJobWait, ClassReadOnly, RetrySafe, ExecutionWatcher, DisconnectObserveOnly, FeatureOperationID),
-	OpJobRm:     jobOperation(OpJobRm, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
-	OpList:      operation(OpList, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
-	OpCancel:    operation(OpCancel, ClassIdempotent, RetrySafe, ExecutionControl, DisconnectComplete, FeatureOperationID, FeatureCancel),
+	OpPing:          operation(OpPing, ClassReadOnly, RetrySafe, ExecutionControl, DisconnectComplete),
+	OpExec:          operation(OpExec, ClassMutating, RetryDeduplicated, ExecutionForeground, DisconnectCancel, FeatureOperationID, FeatureDeduplication, FeatureCancel, FeatureDeadline),
+	OpReadFile:      operation(OpReadFile, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
+	OpWriteFile:     operation(OpWriteFile, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
+	OpJobStart:      jobOperation(OpJobStart, ClassMutating, RetryDeduplicated, ExecutionDetached, DisconnectContinue, FeatureOperationID, FeatureDeduplication),
+	OpJobList:       jobOperation(OpJobList, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
+	OpJobStatus:     jobOperation(OpJobStatus, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
+	OpJobLogs:       jobOperation(OpJobLogs, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID, FeatureTruncation),
+	OpJobStop:       jobOperation(OpJobStop, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
+	OpJobWait:       jobOperation(OpJobWait, ClassReadOnly, RetrySafe, ExecutionWatcher, DisconnectObserveOnly, FeatureOperationID),
+	OpJobRm:         jobOperation(OpJobRm, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
+	OpStorageStatus: operation(OpStorageStatus, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
+	OpStorageGC:     operation(OpStorageGC, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
+	OpStorageDoctor: operation(OpStorageDoctor, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
+	OpList:          operation(OpList, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
+	OpCancel:        operation(OpCancel, ClassIdempotent, RetrySafe, ExecutionControl, DisconnectComplete, FeatureOperationID, FeatureCancel),
 }
 
 func jobOperation(name string, class OperationClass, retry RetryPolicy, execution ExecutionMode, disconnect DisconnectPolicy, features ...Feature) OperationDescriptor {
@@ -700,20 +703,21 @@ func CanonicalRequestDigest(request *Request) (string, error) {
 		return "", err
 	}
 	canonical := struct {
-		Op                string        `json:"op"`
-		DeadlineUnixMilli int64         `json:"deadline_unix_milli,omitempty"`
-		StreamWindowBytes int64         `json:"stream_window_bytes,omitempty"`
-		Hello             *HelloParams  `json:"hello,omitempty"`
-		Cancel            *CancelParams `json:"cancel,omitempty"`
-		Exec              *ExecParams   `json:"exec,omitempty"`
-		Read              *ReadParams   `json:"read,omitempty"`
-		Cat               *WriteParams  `json:"write,omitempty"`
-		Job               *JobParams    `json:"job,omitempty"`
-		List              *ListParams   `json:"list,omitempty"`
+		Op                string         `json:"op"`
+		DeadlineUnixMilli int64          `json:"deadline_unix_milli,omitempty"`
+		StreamWindowBytes int64          `json:"stream_window_bytes,omitempty"`
+		Hello             *HelloParams   `json:"hello,omitempty"`
+		Cancel            *CancelParams  `json:"cancel,omitempty"`
+		Exec              *ExecParams    `json:"exec,omitempty"`
+		Read              *ReadParams    `json:"read,omitempty"`
+		Cat               *WriteParams   `json:"write,omitempty"`
+		Job               *JobParams     `json:"job,omitempty"`
+		List              *ListParams    `json:"list,omitempty"`
+		Storage           *StorageParams `json:"storage,omitempty"`
 	}{
 		Op: request.Op, DeadlineUnixMilli: request.DeadlineUnixMilli, StreamWindowBytes: request.StreamWindowBytes,
 		Hello: request.Hello, Cancel: request.Cancel, Exec: request.Exec,
-		Read: request.Read, Cat: request.Cat, Job: request.Job, List: request.List,
+		Read: request.Read, Cat: request.Cat, Job: request.Job, List: request.List, Storage: request.Storage,
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {

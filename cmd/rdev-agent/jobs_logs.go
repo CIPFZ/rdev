@@ -27,8 +27,9 @@ const hardLogTailLines = 1000
 const maxLogLineLen = 1 << 20
 
 func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
-	if p.ID == "" {
-		return nil, invalidRequestError("job id required")
+	dir, err := validatedJobDir(state, p.ID)
+	if err != nil {
+		return nil, err
 	}
 	stream := p.Stream
 	if stream == "" {
@@ -38,12 +39,15 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		return nil, invalidRequestError("stream must be stdout or stderr")
 	}
 
-	path := filepath.Join(jobDir(state, p.ID), stream)
+	path := filepath.Join(dir, stream)
+	if err := secureRecordFile(path); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -66,6 +70,42 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 
 	res := &proto.JobResult{LogSize: info.Size()}
+	var st struct {
+		ExitCode     *int            `json:"exit_code"`
+		StdoutLedger proto.LogLedger `json:"stdout_ledger"`
+		StderrLedger proto.LogLedger `json:"stderr_ledger"`
+	}
+	_ = readJSON(filepath.Join(dir, "status.json"), &st)
+	if st.StdoutLedger.LimitBytes == 0 && st.StderrLedger.LimitBytes == 0 {
+		_ = readJSON(filepath.Join(dir, "ledger.json"), &st)
+	}
+	if stream == "stdout" {
+		res.LogLedger = st.StdoutLedger
+	} else {
+		res.LogLedger = st.StderrLedger
+	}
+	// The supervisor flushes the bounded sink and then publishes status.json
+	// while holding the job lock. If this call observed a terminal status while
+	// the finalization write was still in flight, the descriptor opened above may
+	// refer to the pre-flush inode. Reacquire the same lock and reopen the stream
+	// so exited jobs never report an empty/stale log merely due to an atomic
+	// rename race. Running jobs keep the non-blocking tail behavior.
+	if st.ExitCode != nil {
+		if err := withJobLock(dir, func() error {
+			if err := f.Close(); err != nil {
+				return err
+			}
+			f, err = os.Open(path)
+			if err != nil {
+				return err
+			}
+			info, err = f.Stat()
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		res.LogSize = info.Size()
+	}
 
 	tail := p.TailLines
 	if tail < 0 || tail > hardLogTailLines {
@@ -89,6 +129,9 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		}
 		res.Logs = logs
 		res.LogsTruncation, _ = proto.NewTruncation(info.Size(), int64(len(logs)))
+		if res.LogLedger.LimitBytes != 0 {
+			res.LogsTruncation, _ = proto.NewTruncation(res.LogLedger.OriginalBytes, res.LogLedger.RetainedBytes)
+		}
 		res.NextOffset = info.Size()
 		return res, nil
 	}
@@ -131,6 +174,9 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 	res.Logs = strings.Join(ring.lines(), "\n")
 	res.LogsTruncation, _ = proto.NewTruncation(regionBytes, int64(len(res.Logs)))
+	if res.LogLedger.LimitBytes != 0 {
+		res.LogsTruncation, _ = proto.NewTruncation(res.LogLedger.OriginalBytes, res.LogLedger.RetainedBytes)
+	}
 	return res, nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -25,11 +26,73 @@ import (
 // binary never runs main(), so without this hook the supervisor would start no
 // child and every job would look like it vanished.
 func TestMain(m *testing.M) {
+	if os.Getenv("RDEV_TEST_ORPHAN_SUPERVISOR") == "1" {
+		// Start a supervisor and intentionally let this parent exit before the
+		// metadata barrier is published. The supervisor must reclaim the
+		// unpublished directory instead of leaving a partial job record.
+		dir := os.Getenv("RDEV_TEST_ORPHAN_DIR")
+		cmd := exec.Command(os.Args[0], superviseFlag, dir, "--", "sleep", "30")
+		cmd.Env = make([]string, 0, len(os.Environ()))
+		for _, env := range os.Environ() {
+			if !strings.HasPrefix(env, "RDEV_TEST_ORPHAN_SUPERVISOR=") {
+				cmd.Env = append(cmd.Env, env)
+			}
+		}
+		cmd.Env = setEnvValue(cmd.Env, supervisorParentEnv, fmt.Sprint(os.Getpid()))
+		if err := cmd.Start(); err != nil {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(os.Getenv("RDEV_TEST_ORPHAN_PID"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644); err != nil {
+			os.Exit(3)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 3 && os.Args[1] == superviseFlag && os.Args[3] == "--" {
 		runSupervisor(os.Args[2], os.Args[4:])
 		return // unreachable: runSupervisor exits
 	}
 	os.Exit(m.Run())
+}
+
+func TestSupervisorCrashBeforeMetadataCleansRecord(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.MkdirAll(jobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(jobs, "unpublished")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(state, "supervisor.pid")
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(),
+		"RDEV_TEST_ORPHAN_SUPERVISOR=1",
+		"RDEV_TEST_ORPHAN_DIR="+dir,
+		"RDEV_TEST_ORPHAN_PID="+pidPath,
+	)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("orphan-parent helper: %v", err)
+	}
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	if _, err := fmt.Sscan(string(pidBytes), &pid); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(dir); os.IsNotExist(err) && !processAlive(pid) {
+			if _, err := os.Stat(lockPath(dir)); !os.IsNotExist(err) {
+				t.Fatalf("unpublished job lock survived cleanup: %v", err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("supervisor %d or unpublished directory survived parent crash", pid)
 }
 
 func TestCapWriterTruncatesButCounts(t *testing.T) {
@@ -203,6 +266,21 @@ func TestWriteThenReadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteDefaultModeDoesNotWidenNewFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "private")
+	if _, err := doWrite(&proto.WriteParams{Path: path, Content: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("default new-file mode = %o, want restrictive 600", got)
+	}
+}
+
 func TestWriteMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "script.sh")
@@ -227,6 +305,53 @@ func TestWriteAppend(t *testing.T) {
 	b, _ := os.ReadFile(path)
 	if string(b) != "first\nsecond\n" {
 		t.Errorf("content = %q, want both lines", string(b))
+	}
+}
+
+func TestWriteAtomicOverwriteRetainsModeByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mode")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doWrite(&proto.WriteParams{Path: path, Content: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o, want existing mode 600", info.Mode().Perm())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "new" {
+		t.Fatalf("content = %q, want new", b)
+	}
+}
+
+func TestWriteRejectsSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doWrite(&proto.WriteParams{Path: link, Content: "overwrite"}); err == nil {
+		t.Fatal("writing through a symlink should fail")
+	}
+	b, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "keep" {
+		t.Fatalf("symlink target changed to %q", b)
 	}
 }
 
@@ -344,6 +469,74 @@ func TestJobLifecycle(t *testing.T) {
 	if len(list.List) != 1 || list.List[0].ID != id {
 		t.Errorf("jobList returned %d jobs, want 1 matching %s", len(list.List), id)
 	}
+}
+
+func TestJobStartMetadataFailureRollsBackSupervisor(t *testing.T) {
+	state := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var startedPID int
+	oldWriter := writeJobMeta
+	writeJobMeta = func(path string, v any) error {
+		if m, ok := v.(*jobMeta); ok {
+			startedPID = m.PID
+		}
+		return errors.New("injected metadata failure")
+	}
+	t.Cleanup(func() { writeJobMeta = oldWriter })
+
+	if _, err := jobStart(&proto.JobParams{Spec: &proto.ExecParams{
+		Argv: []string{"sleep", "30"},
+	}}, state); err == nil {
+		t.Fatal("metadata failure should fail job_start")
+	}
+	if startedPID <= 0 {
+		t.Fatal("metadata writer was not reached with a started supervisor pid")
+	}
+	// SIGKILL + Wait in the rollback path must leave no runnable process and no
+	// partially published job directory behind.
+	deadline := time.Now().Add(2 * time.Second)
+	for processAlive(startedPID) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processAlive(startedPID) {
+		t.Fatalf("supervisor pid %d survived metadata rollback", startedPID)
+	}
+	entries, err := os.ReadDir(filepath.Join(state, "jobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rollback left job entries: %v", entries)
+	}
+}
+
+func TestJobStartRetriesDuplicateID(t *testing.T) {
+	state := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := "duplicate-id"
+	if err := os.Mkdir(filepath.Join(state, "jobs", first), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldGenerator := jobIDGenerator
+	ids := []string{first, "fresh-id"}
+	jobIDGenerator = func() string {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}
+	t.Cleanup(func() { jobIDGenerator = oldGenerator })
+	res, err := jobStart(&proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"true"}}}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Info.ID != "fresh-id" {
+		t.Fatalf("job id = %q, want fresh-id", res.Info.ID)
+	}
+	jobWait(&proto.JobParams{ID: res.Info.ID, WaitTimeoutSec: 5}, state)
 }
 
 func TestJobLogsGrepAndTail(t *testing.T) {
@@ -1125,6 +1318,70 @@ func TestListLimitReportsTruncation(t *testing.T) {
 	// Total reports the real count so the caller knows what it did not see.
 	if res.Total != 5 {
 		t.Errorf("Total = %d, want 5", res.Total)
+	}
+}
+
+func TestListCursorPaginatesDeterministically(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"c", "a", "d", "b"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := doList(&proto.ListParams{Path: dir, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{first.Entries[0].Name, first.Entries[1].Name}; !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("first page = %v, want [a b]", got)
+	}
+	if !first.Truncated || first.NextCursor == "" {
+		t.Fatalf("first page = %+v, want a continuation cursor", first)
+	}
+	second, err := doList(&proto.ListParams{Path: dir, Limit: 2, Cursor: first.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{second.Entries[0].Name, second.Entries[1].Name}; !reflect.DeepEqual(got, []string{"c", "d"}) {
+		t.Fatalf("second page = %v, want [c d]", got)
+	}
+	if second.NextCursor != "" || second.Truncated {
+		t.Fatalf("final page = %+v, want no continuation", second)
+	}
+}
+
+func TestListMaxBytesUsesEncodedEntrySize(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "汉字"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := json.Marshal(proto.DirEntry{Name: "汉字", Size: 1, Mode: "-rw-r--r--", ModTime: "0001-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One byte below the exact JSON entry size must not return an oversized page.
+	if _, err := doList(&proto.ListParams{Path: dir, MaxBytes: len(entry) - 1}); err == nil {
+		t.Fatal("max_bytes below one encoded entry should fail clearly")
+	}
+}
+
+func TestListLargeDirectoryKeepsPageBounded(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 12_000; i++ {
+		name := fmt.Sprintf("%05d", i)
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := doList(&proto.ListParams{Path: dir, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != 12_000 || len(res.Entries) != 2 || !res.Truncated || res.NextCursor == "" {
+		t.Fatalf("large listing = total=%d entries=%d truncated=%v cursor=%q", res.Total, len(res.Entries), res.Truncated, res.NextCursor)
+	}
+	if got := []string{res.Entries[0].Name, res.Entries[1].Name}; !reflect.DeepEqual(got, []string{"00000", "00001"}) {
+		t.Fatalf("first page = %v", got)
 	}
 }
 

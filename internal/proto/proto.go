@@ -30,19 +30,22 @@ const MinVersion = 2
 
 // Op names carried in Request.Op.
 const (
-	OpPing      = "ping"
-	OpExec      = "exec"
-	OpReadFile  = "read_file"
-	OpWriteFile = "write_file"
-	OpJobStart  = "job_start"
-	OpJobList   = "job_list"
-	OpJobStatus = "job_status"
-	OpJobLogs   = "job_logs"
-	OpJobStop   = "job_stop"
-	OpJobWait   = "job_wait"
-	OpJobRm     = "job_rm"
-	OpList      = "list"
-	OpCancel    = "cancel"
+	OpPing          = "ping"
+	OpExec          = "exec"
+	OpReadFile      = "read_file"
+	OpWriteFile     = "write_file"
+	OpJobStart      = "job_start"
+	OpJobList       = "job_list"
+	OpJobStatus     = "job_status"
+	OpJobLogs       = "job_logs"
+	OpJobStop       = "job_stop"
+	OpJobWait       = "job_wait"
+	OpJobRm         = "job_rm"
+	OpStorageStatus = "storage_status"
+	OpStorageGC     = "storage_gc"
+	OpStorageDoctor = "storage_doctor"
+	OpList          = "list"
+	OpCancel        = "cancel"
 )
 
 // Job states reported by the agent.
@@ -75,14 +78,15 @@ type Request struct {
 	// StreamWindowBytes is the maximum total data-frame payload the agent may
 	// emit before the final frame. Zero disables data frames (accepted/progress/
 	// final still apply). It may only lower the shared hard window.
-	StreamWindowBytes int64         `json:"stream_window_bytes,omitempty"`
-	Hello             *HelloParams  `json:"hello,omitempty"`
-	Cancel            *CancelParams `json:"cancel,omitempty"`
-	Exec              *ExecParams   `json:"exec,omitempty"`
-	Read              *ReadParams   `json:"read,omitempty"`
-	Cat               *WriteParams  `json:"write,omitempty"`
-	Job               *JobParams    `json:"job,omitempty"`
-	List              *ListParams   `json:"list,omitempty"`
+	StreamWindowBytes int64          `json:"stream_window_bytes,omitempty"`
+	Hello             *HelloParams   `json:"hello,omitempty"`
+	Cancel            *CancelParams  `json:"cancel,omitempty"`
+	Exec              *ExecParams    `json:"exec,omitempty"`
+	Read              *ReadParams    `json:"read,omitempty"`
+	Cat               *WriteParams   `json:"write,omitempty"`
+	Job               *JobParams     `json:"job,omitempty"`
+	List              *ListParams    `json:"list,omitempty"`
+	Storage           *StorageParams `json:"storage,omitempty"`
 }
 
 // CancelParams targets one foreground operation. Detached jobs are controlled
@@ -136,7 +140,8 @@ type WriteParams struct {
 	Content string `json:"content"`
 	// ContentB64 marks Content as base64-encoded, for binary payloads.
 	ContentB64 bool `json:"content_b64,omitempty"`
-	// Mode is the octal file mode, e.g. 0o755. 0 means 0o644.
+	// Mode is the octal file mode, e.g. 0o755. 0 preserves an existing mode;
+	// newly created files use a restrictive 0o600 mode.
 	Mode uint32 `json:"mode,omitempty"`
 	// Append adds to an existing file instead of truncating it.
 	Append bool `json:"append,omitempty"`
@@ -194,6 +199,18 @@ type JobParams struct {
 	Limit int `json:"limit,omitempty"`
 }
 
+// StorageParams controls bounded storage inspection and reclamation. Scope is
+// "remote_state" (the agent's managed state root) or "local" (an alias kept
+// for callers that use local/remote policy terminology). Unknown scopes fail
+// closed; no arbitrary filesystem path is accepted.
+type StorageParams struct {
+	Scope          string `json:"scope,omitempty"`
+	DryRun         bool   `json:"dry_run,omitempty"`
+	MaxScanJobs    int    `json:"max_scan_jobs,omitempty"`
+	MaxDeleteJobs  int    `json:"max_delete_jobs,omitempty"`
+	MaxDeleteBytes int64  `json:"max_delete_bytes,omitempty"`
+}
+
 // Response is one JSON-encoded line read from the agent's stdout.
 type Response struct {
 	ID          string         `json:"id"`
@@ -210,12 +227,13 @@ type Response struct {
 	Data     *DataFrame     `json:"data,omitempty"`
 	Progress *ProgressFrame `json:"progress,omitempty"`
 
-	Ping *PingResult  `json:"ping,omitempty"`
-	Exec *ExecResult  `json:"exec,omitempty"`
-	Read *ReadResult  `json:"read,omitempty"`
-	Cat  *WriteResult `json:"write,omitempty"`
-	Job  *JobResult   `json:"job,omitempty"`
-	List *ListResult  `json:"list,omitempty"`
+	Ping    *PingResult    `json:"ping,omitempty"`
+	Exec    *ExecResult    `json:"exec,omitempty"`
+	Read    *ReadResult    `json:"read,omitempty"`
+	Cat     *WriteResult   `json:"write,omitempty"`
+	Job     *JobResult     `json:"job,omitempty"`
+	Storage *StorageResult `json:"storage,omitempty"`
+	List    *ListResult    `json:"list,omitempty"`
 }
 
 type DataFrame struct {
@@ -345,9 +363,22 @@ type JobInfo struct {
 	// continues but no exit code will be recorded.
 	Orphaned bool `json:"orphaned,omitempty"`
 	// ExitCode is valid only when State is JobExited.
-	ExitCode  int    `json:"exit_code,omitempty"`
-	StartedAt string `json:"started_at"`
-	EndedAt   string `json:"ended_at,omitempty"`
+	ExitCode     int       `json:"exit_code,omitempty"`
+	StartedAt    string    `json:"started_at"`
+	EndedAt      string    `json:"ended_at,omitempty"`
+	StdoutLedger LogLedger `json:"stdout_ledger"`
+	StderrLedger LogLedger `json:"stderr_ledger"`
+}
+
+// LogLedger is the durable accounting for a bounded job log stream.
+type LogLedger struct {
+	OriginalBytes    int64  `json:"original_bytes"`
+	RetainedBytes    int64  `json:"retained_bytes"`
+	DroppedBytes     int64  `json:"dropped_bytes"`
+	Truncated        bool   `json:"truncated"`
+	FirstTruncatedAt string `json:"first_truncated_at,omitempty"`
+	LimitBytes       int64  `json:"limit_bytes"`
+	Policy           string `json:"policy"`
 }
 
 // JobResult is the union of replies for the job ops.
@@ -365,6 +396,7 @@ type JobResult struct {
 	// Logs fields, set for job_logs.
 	Logs           string     `json:"logs,omitempty"`
 	LogsTruncation Truncation `json:"logs_truncation"`
+	LogLedger      LogLedger  `json:"log_ledger"`
 	// NextOffset is the byte offset to pass as SinceOffset on the next poll.
 	NextOffset int64 `json:"next_offset,omitempty"`
 	// LogSize is the current total size of the selected stream.
@@ -400,6 +432,116 @@ type JobResult struct {
 	Truncated bool `json:"truncated,omitempty"`
 }
 
+type StorageScope struct {
+	Name          string          `json:"name"`
+	Root          string          `json:"root"`
+	UsedBytes     int64           `json:"used_bytes"`
+	FreeBytes     int64           `json:"free_bytes,omitempty"`
+	MaxBytes      int64           `json:"max_bytes"`
+	TargetBytes   int64           `json:"target_bytes,omitempty"`
+	MinFreeBytes  int64           `json:"min_free_bytes,omitempty"`
+	HighWatermark float64         `json:"high_watermark"`
+	LowWatermark  float64         `json:"low_watermark"`
+	RetentionSec  int64           `json:"retention_sec"`
+	KeepLastJobs  int             `json:"keep_last_jobs"`
+	JobCount      int             `json:"job_count"`
+	RunningJobs   int             `json:"running_jobs"`
+	Pressure      bool            `json:"pressure"`
+	PolicySource  string          `json:"policy_source"`
+	Metrics       *StorageMetrics `json:"metrics,omitempty"`
+}
+
+// StorageMetrics is a bounded, low-cardinality telemetry snapshot. Scope is
+// represented by fixed fields (local/remote_state), never arbitrary labels.
+type StorageMetrics struct {
+	SchemaVersion  int                    `json:"schema_version"`
+	Local          StorageMetricsScope    `json:"local"`
+	RemoteState    StorageMetricsScope    `json:"remote_state"`
+	Logs           StorageLogMetrics      `json:"logs"`
+	GC             StorageGCMetrics       `json:"gc"`
+	PressureEvents []StoragePressureEvent `json:"pressure_events,omitempty"`
+	QuotaHits      uint64                 `json:"quota_hits_total"`
+}
+
+type StorageMetricsScope struct {
+	UsedBytes     int64  `json:"used_bytes"`
+	FreeBytes     int64  `json:"free_bytes,omitempty"`
+	BudgetBytes   int64  `json:"budget_bytes"`
+	Pressure      bool   `json:"pressure"`
+	PressureLevel string `json:"pressure_level"`
+}
+
+type StorageLogMetrics struct {
+	OriginalBytes uint64 `json:"original_bytes"`
+	RetainedBytes uint64 `json:"retained_bytes"`
+	DroppedBytes  uint64 `json:"dropped_bytes"`
+}
+
+type StorageGCMetrics struct {
+	ScannedJobs    uint64            `json:"scanned_jobs"`
+	RemovedJobs    uint64            `json:"removed_jobs"`
+	FreedBytes     uint64            `json:"freed_bytes"`
+	Errors         uint64            `json:"errors"`
+	DurationMS     uint64            `json:"duration_ms"`
+	Runs           map[string]uint64 `json:"runs"`
+	FailureReasons map[string]uint64 `json:"failure_reasons"`
+}
+
+type StoragePressureEvent struct {
+	Scope string `json:"scope"`
+	State string `json:"state"`
+	At    string `json:"at"`
+}
+
+type StorageResult struct {
+	OperationID string               `json:"operation_id,omitempty"`
+	Terminal    bool                 `json:"terminal"`
+	Execution   ExecutionState       `json:"execution_state"`
+	Status      *StorageScope        `json:"status,omitempty"`
+	GC          *StorageGCReport     `json:"gc,omitempty"`
+	Doctor      *StorageDoctorReport `json:"doctor,omitempty"`
+}
+
+type StorageGCItem struct {
+	ID        string `json:"id"`
+	Bytes     int64  `json:"bytes"`
+	Reason    string `json:"reason"`
+	StartedAt string `json:"started_at,omitempty"`
+	EndedAt   string `json:"ended_at,omitempty"`
+}
+
+type StorageGCReport struct {
+	Root          string          `json:"root"`
+	UsedBytes     int64           `json:"used_bytes"`
+	FreeBytes     int64           `json:"free_bytes,omitempty"`
+	TargetBytes   int64           `json:"target_bytes,omitempty"`
+	Scanned       int             `json:"scanned"`
+	ScanTruncated bool            `json:"scan_truncated,omitempty"`
+	Pressure      bool            `json:"pressure"`
+	DryRun        bool            `json:"dry_run"`
+	Candidates    []StorageGCItem `json:"candidates,omitempty"`
+	Removed       []StorageGCItem `json:"removed,omitempty"`
+	Skipped       []string        `json:"skipped,omitempty"`
+	FreedBytes    int64           `json:"freed_bytes"`
+	Errors        []string        `json:"errors,omitempty"`
+	Metrics       *StorageMetrics `json:"metrics,omitempty"`
+}
+
+type StorageDoctorFinding struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Path     string `json:"path,omitempty"`
+	Message  string `json:"message"`
+	Action   string `json:"action,omitempty"`
+}
+
+type StorageDoctorReport struct {
+	Root     string                 `json:"root"`
+	OK       bool                   `json:"ok"`
+	Findings []StorageDoctorFinding `json:"findings,omitempty"`
+	Metrics  *StorageMetrics        `json:"metrics,omitempty"`
+}
+
 // WaitedJob is one job's outcome in a multi-job wait.
 type WaitedJob struct {
 	ID   string   `json:"id"`
@@ -432,6 +574,12 @@ type ListParams struct {
 	Path string `json:"path"`
 	// Limit caps the number of entries returned. 0 means the agent default.
 	Limit int `json:"limit,omitempty"`
+	// MaxEntries is an explicit alias for Limit used by bounded callers.
+	MaxEntries int `json:"max_entries,omitempty"`
+	// MaxBytes caps the encoded listing payload. 0 means the agent default.
+	MaxBytes int `json:"max_bytes,omitempty"`
+	// Cursor resumes after the entry named by the previous page's NextCursor.
+	Cursor string `json:"cursor,omitempty"`
 }
 
 // ListResult carries a directory listing.
@@ -445,4 +593,6 @@ type ListResult struct {
 	// tell a listing was cut short.
 	Total     int  `json:"total"`
 	Truncated bool `json:"truncated,omitempty"`
+	// NextCursor is opaque and can be passed back in ListParams.Cursor.
+	NextCursor string `json:"next_cursor,omitempty"`
 }

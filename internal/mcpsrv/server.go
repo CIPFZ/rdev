@@ -289,6 +289,8 @@ type JobOut struct {
 	OperationID    string               `json:"operation_id,omitempty"`
 	Terminal       bool                 `json:"terminal"`
 	ExecutionState proto.ExecutionState `json:"execution_state"`
+	StdoutLedger   proto.LogLedger      `json:"stdout_ledger"`
+	StderrLedger   proto.LogLedger      `json:"stderr_ledger"`
 }
 
 func toJobOut(j *proto.JobInfo) JobOut {
@@ -300,6 +302,7 @@ func toJobOut(j *proto.JobInfo) JobOut {
 		State: j.State, ExitCode: j.ExitCode, StartedAt: j.StartedAt, EndedAt: j.EndedAt,
 		Orphaned: j.Orphaned, ChildPID: j.ChildPID,
 		OperationID: j.OperationID, Terminal: j.Terminal, ExecutionState: j.Execution,
+		StdoutLedger: j.StdoutLedger, StderrLedger: j.StderrLedger,
 	}
 }
 
@@ -338,6 +341,7 @@ type JobLogsOut struct {
 	OperationID    string               `json:"operation_id"`
 	Terminal       bool                 `json:"terminal"`
 	ExecutionState proto.ExecutionState `json:"execution_state"`
+	Ledger         proto.LogLedger      `json:"ledger"`
 }
 
 type JobStopIn struct {
@@ -390,6 +394,23 @@ type JobRmOut struct {
 	Skipped      []string `json:"skipped,omitempty" jsonschema:"Jobs left alone because they are still running."`
 	Missing      []string `json:"missing,omitempty" jsonschema:"Jobs whose records were already gone. Removal is idempotent, so this is not an error."`
 	FreedBytes   int64    `json:"freed_bytes"`
+}
+
+type StorageStatusIn struct {
+	Host  string `json:"host"`
+	Scope string `json:"scope,omitempty" jsonschema:"local or remote_state; defaults to remote_state"`
+}
+type StorageGCIn struct {
+	Host           string `json:"host"`
+	Scope          string `json:"scope,omitempty"`
+	DryRun         bool   `json:"dry_run,omitempty"`
+	MaxScanJobs    int    `json:"max_scan_jobs,omitempty"`
+	MaxDeleteJobs  int    `json:"max_delete_jobs,omitempty"`
+	MaxDeleteBytes int64  `json:"max_delete_bytes,omitempty"`
+}
+type StorageDoctorIn struct {
+	Host  string `json:"host"`
+	Scope string `json:"scope,omitempty"`
 }
 
 func registerJobs(s *mcp.Server, c *client.Client) {
@@ -521,6 +542,27 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 			FreedBytes: res.FreedBytes, RemovedCount: len(res.Removed),
 		}, nil
 	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_storage_status", Description: "Report managed storage usage, budgets, free space, job counts, and pressure state."}, func(ctx context.Context, _ *mcp.CallToolRequest, in StorageStatusIn) (*mcp.CallToolResult, proto.StorageScope, error) {
+		res, err := c.StorageStatus(ctx, in.Host, in.Scope)
+		if err != nil {
+			return nil, proto.StorageScope{}, err
+		}
+		return nil, *res, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_storage_gc", Description: "Run owner-safe bounded storage reclamation. Use dry_run to preview exactly the candidates; limits cap scan, jobs, and bytes."}, func(ctx context.Context, _ *mcp.CallToolRequest, in StorageGCIn) (*mcp.CallToolResult, proto.StorageGCReport, error) {
+		res, err := c.StorageGC(ctx, client.StorageOptions{Host: in.Host, Scope: in.Scope, DryRun: in.DryRun, MaxScanJobs: in.MaxScanJobs, MaxDeleteJobs: in.MaxDeleteJobs, MaxDeleteBytes: in.MaxDeleteBytes})
+		if err != nil {
+			return nil, proto.StorageGCReport{}, err
+		}
+		return nil, *res, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_storage_doctor", Description: "Produce a non-mutating, owner-safe storage diagnosis including policy, permissions, stale tombstones/locks, and free-space findings."}, func(ctx context.Context, _ *mcp.CallToolRequest, in StorageDoctorIn) (*mcp.CallToolResult, proto.StorageDoctorReport, error) {
+		res, err := c.StorageDoctor(ctx, in.Host, in.Scope)
+		if err != nil {
+			return nil, proto.StorageDoctorReport{}, err
+		}
+		return nil, *res, nil
+	})
 }
 
 func toJobLogsOut(res *proto.JobResult) JobLogsOut {
@@ -535,7 +577,7 @@ func toJobLogsOut(res *proto.JobResult) JobLogsOut {
 		Logs: res.Logs, NextOffset: res.NextOffset,
 		LogSize: res.LogSize, Matched: res.Matched, Returned: returned,
 		Truncation: res.LogsTruncation, OperationID: res.OperationID,
-		Terminal: res.Terminal, ExecutionState: res.Execution,
+		Terminal: res.Terminal, ExecutionState: res.Execution, Ledger: res.LogLedger,
 	}
 }
 

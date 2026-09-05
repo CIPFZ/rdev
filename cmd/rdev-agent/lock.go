@@ -74,14 +74,17 @@ func lockPath(jobDir string) string {
 // would again be outside the lock.
 func withJobLock(jobDir string, fn func() error) error {
 	path := lockPath(jobDir)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := secureDir(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := secureRecordFile(path); err != nil {
+		return err
+	}
 
 	if err := acquireJobLock(f, path); err != nil {
 		return err
@@ -113,6 +116,111 @@ func acquireJobLock(f *os.File, path string) error {
 		seam.acquired(path)
 	}
 	return nil
+}
+
+// tryJobLock runs fn only when the per-job lock can be acquired immediately.
+// GC uses this non-blocking form: a lock held by job_start, job_stop, the
+// supervisor, or job_rm is evidence that the record is in-flight and must be
+// left for a later pass rather than delaying unrelated work.
+func tryJobLock(jobDir string, fn func() error) (bool, error) {
+	return tryJobLockMode(jobDir, true, fn)
+}
+
+// tryExistingJobLock is the read-only variant used by storage dry-runs. It
+// never creates the lock directory/file, because a dry-run must not leave
+// filesystem artifacts merely by inspecting a candidate. A missing lock is
+// treated as uncontended; execution rechecks under a real lock before rename.
+func tryExistingJobLock(jobDir string, fn func() error) (bool, error) {
+	return tryJobLockMode(jobDir, false, fn)
+}
+
+// probeExistingJobLock is a strictly read-only stale-lock probe for storage
+// doctor. Unlike tryExistingJobLock it never calls secureRecordFile (which may
+// chmod a broad lock file), and it takes a shared flock solely to determine
+// whether an exclusive writer currently owns the descriptor.
+func probeExistingJobLock(jobDir string) (bool, error) {
+	path := lockPath(jobDir)
+	parent := filepath.Dir(path)
+	st, err := os.Lstat(parent)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+		return false, errors.New("job lock directory is not private")
+	}
+	st, err = os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+		return false, errors.New("job lock is not a private owned regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true, nil
+}
+
+func tryJobLockMode(jobDir string, create bool, fn func() error) (bool, error) {
+	path := lockPath(jobDir)
+	parent := filepath.Dir(path)
+	if create {
+		if err := secureDir(parent, 0o700); err != nil {
+			return false, err
+		}
+	} else {
+		st, err := os.Lstat(parent)
+		if errors.Is(err, os.ErrNotExist) {
+			return true, fn()
+		}
+		if err != nil {
+			return false, err
+		}
+		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+			return false, errors.New("job lock directory is not private")
+		}
+	}
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
+	if !create && errors.Is(err, os.ErrNotExist) {
+		return true, fn()
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	if err := secureRecordFile(path); err != nil {
+		return false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true, fn()
 }
 
 // jobExists reports whether a job's directory survived, and is how a locked

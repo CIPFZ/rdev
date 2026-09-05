@@ -18,6 +18,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -29,6 +30,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -663,14 +665,11 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 }
 
 func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
+	if p == nil {
+		return nil, invalidRequestError("write parameters required")
+	}
 	if p.Path == "" {
 		return nil, invalidRequestError("write path required")
-	}
-	path := expandHome(p.Path)
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
-		}
 	}
 
 	data := []byte(p.Content)
@@ -683,28 +682,162 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	}
 
 	mode := os.FileMode(p.Mode)
+	explicitMode := p.Mode != 0
 	if mode == 0 {
 		mode = 0o644
+	} else if mode&^0o7777 != 0 {
+		return nil, invalidRequestError("write mode must contain permission bits only")
 	}
-	flags := os.O_WRONLY | os.O_CREATE
+	path := expandHome(p.Path)
+	if !filepath.IsAbs(path) {
+		path, _ = filepath.Abs(path)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	if st, err := os.Lstat(dir); err != nil {
+		return nil, err
+	} else if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return nil, invalidRequestError("write parent must be a directory")
+	}
 	if p.Append {
-		flags |= os.O_APPEND
-	} else {
-		flags |= os.O_TRUNC
+		return doAppend(path, data, mode, p.Mode != 0)
 	}
+	if st, statErr := os.Lstat(path); statErr == nil {
+		if st.Mode()&os.ModeSymlink != 0 {
+			return nil, invalidRequestError("write target must not be a symlink")
+		}
+		if !st.Mode().IsRegular() {
+			return nil, invalidRequestError("write target must be a regular file")
+		}
+		// Historically an overwrite without an explicit mode retained the
+		// target's permissions. Preserve that behavior while still making the
+		// replacement itself atomic.
+		if !explicitMode {
+			mode = st.Mode().Perm()
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, statErr
+	} else if !explicitMode {
+		// CreateTemp starts at 0600. Keep that restrictive mode for a new
+		// implicit-mode file instead of chmod'ing to 0644 and bypassing umask.
+		mode = 0o600
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".rdev-write-*")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	n, err := tmp.Write(data)
+	if err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return nil, err
+	}
+	cleanup = false
+	// Persist the directory entry so a crash after rename cannot lose the name.
+	df, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	if err := df.Sync(); err != nil {
+		_ = df.Close()
+		return nil, err
+	}
+	if err := df.Close(); err != nil {
+		return nil, err
+	}
+	return &proto.WriteResult{Path: path, BytesWritten: n}, nil
+}
 
-	f, err := os.OpenFile(path, flags, mode)
+func doAppend(path string, data []byte, mode os.FileMode, explicitMode bool) (*proto.WriteResult, error) {
+	dir := filepath.Dir(path)
+	if !explicitMode {
+		// Match atomic overwrite: an implicit-mode append must not create a
+		// world-readable new file.
+		mode = 0o600
+	}
+	created := false
+	if st, err := os.Lstat(path); err == nil {
+		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+			return nil, invalidRequestError("append target must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_EXCL, mode)
+	if errors.Is(err, os.ErrExist) {
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, mode)
+	} else if err == nil {
+		created = true
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// Re-check after opening: a path can be replaced by a symlink between the
+	// preflight Lstat and OpenFile. The descriptor's metadata is authoritative
+	// for the write, while the path check prevents following a swapped link.
+	openedInfo, openedErr := f.Stat()
+	pathInfo, statErr := os.Lstat(path)
+	if openedErr != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !os.SameFile(openedInfo, pathInfo) {
+		_ = f.Close()
+		if openedErr != nil {
+			return nil, openedErr
+		}
+		if statErr != nil {
+			return nil, statErr
+		}
+		return nil, invalidRequestError("append target changed while opening")
+	}
+	if explicitMode {
+		if err := f.Chmod(mode); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
 	n, err := f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
 	if err != nil {
 		return nil, err
 	}
-	// Re-apply the mode: O_CREATE only honors it when the file is new.
-	if p.Mode != 0 {
-		os.Chmod(path, mode)
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if created {
+		df, err := os.Open(dir)
+		if err != nil {
+			return nil, err
+		}
+		if err := df.Sync(); err != nil {
+			_ = df.Close()
+			return nil, err
+		}
+		if err := df.Close(); err != nil {
+			return nil, err
+		}
 	}
 	return &proto.WriteResult{Path: path, BytesWritten: n}, nil
 }
@@ -746,15 +879,34 @@ func isJSONSafeText(b []byte) bool {
 // not blow up the reply.
 const defaultListLimit = 1000
 
+const (
+	defaultListBytes = 1 << 20
+	hardListBytes    = 8 << 20
+	hardListEntries  = 10_000
+)
+
 // doList reads a directory into structured entries.
 //
 // This exists so callers stop running `ls -la` and parsing its output: the format
 // varies by platform and locale, and filenames with spaces or newlines make the
 // parse ambiguous. Entries here carry real types.
 func doList(p *proto.ListParams) (*proto.ListResult, error) {
+	if p == nil {
+		return nil, invalidRequestError("list parameters required")
+	}
 	path := expandHome(p.Path)
 	if path == "" {
 		path = "."
+	}
+	root, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if root.Mode()&os.ModeSymlink != 0 {
+		return nil, invalidRequestError("list path must not be a symlink")
+	}
+	if !root.IsDir() {
+		return nil, invalidRequestError("list path is not a directory")
 	}
 	dir, err := os.Open(path)
 	if err != nil {
@@ -763,32 +915,62 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 	defer dir.Close()
 
 	limit := p.Limit
-	if limit < 0 || limit > 10_000 {
+	if p.MaxEntries != 0 {
+		if limit != 0 && limit != p.MaxEntries {
+			return nil, invalidRequestError("list limit and max_entries disagree")
+		}
+		limit = p.MaxEntries
+	}
+	if limit < 0 || limit > hardListEntries {
 		return nil, limitExceededError("list limit is outside the hard limit")
 	}
 	if limit == 0 {
 		limit = defaultListLimit
 	}
 
-	res := &proto.ListResult{Path: path, Entries: make([]proto.DirEntry, 0, limit)}
+	maxBytes := p.MaxBytes
+	if maxBytes < 0 || maxBytes > hardListBytes {
+		return nil, limitExceededError("list max_bytes is outside the hard limit")
+	}
+	if maxBytes == 0 {
+		maxBytes = defaultListBytes
+	}
+	// Read names only, in bounded chunks, retaining at most one page plus one
+	// continuation candidate. This keeps memory proportional to the response
+	// bounds even for directories containing millions of entries.
+	cursor := ""
+	if p.Cursor != "" {
+		cur, decErr := base64.RawURLEncoding.DecodeString(p.Cursor)
+		if decErr != nil {
+			return nil, invalidRequestError("invalid list cursor")
+		}
+		cursor = string(cur)
+	}
+	candidates := &listNameHeap{}
+	heap.Init(candidates)
+	candidateLimit := limit + 1 // one extra name proves continuation
+	total := 0
+	candidateOverflow := false
 	for {
-		entries, readErr := dir.ReadDir(256)
-		for _, e := range entries {
-			res.Total++
-			if len(res.Entries) >= limit {
-				res.Truncated = true
+		chunk, readErr := dir.Readdirnames(256)
+		for _, name := range chunk {
+			total++
+			if cursor != "" && name <= cursor {
 				continue
 			}
-			de := proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
-			// Report the link itself rather than its target: resolving it may dangle
-			// or cross a mount, and the caller can stat the target if it cares.
-			de.Symlink = e.Type()&os.ModeSymlink != 0
-			if info, infoErr := e.Info(); infoErr == nil {
-				de.Size = info.Size()
-				de.Mode = info.Mode().String()
-				de.ModTime = info.ModTime().UTC().Format(time.RFC3339)
+			if candidates.Len() < candidateLimit {
+				heap.Push(candidates, name)
+				continue
 			}
-			res.Entries = append(res.Entries, de)
+			if name < (*candidates)[0] {
+				heap.Pop(candidates)
+				heap.Push(candidates, name)
+				// The evicted root is a valid continuation candidate even
+				// though this newly seen name is lexically earlier.
+				candidateOverflow = true
+			} else {
+				candidateOverflow = true
+			}
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -797,8 +979,76 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 			return nil, readErr
 		}
 	}
+	names := candidates.items()
+	sort.Strings(names)
+	res := &proto.ListResult{Path: path, Entries: make([]proto.DirEntry, 0, limit), Total: total}
+	entriesBytes := 2 // JSON array delimiters
+	for _, name := range names {
+		info, infoErr := os.Lstat(filepath.Join(path, name))
+		if infoErr != nil {
+			// Entries can disappear while listing; omit the vanished item and keep
+			// pagination stable for the remaining names.
+			if errors.Is(infoErr, os.ErrNotExist) {
+				continue
+			}
+			return nil, infoErr
+		}
+		de := proto.DirEntry{Name: name, IsDir: info.IsDir(), Symlink: info.Mode()&os.ModeSymlink != 0,
+			Size: info.Size(), Mode: info.Mode().String(), ModTime: info.ModTime().UTC().Format(time.RFC3339)}
+		entryBytes, marshalErr := listEntryBytes(de)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		// Account for the JSON array delimiters and commas. This is exact for the
+		// entries payload (including escaping of Unicode/control characters), not
+		// a hand-wavy name-length estimate that can exceed MaxBytes on the wire.
+		projected := entriesBytes + entryBytes
+		if len(res.Entries) > 0 {
+			projected++ // comma separating this entry from the previous one
+		}
+		if len(res.Entries) >= limit || projected > maxBytes {
+			res.Truncated = true
+			if len(res.Entries) == 0 {
+				return nil, limitExceededError("list max_bytes is too small for one entry")
+			}
+			res.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(res.Entries[len(res.Entries)-1].Name))
+			break
+		}
+		res.Entries = append(res.Entries, de)
+		entriesBytes = projected
+	}
+	if candidateOverflow && !res.Truncated && len(res.Entries) > 0 {
+		res.Truncated = true
+		res.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(res.Entries[len(res.Entries)-1].Name))
+	}
 	return res, nil
 }
+
+func listEntryBytes(entry proto.DirEntry) (int, error) {
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
+// listNameHeap is a lexical max-heap. Keeping the largest candidate at the
+// root lets us discard it whenever a smaller name arrives, retaining only the
+// lexically earliest page and one continuation candidate.
+type listNameHeap []string
+
+func (h listNameHeap) Len() int           { return len(h) }
+func (h listNameHeap) Less(i, j int) bool { return h[i] > h[j] }
+func (h listNameHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *listNameHeap) Push(x any)        { *h = append(*h, x.(string)) }
+func (h *listNameHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+func (h listNameHeap) items() []string { return append([]string(nil), h...) }
 
 // stateFlag is the argv[1] value that overrides the agent's state directory.
 const stateFlag = "-state"
@@ -818,7 +1068,7 @@ func stateDir(dir string) (string, error) {
 			}
 			resolved = filepath.Join(home, resolved)
 		}
-		if err := os.MkdirAll(filepath.Join(resolved, "jobs"), 0o755); err != nil {
+		if err := secureDir(filepath.Join(resolved, "jobs"), 0o700); err != nil {
 			return "", err
 		}
 		return resolved, nil
@@ -829,7 +1079,7 @@ func stateDir(dir string) (string, error) {
 		return "", err
 	}
 	d := filepath.Join(home, ".cache", "rdev")
-	if err := os.MkdirAll(filepath.Join(d, "jobs"), 0o755); err != nil {
+	if err := secureDir(filepath.Join(d, "jobs"), 0o700); err != nil {
 		return "", err
 	}
 	return d, nil

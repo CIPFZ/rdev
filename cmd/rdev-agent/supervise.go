@@ -21,8 +21,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/storage"
 )
 
 // superviseFlag is the argv[1] value that switches the binary into supervisor
@@ -37,30 +41,134 @@ func runSupervisor(jobDir string, argv []string) {
 		fmt.Fprintln(os.Stderr, "rdev-agent -supervise: argv required after --")
 		os.Exit(2)
 	}
+	if err := secureJobDir(jobDir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	policy, err := storage.Load(filepath.Join(jobDir, "storage-policy.json"))
+	if err != nil {
+		policy = storage.Default()
+	}
+
+	// The serving agent owns the creation transaction. Until it publishes
+	// meta.json, this process must not launch the user command: if the agent is
+	// interrupted in that window, a supervisor that went ahead would become an
+	// unobservable runnable orphan. Waiting for a metadata record matching our
+	// own pid makes publication the supervisor's start barrier. A crashed
+	// parent is detected by reparenting; the supervisor then exits without ever
+	// starting argv. There is intentionally no wall-clock timeout while the
+	// parent is alive, so slow disks cannot turn a valid start into a false
+	// rollback.
+	parentPID := os.Getppid()
+	if raw := os.Getenv(supervisorParentEnv); raw != "" {
+		if expected, err := strconv.Atoi(raw); err == nil && expected > 0 {
+			parentPID = expected
+		}
+	}
+	for {
+		var meta jobMeta
+		if err := readJSON(filepath.Join(jobDir, "meta.json"), &meta); err == nil && meta.PID == os.Getpid() {
+			break
+		}
+		if os.Getppid() != parentPID {
+			// The serving agent died before publishing the metadata commit
+			// point. Do not leave an unobservable directory behind. Re-check
+			// under the same lock used by job_start: the parent may have
+			// published metadata concurrently with the reparenting notice, in
+			// which case this supervisor must continue and own the job.
+			_ = withJobLock(jobDir, func() error {
+				var committed jobMeta
+				if err := readJSON(filepath.Join(jobDir, "meta.json"), &committed); err == nil && committed.PID == os.Getpid() {
+					return nil
+				}
+				if err := os.RemoveAll(jobDir); err != nil {
+					return err
+				}
+				removeJobLock(jobDir)
+				return nil
+			})
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
-	// Inherit the stdio the parent already redirected to the job's log files.
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	cmd.Stdin = nil
+	cmd.Env = withoutEnvValue(os.Environ(), supervisorParentEnv)
 	// Keep the child in the supervisor's process group so that signalling the
 	// group (job_stop uses -pgid) reaches supervisor and child together.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: false}
 
+	so := storage.NewSink(policy.PerJob.MaxStdoutBytes, policy.PerJob.OnLogLimit)
+	se := storage.NewSink(policy.PerJob.MaxStderrBytes, policy.PerJob.OnLogLimit)
+	// Assign bounded writers directly to Cmd. os/exec owns the internal pipe
+	// drain goroutines and Wait waits for those goroutines before returning.
+	// Using StdoutPipe/Wait manually can close the pipe before io.Copy drains
+	// the final bytes, making a completed job occasionally report empty logs.
+	cmd.Stdout = so
+	cmd.Stderr = se
 	if err := cmd.Start(); err != nil {
-		writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
-			"exit_code": -1,
-			"ended_at":  time.Now().UTC().Format(time.RFC3339),
-			"error":     fmt.Sprintf("start failed: %v", err),
+		_ = withJobLock(jobDir, func() error {
+			if !jobExists(jobDir) {
+				return nil
+			}
+			return writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
+				"exit_code": -1,
+				"ended_at":  time.Now().UTC().Format(time.RFC3339),
+				"error":     fmt.Sprintf("start failed: %v", err),
+			})
 		})
 		os.Exit(127)
 	}
 
-	// Record the real child pid alongside the supervisor pid. Callers signal
-	// the group, but the child pid is useful when diagnosing by hand.
-	writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
+	// Record the real child pid alongside the supervisor pid. This publication
+	// participates in the same transaction lock as job_start/job_rm: a starter
+	// that is still committing metadata, or a remover that is tearing the record
+	// down, must not race a child.json write into a half-removed directory.
+	_ = withJobLock(jobDir, func() error {
+		if !jobExists(jobDir) {
+			return nil
+		}
+		return writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
+	})
 
-	err := cmd.Wait()
+	stopLedger := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = writeJSON(filepath.Join(jobDir, "ledger.json"), map[string]any{"stdout_ledger": ledgerProto(so.Ledger()), "stderr_ledger": ledgerProto(se.Ledger())})
+			case <-stopLedger:
+				return
+			}
+		}
+	}()
+	stopLimit := make(chan struct{})
+	if policy.PerJob.OnLogLimit == "stop_job" {
+		go func() {
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if so.LimitReached() || se.LimitReached() {
+						_ = cmd.Process.Kill()
+						return
+					}
+				case <-stopLimit:
+					return
+				}
+			}
+		}()
+	}
+	err = cmd.Wait()
+	close(stopLimit)
+	close(stopLedger)
+	_ = so.Flush(filepath.Join(jobDir, "stdout"))
+	_ = se.Flush(filepath.Join(jobDir, "stderr"))
+	_ = writeJSON(filepath.Join(jobDir, "ledger.json"), map[string]any{"stdout_ledger": ledgerProto(so.Ledger()), "stderr_ledger": ledgerProto(se.Ledger())})
 	code := 0
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -80,8 +188,10 @@ func runSupervisor(jobDir string, argv []string) {
 			return nil
 		}
 		return writeJSON(filepath.Join(jobDir, "status.json"), map[string]any{
-			"exit_code": code,
-			"ended_at":  time.Now().UTC().Format(time.RFC3339),
+			"exit_code":     code,
+			"ended_at":      time.Now().UTC().Format(time.RFC3339),
+			"stdout_ledger": ledgerProto(so.Ledger()),
+			"stderr_ledger": ledgerProto(se.Ledger()),
 		})
 	}
 	if err := withJobLock(jobDir, writeStatus); err != nil {
@@ -91,4 +201,8 @@ func runSupervisor(jobDir string, argv []string) {
 		writeStatus()
 	}
 	os.Exit(code)
+}
+
+func ledgerProto(l storage.Ledger) proto.LogLedger {
+	return proto.LogLedger{OriginalBytes: l.OriginalBytes, RetainedBytes: l.RetainedBytes, DroppedBytes: l.DroppedBytes, Truncated: l.Truncated, FirstTruncatedAt: l.FirstTruncatedAt, LimitBytes: l.LimitBytes, Policy: l.Policy}
 }

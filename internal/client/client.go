@@ -1602,6 +1602,48 @@ type JobRmResult struct {
 	FreedBytes int64
 }
 
+type StorageOptions struct {
+	Host           string
+	Scope          string
+	DryRun         bool
+	MaxScanJobs    int
+	MaxDeleteJobs  int
+	MaxDeleteBytes int64
+}
+
+func (c *Client) StorageStatus(ctx context.Context, host, scope string) (*proto.StorageScope, error) {
+	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpStorageStatus, Storage: &proto.StorageParams{Scope: scope}})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.Storage == nil || resp.Storage.Status == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.Storage.Status, nil
+}
+
+func (c *Client) StorageGC(ctx context.Context, opts StorageOptions) (*proto.StorageGCReport, error) {
+	resp, err := c.do(ctx, opts.Host, &proto.Request{Op: proto.OpStorageGC, Storage: &proto.StorageParams{Scope: opts.Scope, DryRun: opts.DryRun, MaxScanJobs: opts.MaxScanJobs, MaxDeleteJobs: opts.MaxDeleteJobs, MaxDeleteBytes: opts.MaxDeleteBytes}})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.Storage == nil || resp.Storage.GC == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.Storage.GC, nil
+}
+
+func (c *Client) StorageDoctor(ctx context.Context, host, scope string) (*proto.StorageDoctorReport, error) {
+	resp, err := c.do(ctx, host, &proto.Request{Op: proto.OpStorageDoctor, Storage: &proto.StorageParams{Scope: scope}})
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	if resp.Storage == nil || resp.Storage.Doctor == nil {
+		return nil, missingResultError(resp)
+	}
+	return resp.Storage.Doctor, nil
+}
+
 // JobRm deletes job records to reclaim disk.
 //
 // Job logs are unbounded, so a machine running batches accumulates them until the
