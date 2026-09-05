@@ -34,11 +34,19 @@ type Service struct {
 	approvalMu      sync.Mutex
 	approvalByToken map[string]Approval
 	readiness       Readiness
+	sharedMu        sync.Mutex
+	shared          map[string]*sharedDispatch
+}
+
+type sharedDispatch struct {
+	done chan struct{}
+	resp *proto.Response
+	err  error
 }
 
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval)}
+	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch)}
 	s.SetReady(true)
 	return s
 }
@@ -53,6 +61,30 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 		return nil, errors.New("broker service closed")
 	}
 	return s.client.DoProtocol(ctx, host, req)
+}
+
+// DispatchShared coalesces concurrent observations of the same detached job
+// set. Only the first caller performs remote work; followers receive its result.
+func (s *Service) DispatchShared(ctx context.Context, key string, fn func() (*proto.Response, error)) (*proto.Response, error) {
+	s.sharedMu.Lock()
+	if current := s.shared[key]; current != nil {
+		s.sharedMu.Unlock()
+		select {
+		case <-current.done:
+			return current.resp, current.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	current := &sharedDispatch{done: make(chan struct{})}
+	s.shared[key] = current
+	s.sharedMu.Unlock()
+	current.resp, current.err = fn()
+	s.sharedMu.Lock()
+	delete(s.shared, key)
+	close(current.done)
+	s.sharedMu.Unlock()
+	return current.resp, current.err
 }
 func (s *Service) BeginRequest() bool { return s.config != nil && s.config.BeginRequest() }
 func (s *Service) EndRequest() {

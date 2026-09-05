@@ -184,7 +184,15 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		if req.Wire != nil {
-			wireResp, err := service.Dispatch(context.Background(), req.Host, req.Wire)
+			dispatch := func() (*proto.Response, error) { return service.Dispatch(context.Background(), req.Host, req.Wire) }
+			var wireResp *proto.Response
+			var err error
+			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
+				jobKey, _ := json.Marshal(req.Wire.Job)
+				wireResp, err = service.DispatchShared(context.Background(), req.Host+":"+string(jobKey), dispatch)
+			} else {
+				wireResp, err = dispatch()
+			}
 			if err != nil {
 				service.Lanes.Release(lane)
 				service.Quota.Release(req.Owner.Key())
