@@ -7,7 +7,9 @@ import (
 	"flag"
 	"log"
 	"net"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/CIPFZ/rdev/internal/broker"
@@ -15,11 +17,12 @@ import (
 )
 
 func main() {
-	socket := flag.String("socket", "", "Unix socket path")
-	flag.Parse()
-	if *socket == "" {
-		log.Fatal("-socket is required")
+	defaultSocket := filepath.Join(os.TempDir(), "rdev", "rdevd.sock")
+	if home, err := os.UserHomeDir(); err == nil {
+		defaultSocket = filepath.Join(home, ".cache", "rdev", "rdevd.sock")
 	}
+	socket := flag.String("socket", defaultSocket, "Unix socket path")
+	flag.Parse()
 	ln, err := broker.Listen(*socket)
 	if err != nil {
 		log.Fatal(err)
