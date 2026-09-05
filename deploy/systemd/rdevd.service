@@ -1,0 +1,13 @@
+[Unit]
+Description=rdev local broker
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/bin/rdevd
+Restart=on-failure
+RestartSec=2
+Environment=RDEV_AGENT_DIR=%h/.local/share/rdev/agents
+
+[Install]
+WantedBy=default.target

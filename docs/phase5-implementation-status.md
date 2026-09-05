@@ -16,3 +16,7 @@ checks, owner-scoped policy checks, QoS admission, audit recording, and wire
 dispatch through the broker-owned `client.Client`; broker shutdown also closes
 the shared client pool. Persistent job re-discovery and multi-client QoS
 benchmarks remain follow-up validation for the final Phase 5 gate.
+
+User service templates are provided under `deploy/systemd` and `deploy/launchd`;
+both rely on the private socket lock and bounded shutdown path. Policy grants,
+job ownership, audit events, and config are persisted beside the broker socket.
