@@ -12,4 +12,6 @@ Validation currently covers `internal/broker`, `internal/proto`,
 `cmd/rdev/main.go` embed pattern, which expects generated `agents` artifacts.
 The implementation must still be integrated into the long-running `rdevd`
 process and exercised with multi-client integration and QoS benchmarks before
-the Phase 5 gate can be considered complete.
+the Phase 5 gate can be considered complete. The `cmd/rdevd` entrypoint now
+performs hello negotiation and owner-scoped policy checks; transport execution
+and persistent job re-discovery remain the next integration boundary.
