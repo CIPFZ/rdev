@@ -8,8 +8,9 @@ approval checks, rotating audit events, readiness, and validated reload/drain.
 
 Validation currently covers `internal/broker`, `internal/proto`,
 `internal/transport`, and `internal/client` with the Go toolchain under
-`~/sdk/go1.25.0`. The repository-wide command remains blocked by the existing
-`cmd/rdev/main.go` embed pattern, which expects generated `agents` artifacts.
+`~/sdk/go1.25.0`. The repository gate `make check` passes after generating the
+four embedded agent artifacts; it runs agent consistency checks, `go vet`, and
+the complete test suite.
 The implementation must still be integrated into the long-running `rdevd`
 process and exercised with multi-client integration and QoS benchmarks before
 the Phase 5 gate can be considered complete. The `cmd/rdevd` entrypoint now
