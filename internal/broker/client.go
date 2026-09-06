@@ -27,7 +27,7 @@ func DialClient(ctx context.Context, socket string, owner Owner) (*Client, error
 	if err != nil {
 		return nil, err
 	}
-	hello := proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}
+	hello := proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion, ClientID: owner.ClientID, ProjectID: owner.ProjectID}
 	if err := json.NewEncoder(conn).Encode(hello); err != nil {
 		_ = conn.Close()
 		return nil, err

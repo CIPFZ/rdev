@@ -194,6 +194,12 @@ func serveConn(conn net.Conn, service *broker.Service) {
 	requests := make(chan broker.Request, 16)
 	decodeErr := make(chan error, 1)
 	var boundOwner broker.Owner
+	if hello.ClientID != "" && hello.ProjectID != "" {
+		boundOwner = broker.Owner{ClientID: hello.ClientID, ProjectID: hello.ProjectID}
+		if err := boundOwner.Validate(); err != nil {
+			return
+		}
+	}
 	go func() {
 		for {
 			var req broker.Request

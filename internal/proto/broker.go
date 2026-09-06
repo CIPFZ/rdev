@@ -14,6 +14,7 @@ type BrokerHello struct {
 	Version    int      `json:"version"`
 	MinVersion int      `json:"min_version"`
 	ClientID   string   `json:"client_id,omitempty"`
+	ProjectID  string   `json:"project_id,omitempty"`
 	Features   []string `json:"features,omitempty"`
 }
 
