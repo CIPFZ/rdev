@@ -16,7 +16,7 @@ runtime path is exercised.
 | P5-07 | Per-lane fair queues with owner weights, config reload, and worker pools | In progress | Sustained weighted fairness benchmark is still required |
 | P5-08 | Control/exec/bulk classification, separate worker pools, queued admission, and control-under-bulk latency test | In progress | Production latency SLO benchmark is still required |
 | P5-09 | Shared job-wait dispatch coalescing, WatchHub publication, and latest-event replay on reconnect | In progress | Full durable event history and external streaming RPC remain |
-| P5-10 | Atomic job registry and startup remote re-discovery | In progress | Crash/restart mutation integration test is still required |
+| P5-10 | Atomic job registry replacement on restart load and startup remote re-discovery | In progress | Crash/restart mutation integration test is still required |
 | P5-11 | Lease grace and idle connection reaper, with in-flight request accounting and runtime `IdleTTL` reload | Complete | Reaper timing needs long-running service test |
 | P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, and policy administration RPC | In progress | Principal lifecycle and weighted-policy configuration still need runtime coverage |
 | P5-13 | Digest-bound, expiring, one-time approval tokens on risky requests | Complete | Risk taxonomy needs broader operation coverage |
