@@ -99,7 +99,23 @@ func auditField(value string) string {
 		return r
 	}, value)
 	if len(value) > 512 {
-		return value[:512]
+		value = value[:512]
+	}
+	for _, marker := range []string{"secret=", "token="} {
+		searchFrom := 0
+		for searchFrom < len(value) {
+			relative := strings.Index(value[searchFrom:], marker)
+			if relative < 0 {
+				break
+			}
+			start := searchFrom + relative
+			end := start + len(marker)
+			for end < len(value) && value[end] != ' ' && value[end] != ',' && value[end] != ';' {
+				end++
+			}
+			value = value[:start] + marker + "[REDACTED]" + value[end:]
+			searchFrom = start + len(marker) + len("[REDACTED]")
+		}
 	}
 	return value
 }

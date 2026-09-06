@@ -37,9 +37,9 @@ func TestAuditLogPersistsAndRotatesFile(t *testing.T) {
 
 func TestAuditLogSanitizesFields(t *testing.T) {
 	a := NewAuditLog(4)
-	a.Append(AuditEvent{At: time.Now(), Owner: "owner\nsecret", Result: string(make([]byte, 600))})
+	a.Append(AuditEvent{At: time.Now(), Owner: "owner\nsecret", Result: "secret=top-secret token=abc"})
 	events := a.Query(time.Time{})
-	if len(events) != 1 || len(events[0].Result) != 512 || events[0].Owner != "owner secret" {
+	if len(events) != 1 || events[0].Result != "secret=[REDACTED] token=[REDACTED]" || events[0].Owner != "owner secret" {
 		t.Fatalf("audit fields were not bounded/sanitized: %+v", events)
 	}
 }
