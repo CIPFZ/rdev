@@ -11,7 +11,7 @@ runtime path is exercised.
 | P5-02 | 0600 socket, 0700 parent, flock lock, stale socket recovery, peer credentials | Complete | Cross-UID integration test is platform-dependent |
 | P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch; real Unix multi-client test | In progress | Installed frontend adoption and multi-process remote-session benchmark remain |
 | P5-04 | Owner validation and wire client/project binding; persisted job owner | Complete | Capability administration is still internal |
-| P5-05 | Per-connection context cancellation and shared client pool | In progress | Cancellation under an in-flight transport retry needs an integration test |
+| P5-05 | Per-connection context cancellation, shared client pool, and disconnect integration test | In progress | Cancellation under an in-flight transport retry still needs transport-level evidence |
 | P5-06 | Quota admission held through dispatch, per-host accounting, and multi-client Unix test | In progress | Queued quota pressure needs stress coverage |
 | P5-07 | Per-lane fair queues with owner weights and worker pools | In progress | Weighted fairness benchmark is still required |
 | P5-08 | Control/exec/bulk classification and separate worker pools | In progress | Latency SLO benchmark is still required |
