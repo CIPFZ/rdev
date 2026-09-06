@@ -16,6 +16,7 @@ type Quota struct {
 	owners                  map[string]int
 	hosts                   map[string]int
 	notify                  chan struct{}
+	waiting                 int
 }
 
 func NewQuota(host, perClient, queue int) *Quota {
@@ -55,11 +56,24 @@ func (q *Quota) AcquireHostContext(ctx context.Context, host, owner string) erro
 		if err != ErrQueueFull {
 			return err
 		}
+		q.mu.Lock()
+		if q.waiting >= q.queued {
+			q.mu.Unlock()
+			return ErrQueueFull
+		}
+		q.waiting++
+		q.mu.Unlock()
 		select {
 		case <-q.notify:
 		case <-ctx.Done():
+			q.mu.Lock()
+			q.waiting--
+			q.mu.Unlock()
 			return ctx.Err()
 		}
+		q.mu.Lock()
+		q.waiting--
+		q.mu.Unlock()
 	}
 }
 

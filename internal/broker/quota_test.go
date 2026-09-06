@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestQuotaPerClientAndHost(t *testing.T) {
@@ -40,4 +41,31 @@ func TestQuotaTracksHostShares(t *testing.T) {
 	if err := q.AcquireHost(context.Background(), "h1", "c"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestQuotaBoundsWaitingQueue(t *testing.T) {
+	q := NewQuota(1, 4, 1)
+	if err := q.AcquireHost(context.Background(), "h", "a"); err != nil {
+		t.Fatal(err)
+	}
+	first := make(chan error, 1)
+	go func() { first <- q.AcquireHostContext(context.Background(), "h", "b") }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		q.mu.Lock()
+		waiting := q.waiting
+		q.mu.Unlock()
+		if waiting == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := q.AcquireHostContext(context.Background(), "h", "c"); err != ErrQueueFull {
+		t.Fatalf("got %v", err)
+	}
+	q.ReleaseHost("h", "a")
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	q.ReleaseHost("h", "b")
 }
