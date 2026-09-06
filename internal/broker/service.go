@@ -22,25 +22,27 @@ type ProtocolDispatcher interface {
 // clients. Callers must share one Service instead of constructing one Client
 // per frontend process.
 type Service struct {
-	client          *client.Client
-	policy          *Policy
-	lease           *Lease
-	closed          atomic.Bool
-	Quota           *Quota
-	Lanes           *Lanes
-	Watches         *WatchHub
-	Audit           *AuditLog
-	config          *ConfigStore
-	approvals       *ApprovalStore
-	approvalMu      sync.Mutex
-	approvalByToken map[string]Approval
-	readiness       Readiness
-	sharedMu        sync.Mutex
-	shared          map[string]*sharedDispatch
-	Jobs            *JobRegistry
-	fair            map[Lane]*fairDispatcher
-	weightMu        sync.RWMutex
-	weights         map[string]int
+	client           *client.Client
+	policy           *Policy
+	lease            *Lease
+	closed           atomic.Bool
+	Quota            *Quota
+	Lanes            *Lanes
+	Watches          *WatchHub
+	Audit            *AuditLog
+	config           *ConfigStore
+	approvals        *ApprovalStore
+	approvalMu       sync.Mutex
+	approvalByToken  map[string]Approval
+	readiness        Readiness
+	sharedMu         sync.Mutex
+	shared           map[string]*sharedDispatch
+	Jobs             *JobRegistry
+	fair             map[Lane]*fairDispatcher
+	weightMu         sync.RWMutex
+	weights          map[string]int
+	dispatchMu       sync.RWMutex
+	dispatchOverride func(context.Context, string, *proto.Request) (*proto.Response, error)
 }
 
 type sharedDispatch struct {
@@ -110,7 +112,18 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 	if s.closed.Load() {
 		return nil, errors.New("broker service closed")
 	}
+	s.dispatchMu.RLock()
+	override := s.dispatchOverride
+	s.dispatchMu.RUnlock()
+	if override != nil {
+		return override(ctx, host, req)
+	}
 	return s.client.DoProtocol(ctx, host, req)
+}
+func (s *Service) SetDispatcher(fn func(context.Context, string, *proto.Request) (*proto.Response, error)) {
+	s.dispatchMu.Lock()
+	s.dispatchOverride = fn
+	s.dispatchMu.Unlock()
 }
 func (s *Service) DispatchFair(ctx context.Context, owner string, lane Lane, fn func() (*proto.Response, error)) (*proto.Response, error) {
 	if s.closed.Load() {

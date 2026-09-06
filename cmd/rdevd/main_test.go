@@ -59,6 +59,45 @@ func TestUnixBrokerMultipleClientsShareService(t *testing.T) {
 	}
 }
 
+func TestServeConnCancelsInFlightDispatchOnDisconnect(t *testing.T) {
+	a, b := net.Pipe()
+	service := broker.NewService(nil)
+	owner := broker.Owner{ClientID: "cancel", ProjectID: "p"}
+	if err := service.Grant(owner, "ping"); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	service.SetDispatcher(func(ctx context.Context, _ string, _ *proto.Request) (*proto.Response, error) {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		return nil, ctx.Err()
+	})
+	go serveConn(b, service)
+	if err := json.NewEncoder(a).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}); err != nil {
+		t.Fatal(err)
+	}
+	var hello proto.BrokerHelloResponse
+	if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(a).Encode(broker.Request{ID: "cancel", Owner: owner, Operation: "ping", Host: "h", Wire: &proto.Request{Op: proto.OpPing}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not start")
+	}
+	_ = a.Close()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch was not canceled")
+	}
+}
+
 func TestServeConnNegotiates(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
