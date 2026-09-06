@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"strings"
@@ -36,11 +37,23 @@ func (a *AuditLog) ConfigureFile(path string, maxBytes int64) error {
 	if path == "" || maxBytes < 1 {
 		return os.ErrInvalid
 	}
+	prior, _ := os.ReadFile(path)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
+	loaded := make([]AuditEvent, 0)
+	for _, line := range bytes.Split(prior, []byte{'\n'}) {
+		var event AuditEvent
+		if len(line) > 0 && json.Unmarshal(line, &event) == nil {
+			loaded = append(loaded, event)
+		}
+	}
 	a.mu.Lock()
+	if len(loaded) > a.max {
+		loaded = loaded[len(loaded)-a.max:]
+	}
+	a.events = append(a.events, loaded...)
 	if a.file != nil {
 		_ = a.file.Close()
 	}
@@ -97,6 +110,18 @@ func (a *AuditLog) Query(since time.Time) []AuditEvent {
 	for _, e := range a.events {
 		if e.At.After(since) {
 			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (a *AuditLog) QueryOwner(since time.Time, owner string) []AuditEvent {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]AuditEvent, 0)
+	for _, event := range a.events {
+		if event.Owner == owner && event.At.After(since) {
+			out = append(out, event)
 		}
 	}
 	return out

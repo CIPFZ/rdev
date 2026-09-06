@@ -43,3 +43,21 @@ func TestAuditLogSanitizesFields(t *testing.T) {
 		t.Fatalf("audit fields were not bounded/sanitized: %+v", events)
 	}
 }
+
+func TestAuditLogLoadsHistoryAndScopesOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.jsonl")
+	first := NewAuditLog(8)
+	if err := first.ConfigureFile(path, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	first.Append(AuditEvent{At: now, Owner: "a", Operation: "exec"})
+	first.Append(AuditEvent{At: now, Owner: "b", Operation: "exec"})
+	second := NewAuditLog(8)
+	if err := second.ConfigureFile(path, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if got := second.QueryOwner(now.Add(-time.Second), "a"); len(got) != 1 {
+		t.Fatalf("history/scope count=%d", len(got))
+	}
+}

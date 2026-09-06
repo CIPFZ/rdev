@@ -271,7 +271,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		if req.Operation == "audit_query" {
-			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Audit: service.Audit.Query(req.Since)})
+			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key())})
 			endRequest()
 			continue
 		}
