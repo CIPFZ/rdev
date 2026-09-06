@@ -9,7 +9,7 @@ runtime path is exercised.
 |---|---|---|---|
 | P5-01 | Broker hello version/min-version negotiation, incompatible-peer tests, and pipelined hello/request integration test | Complete | Cross-version release matrix still needs CI coverage |
 | P5-02 | 0600 socket, 0700 parent, flock lock, stale socket recovery, peer credentials | Complete | Cross-UID integration test is platform-dependent |
-| P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch; pipelined request test; `make stress-broker` runs 20-client wire test 100 times | In progress | Installed frontend adoption and multi-process remote-session benchmark remain |
+| P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch; CLI `rdev ping` broker mode via `RDEV_BROKER_SOCKET` and principal env; pipelined request test; `make stress-broker` runs 20-client wire test 100 times | In progress | Remaining CLI/MCP commands and multi-process remote-session benchmark remain |
 | P5-04 | Owner validation, connection-level owner binding, wire client/project binding; persisted job owner | In progress | Same-UID initial principal spoofing still needs a signed principal/token mechanism |
 | P5-05 | Per-connection context cancellation, shared client pool, disconnect integration test, and full race test | In progress | Cancellation under an in-flight transport retry still needs broker-to-transport integration evidence |
 | P5-06 | Quota admission held through dispatch, runtime `MaxHosts` reload, per-host accounting, bounded queued admission, and 20-client stress target | In progress | Longer duration pressure beyond 20 repeated runs is still required |

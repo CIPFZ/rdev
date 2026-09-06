@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/mcpsrv"
@@ -87,6 +88,13 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if os.Args[1] == "ping" && os.Getenv("RDEV_BROKER_SOCKET") != "" {
+		if err := brokerPing(context.Background(), os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	c := client.New(lookupAgent)
 	// A malformed registry should not block a session: warn and continue with
@@ -148,6 +156,29 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func brokerPing(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: rdev ping <host>")
+	}
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	if err := owner.Validate(); err != nil {
+		return fmt.Errorf("broker principal: %w", err)
+	}
+	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	resp, err := c.Do(broker.Request{Owner: owner, Operation: "ping", Host: args[0], Wire: &proto.Request{Op: proto.OpPing}})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return errors.New(resp.Error)
+	}
+	return json.NewEncoder(os.Stdout).Encode(resp.Wire)
 }
 
 func cliErrorLine(c *client.Client, envelope *proto.ErrorEnvelope) string {
