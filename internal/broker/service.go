@@ -64,11 +64,13 @@ type fairDispatcher struct {
 	queue *FairQueue
 	wake  chan struct{}
 	stop  chan struct{}
+	wg    sync.WaitGroup
 }
 
 func newFairDispatcher(workers int) *fairDispatcher {
 	f := &fairDispatcher{queue: NewFairQueue(), wake: make(chan struct{}, 1), stop: make(chan struct{})}
 	worker := func() {
+		defer f.wg.Done()
 		for {
 			select {
 			case <-f.wake:
@@ -91,6 +93,7 @@ func newFairDispatcher(workers int) *fairDispatcher {
 		}
 	}
 	for i := 0; i < workers; i++ {
+		f.wg.Add(1)
 		go worker()
 	}
 	return f
@@ -343,7 +346,9 @@ func SharedConnectionKey(h transport.Host) (string, error) {
 var ErrClosed = errors.New("broker service is closed")
 
 func (s *Service) Close(ctx context.Context) error {
-	_ = ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if s == nil || s.client == nil {
 		return ErrClosed
 	}
@@ -353,6 +358,17 @@ func (s *Service) Close(ctx context.Context) error {
 	_ = s.Drain(ctx)
 	for _, f := range s.fair {
 		close(f.stop)
+	}
+	done := make(chan struct{})
+	go func() {
+		for _, f := range s.fair {
+			f.wg.Wait()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 	s.client.Close()
 	return nil

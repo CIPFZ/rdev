@@ -22,7 +22,7 @@ runtime path is exercised.
 | P5-13 | Digest-bound, expiring, one-time approval tokens on risky requests | Complete | Risk taxonomy needs broader operation coverage |
 | P5-14 | Bounded/sanitized rotating JSONL audit, history restore, owner-scoped query RPC | In progress | Secret-value scrub integration needs dedicated tests |
 | P5-15 | Readiness gate, optional readiness file, flock recovery, systemd/launchd templates | In progress | Service-manager smoke tests are still required |
-| P5-16 | JSON config reload on SIGHUP, bounded drain, ordered persistence | In progress | Mutation replay/failure injection test is still required |
+| P5-16 | JSON config reload on SIGHUP, bounded drain, ordered persistence, and worker waitgroup shutdown | In progress | Mutation replay/failure injection test is still required |
 
 The final Phase 5 gate requires every “In progress” row to have runtime
 evidence and a passing targeted test, in addition to `make check`.
