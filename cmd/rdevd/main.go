@@ -33,7 +33,11 @@ func main() {
 	}
 	agentDir := flag.String("agent-dir", defaultAgents, "directory containing rdev-agent-<os>-<arch> binaries")
 	configPath := flag.String("config", defaultSocket+".json", "broker JSON config path")
+	readyFile := flag.String("ready-file", "", "optional readiness file written after initialization")
 	flag.Parse()
+	if *readyFile != "" {
+		_ = os.Remove(*readyFile)
+	}
 	ln, err := broker.Listen(*socket)
 	if err != nil {
 		log.Fatal(err)
@@ -82,6 +86,12 @@ func main() {
 	service.RecoverJobs(recoveryCtx)
 	cancelRecovery()
 	service.SetReady(true)
+	if *readyFile != "" {
+		if err := os.WriteFile(*readyFile, []byte("READY\n"), 0o600); err != nil {
+			log.Printf("rdevd: readiness file: %v", err)
+		}
+		defer os.Remove(*readyFile)
+	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

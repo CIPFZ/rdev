@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/rdevd
+ExecStart=%h/bin/rdevd -ready-file %t/rdevd.ready
 Restart=on-failure
 RestartSec=2
 Environment=RDEV_AGENT_DIR=%h/.local/share/rdev/agents
