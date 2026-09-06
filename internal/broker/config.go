@@ -8,8 +8,9 @@ import (
 )
 
 type Config struct {
-	MaxHosts int           `json:"max_hosts"`
-	IdleTTL  time.Duration `json:"idle_ttl"`
+	MaxHosts     int            `json:"max_hosts"`
+	IdleTTL      time.Duration  `json:"idle_ttl"`
+	OwnerWeights map[string]int `json:"owner_weights,omitempty"`
 }
 
 func (c Config) Validate() error {
@@ -18,6 +19,11 @@ func (c Config) Validate() error {
 	}
 	if c.IdleTTL <= 0 {
 		return errors.New("idle_ttl must be positive")
+	}
+	for owner, weight := range c.OwnerWeights {
+		if owner == "" || weight < 1 || weight > 100 {
+			return errors.New("owner_weights must contain weights from 1 to 100")
+		}
 	}
 	return nil
 }

@@ -208,7 +208,16 @@ func (s *Service) ReloadConfig(c Config) error {
 	if s.config == nil {
 		return errors.New("broker config unavailable")
 	}
-	return s.config.Reload(c)
+	if err := s.config.Reload(c); err != nil {
+		return err
+	}
+	s.weightMu.Lock()
+	s.weights = make(map[string]int, len(c.OwnerWeights))
+	for owner, weight := range c.OwnerWeights {
+		s.weights[owner] = weight
+	}
+	s.weightMu.Unlock()
+	return nil
 }
 func (s *Service) AttachClient() bool {
 	if s.closed.Load() {

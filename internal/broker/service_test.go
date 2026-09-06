@@ -86,6 +86,19 @@ func TestServiceDispatchSharedCoalesces(t *testing.T) {
 	}
 }
 
+func TestServiceReloadConfigAppliesOwnerWeights(t *testing.T) {
+	s := NewService(nil)
+	if err := s.ReloadConfig(Config{MaxHosts: 1, IdleTTL: time.Second, OwnerWeights: map[string]int{"owner": 3}}); err != nil {
+		t.Fatal(err)
+	}
+	s.weightMu.RLock()
+	weight := s.weights["owner"]
+	s.weightMu.RUnlock()
+	if weight != 3 {
+		t.Fatalf("weight=%d", weight)
+	}
+}
+
 func TestServiceRejectsAttachAfterClose(t *testing.T) {
 	s := NewService(nil)
 	if err := s.Close(nil); err != nil {

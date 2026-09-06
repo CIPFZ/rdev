@@ -42,3 +42,9 @@ func TestConfigDrainWaitsForAdmittedRequests(t *testing.T) {
 		t.Fatal("request admitted after drain")
 	}
 }
+
+func TestConfigRejectsInvalidOwnerWeight(t *testing.T) {
+	if _, err := NewConfigStore(Config{MaxHosts: 1, IdleTTL: time.Second, OwnerWeights: map[string]int{"owner": 0}}); err == nil {
+		t.Fatal("invalid owner weight accepted")
+	}
+}
