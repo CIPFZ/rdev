@@ -9,6 +9,35 @@ import (
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
+func TestServiceDispatchFairKeepsControlLaneResponsive(t *testing.T) {
+	s := NewService(nil)
+	bulkStarted := make(chan struct{})
+	bulkDone := make(chan struct{})
+	go func() {
+		_, _ = s.DispatchFair(context.Background(), "bulk", LaneBulk, func() (*proto.Response, error) {
+			close(bulkStarted)
+			time.Sleep(150 * time.Millisecond)
+			close(bulkDone)
+			return &proto.Response{}, nil
+		})
+	}()
+	select {
+	case <-bulkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("bulk dispatch did not start")
+	}
+	start := time.Now()
+	if _, err := s.DispatchFair(context.Background(), "control", LaneControl, func() (*proto.Response, error) {
+		return &proto.Response{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("control lane blocked by bulk work: %s", elapsed)
+	}
+	<-bulkDone
+}
+
 func TestServiceLeaseAndPolicy(t *testing.T) {
 	s := NewService(nil)
 	owner := Owner{ClientID: "c", ProjectID: "p"}
