@@ -103,6 +103,10 @@ func main() {
 	ready.SetReady(true)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
