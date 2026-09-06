@@ -31,3 +31,23 @@ func TestJobRegistrySaveLoad(t *testing.T) {
 		t.Fatal("job not restored")
 	}
 }
+
+func TestJobRegistryLoadReplacesStaleStateOnRestart(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "jobs.json")
+	persisted := NewJobRegistry()
+	persisted.Put(JobRef{ID: "live", Owner: "o", Host: "h"})
+	if err := persisted.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewJobRegistry()
+	restarted.Put(JobRef{ID: "stale", Owner: "o", Host: "h"})
+	if err := restarted.Load(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := restarted.Get("stale"); ok {
+		t.Fatal("stale job survived restart load")
+	}
+	if _, ok := restarted.Get("live"); !ok {
+		t.Fatal("persisted job missing after restart load")
+	}
+}

@@ -57,12 +57,14 @@ func (r *JobRegistry) Load(path string) error {
 	if err := json.Unmarshal(data, &jobs); err != nil {
 		return err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	loaded := make(map[string]JobRef, len(jobs))
 	for _, j := range jobs {
 		if j.ID != "" {
-			r.jobs[j.ID] = j
+			loaded[j.ID] = j
 		}
 	}
+	r.mu.Lock()
+	r.jobs = loaded
+	r.mu.Unlock()
 	return nil
 }
