@@ -6,15 +6,16 @@ import (
 )
 
 type Request struct {
-	ID        string         `json:"id"`
-	Owner     Owner          `json:"owner"`
-	Operation string         `json:"operation"`
-	Host      string         `json:"host,omitempty"`
-	Wire      *proto.Request `json:"wire,omitempty"`
-	Target    string         `json:"target,omitempty"`
-	Approval  string         `json:"approval,omitempty"`
-	Risk      bool           `json:"risk,omitempty"`
-	Since     time.Time      `json:"since,omitempty"`
+	ID         string         `json:"id"`
+	Owner      Owner          `json:"owner"`
+	Operation  string         `json:"operation"`
+	Host       string         `json:"host,omitempty"`
+	Wire       *proto.Request `json:"wire,omitempty"`
+	Target     string         `json:"target,omitempty"`
+	Approval   string         `json:"approval,omitempty"`
+	Risk       bool           `json:"risk,omitempty"`
+	Capability string         `json:"capability,omitempty"`
+	Since      time.Time      `json:"since,omitempty"`
 }
 type Response struct {
 	ID    string          `json:"id"`

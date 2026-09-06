@@ -34,6 +34,16 @@ func (p *Policy) Decide(owner, operation string) Decision {
 	return Decision{Reason: "denied by default"}
 }
 
+func capabilityKey(capability, operation string) string {
+	return "@cap:" + capability + "\x00" + operation
+}
+func (p *Policy) GrantCapability(owner, capability, operation string) {
+	p.Grant(owner, capabilityKey(capability, operation))
+}
+func (p *Policy) DecideCapability(owner, capability, operation string) Decision {
+	return p.Decide(owner, capabilityKey(capability, operation))
+}
+
 func (p *Policy) Save(path string) error {
 	p.mu.RLock()
 	data, err := json.Marshal(p.grants)

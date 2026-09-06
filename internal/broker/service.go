@@ -241,8 +241,24 @@ func (s *Service) Grant(owner Owner, operation string) error {
 	s.policy.Grant(owner.Key(), operation)
 	return nil
 }
+func (s *Service) GrantCapability(owner Owner, capability, operation string) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	if capability == "" || operation == "" {
+		return errors.New("capability and operation required")
+	}
+	s.policy.GrantCapability(owner.Key(), capability, operation)
+	return nil
+}
 func (s *Service) LoadPolicy(path string) error { return s.policy.Load(path) }
 func (s *Service) SavePolicy(path string) error { return s.policy.Save(path) }
+func (s *Service) PolicyDecisionForCapability(owner Owner, capability, operation string) Decision {
+	if err := owner.Validate(); err != nil {
+		return Decision{Reason: err.Error()}
+	}
+	return s.policy.DecideCapability(owner.Key(), capability, operation)
+}
 
 // RecoverJobs revalidates persisted detached jobs against their remote hosts
 // after broker restart. Missing jobs are removed; live records remain owned by

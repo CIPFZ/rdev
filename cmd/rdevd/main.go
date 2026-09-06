@@ -264,6 +264,9 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			}
 		}
 		decision := service.Decide(req.Owner, req.Operation)
+		if req.Capability != "" {
+			decision = service.PolicyDecisionForCapability(req.Owner, req.Capability, req.Operation)
+		}
 		if !decision.Allow {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: decision.Reason, Result: "denied"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: decision.Reason})

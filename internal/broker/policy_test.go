@@ -31,3 +31,14 @@ func TestPolicyPersistsGrantsAtomically(t *testing.T) {
 		t.Fatal("grant not restored")
 	}
 }
+
+func TestPolicyCapabilityDecision(t *testing.T) {
+	p := NewPolicy()
+	p.GrantCapability("c", "operator", "exec")
+	if !p.DecideCapability("c", "operator", "exec").Allow {
+		t.Fatal("capability grant ignored")
+	}
+	if p.DecideCapability("c", "operator", "delete").Allow {
+		t.Fatal("capability broadened operation")
+	}
+}
