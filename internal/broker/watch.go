@@ -5,9 +5,12 @@ import "sync"
 type WatchHub struct {
 	mu       sync.Mutex
 	watchers map[string]map[chan any]struct{}
+	latest   map[string]any
 }
 
-func NewWatchHub() *WatchHub { return &WatchHub{watchers: make(map[string]map[chan any]struct{})} }
+func NewWatchHub() *WatchHub {
+	return &WatchHub{watchers: make(map[string]map[chan any]struct{}), latest: make(map[string]any)}
+}
 
 func (h *WatchHub) Subscribe(job string) (<-chan any, func()) {
 	ch := make(chan any, 8)
@@ -16,6 +19,9 @@ func (h *WatchHub) Subscribe(job string) (<-chan any, func()) {
 		h.watchers[job] = make(map[chan any]struct{})
 	}
 	h.watchers[job][ch] = struct{}{}
+	if event, ok := h.latest[job]; ok {
+		ch <- event
+	}
 	h.mu.Unlock()
 	return ch, func() {
 		h.mu.Lock()
@@ -33,6 +39,7 @@ func (h *WatchHub) Subscribe(job string) (<-chan any, func()) {
 func (h *WatchHub) Publish(job string, event any) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.latest[job] = event
 	for ch := range h.watchers[job] {
 		select {
 		case ch <- event:
