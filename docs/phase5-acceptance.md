@@ -18,7 +18,7 @@ runtime path is exercised.
 | P5-09 | Shared job-wait dispatch coalescing and WatchHub publication | In progress | WatchHub event streaming across reconnects is not yet exposed |
 | P5-10 | Atomic job registry and startup remote re-discovery | In progress | Crash/restart mutation integration test is still required |
 | P5-11 | Lease grace and idle connection reaper | Complete | Reaper timing needs long-running service test |
-| P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, readiness gate | In progress | Capability administration RPC/CLI is still required |
+| P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, and policy administration RPC | In progress | Principal lifecycle and weighted-policy configuration still need runtime coverage |
 | P5-13 | Digest-bound, expiring, one-time approval tokens on risky requests | Complete | Risk taxonomy needs broader operation coverage |
 | P5-14 | Bounded/sanitized rotating JSONL audit, history restore, owner-scoped query RPC | In progress | Secret-value scrub integration needs dedicated tests |
 | P5-15 | Readiness gate, flock recovery, systemd/launchd templates | In progress | Service-manager smoke tests are still required |
