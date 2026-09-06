@@ -15,10 +15,11 @@ type Quota struct {
 	active                  int
 	owners                  map[string]int
 	hosts                   map[string]int
+	notify                  chan struct{}
 }
 
 func NewQuota(host, perClient, queue int) *Quota {
-	return &Quota{host: host, perClient: perClient, queued: queue, owners: make(map[string]int), hosts: make(map[string]int)}
+	return &Quota{host: host, perClient: perClient, queued: queue, owners: make(map[string]int), hosts: make(map[string]int), notify: make(chan struct{}, 1)}
 }
 
 func (q *Quota) Acquire(ctx context.Context, owner string) error {
@@ -45,6 +46,23 @@ func (q *Quota) AcquireHost(ctx context.Context, host, owner string) error {
 	return nil
 }
 
+func (q *Quota) AcquireHostContext(ctx context.Context, host, owner string) error {
+	for {
+		err := q.AcquireHost(ctx, host, owner)
+		if err == nil {
+			return nil
+		}
+		if err != ErrQueueFull {
+			return err
+		}
+		select {
+		case <-q.notify:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func (q *Quota) Release(owner string) {
 	q.ReleaseHost("", owner)
 }
@@ -60,5 +78,9 @@ func (q *Quota) ReleaseHost(host, owner string) {
 	}
 	if host != "" && q.hosts[host] > 0 {
 		q.hosts[host]--
+	}
+	select {
+	case q.notify <- struct{}{}:
+	default:
 	}
 }

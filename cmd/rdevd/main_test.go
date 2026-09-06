@@ -74,10 +74,11 @@ func TestUnixBrokerTwentyClients(t *testing.T) {
 	owners := make([]broker.Owner, clients)
 	for i := range owners {
 		owners[i] = broker.Owner{ClientID: fmt.Sprintf("client-%d", i), ProjectID: "stress"}
-		if err := service.Grant(owners[i], "status"); err != nil {
+		if err := service.Grant(owners[i], "ping"); err != nil {
 			t.Fatal(err)
 		}
 	}
+	service.SetDispatcher(func(context.Context, string, *proto.Request) (*proto.Response, error) { return &proto.Response{}, nil })
 	go func() {
 		for {
 			conn, acceptErr := listener.Accept()
@@ -105,7 +106,7 @@ func TestUnixBrokerTwentyClients(t *testing.T) {
 		wg.Add(1)
 		go func(c *broker.Client) {
 			defer wg.Done()
-			resp, callErr := c.Do(broker.Request{Operation: "status"})
+			resp, callErr := c.Do(broker.Request{Operation: "ping", Host: "stress", Wire: &proto.Request{Op: proto.OpPing}})
 			if callErr != nil || !resp.OK {
 				t.Errorf("stress request failed: %v %s", callErr, resp.Error)
 			}

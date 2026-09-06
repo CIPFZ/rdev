@@ -311,7 +311,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		quotaHost := req.Host
-		if err := service.Quota.AcquireHost(connCtx, quotaHost, req.Owner.Key()); err != nil {
+		if err := service.Quota.AcquireHostContext(connCtx, quotaHost, req.Owner.Key()); err != nil {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 			endRequest()
@@ -324,9 +324,9 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		case "sync.push", "sync.pull", "write":
 			lane = broker.LaneBulk
 		}
-		if !service.Lanes.Acquire(lane) {
+		if err := service.Lanes.AcquireContext(connCtx, lane); err != nil {
 			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
-			_ = enc.Encode(broker.Response{ID: req.ID, Error: "control lane unavailable"})
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 			endRequest()
 			continue
 		}

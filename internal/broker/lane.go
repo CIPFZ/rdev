@@ -1,6 +1,9 @@
 package broker
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 type Lane string
 
@@ -15,10 +18,11 @@ type Lanes struct {
 	mu     sync.Mutex
 	limits map[Lane]int
 	active map[Lane]int
+	notify chan struct{}
 }
 
 func NewLanes(control, exec, bulk int) *Lanes {
-	return &Lanes{limits: map[Lane]int{LaneControl: control, LaneExec: exec, LaneBulk: bulk}, active: make(map[Lane]int)}
+	return &Lanes{limits: map[Lane]int{LaneControl: control, LaneExec: exec, LaneBulk: bulk}, active: make(map[Lane]int), notify: make(chan struct{}, 1)}
 }
 
 func (l *Lanes) Acquire(kind Lane) bool {
@@ -30,11 +34,31 @@ func (l *Lanes) Acquire(kind Lane) bool {
 	l.active[kind]++
 	return true
 }
+func (l *Lanes) AcquireContext(ctx context.Context, kind Lane) error {
+	for {
+		l.mu.Lock()
+		if l.active[kind] < l.limits[kind] {
+			l.active[kind]++
+			l.mu.Unlock()
+			return nil
+		}
+		l.mu.Unlock()
+		select {
+		case <-l.notify:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
 func (l *Lanes) Release(kind Lane) {
 	l.mu.Lock()
 	if l.active[kind] > 0 {
 		l.active[kind]--
 	}
 	l.mu.Unlock()
+	select {
+	case l.notify <- struct{}{}:
+	default:
+	}
 }
 func (l *Lanes) Active(kind Lane) int { l.mu.Lock(); defer l.mu.Unlock(); return l.active[kind] }
