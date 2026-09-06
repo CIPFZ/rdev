@@ -278,6 +278,28 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
+		if req.Operation == "policy.grant" {
+			var policyErr error
+			if req.GrantCapability != "" {
+				if req.Revoke {
+					policyErr = service.RevokeCapability(req.GrantOwner, req.GrantCapability, req.GrantOperation)
+				} else {
+					policyErr = service.GrantCapability(req.GrantOwner, req.GrantCapability, req.GrantOperation)
+				}
+			} else if req.Revoke {
+				policyErr = service.Revoke(req.GrantOwner, req.GrantOperation)
+			} else {
+				policyErr = service.Grant(req.GrantOwner, req.GrantOperation)
+			}
+			if policyErr != nil {
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: policyErr.Error()})
+			} else {
+				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "policy_updated"})
+				_ = enc.Encode(broker.Response{ID: req.ID, OK: true})
+			}
+			endRequest()
+			continue
+		}
 		quotaHost := req.Host
 		if err := service.Quota.AcquireHost(connCtx, quotaHost, req.Owner.Key()); err != nil {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})

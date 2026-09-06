@@ -98,6 +98,33 @@ func TestServeConnCancelsInFlightDispatchOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestServeConnPolicyAdministrationRequiresGrant(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	service := broker.NewService(nil)
+	admin := broker.Owner{ClientID: "admin", ProjectID: "p"}
+	target := broker.Owner{ClientID: "target", ProjectID: "p"}
+	if err := service.Grant(admin, "policy.grant"); err != nil {
+		t.Fatal(err)
+	}
+	go serveConn(b, service)
+	_ = json.NewEncoder(a).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion})
+	var hello proto.BrokerHelloResponse
+	if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+		t.Fatal(err)
+	}
+	_ = json.NewEncoder(a).Encode(broker.Request{ID: "grant", Owner: admin, Operation: "policy.grant", GrantOwner: target, GrantOperation: "status"})
+	var granted broker.Response
+	if err := json.NewDecoder(a).Decode(&granted); err != nil || !granted.OK {
+		t.Fatalf("grant failed: %v %s", err, granted.Error)
+	}
+	_ = json.NewEncoder(a).Encode(broker.Request{ID: "target", Owner: target, Operation: "status"})
+	var targetResp broker.Response
+	if err := json.NewDecoder(a).Decode(&targetResp); err != nil || !targetResp.OK {
+		t.Fatalf("target grant failed: %v %s", err, targetResp.Error)
+	}
+}
+
 func TestServeConnNegotiates(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()

@@ -25,6 +25,16 @@ func (p *Policy) Grant(owner, operation string) {
 	p.grants[owner][operation] = true
 	p.mu.Unlock()
 }
+func (p *Policy) Revoke(owner, operation string) {
+	p.mu.Lock()
+	if operations := p.grants[owner]; operations != nil {
+		delete(operations, operation)
+		if len(operations) == 0 {
+			delete(p.grants, owner)
+		}
+	}
+	p.mu.Unlock()
+}
 func (p *Policy) Decide(owner, operation string) Decision {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

@@ -251,6 +251,23 @@ func (s *Service) GrantCapability(owner Owner, capability, operation string) err
 	s.policy.GrantCapability(owner.Key(), capability, operation)
 	return nil
 }
+func (s *Service) Revoke(owner Owner, operation string) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	s.policy.Revoke(owner.Key(), operation)
+	return nil
+}
+func (s *Service) RevokeCapability(owner Owner, capability, operation string) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	if capability == "" || operation == "" {
+		return errors.New("capability and operation required")
+	}
+	s.policy.Revoke(owner.Key(), capabilityKey(capability, operation))
+	return nil
+}
 func (s *Service) LoadPolicy(path string) error { return s.policy.Load(path) }
 func (s *Service) SavePolicy(path string) error { return s.policy.Save(path) }
 func (s *Service) PolicyDecisionForCapability(owner Owner, capability, operation string) Decision {
