@@ -17,7 +17,7 @@ COMMIT      := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
 STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd
+.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd stress-broker
 
 all: agents build
 
@@ -96,6 +96,9 @@ smoke-rdevd: agents
 	for i in $$(seq 1 100); do kill -0 $$pid 2>/dev/null || break; sleep 0.1; done; \
 	wait $$pid; test ! -e "$$ready"; test ! -e "$$sock"; \
 	echo 'rdevd readiness/shutdown smoke: ok'
+
+stress-broker: agents
+	$(GO) test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=20 -timeout=2m
 
 # vet and test depend on agents for the same reason check does: cmd/rdev cannot be
 # loaded at all until the binaries it embeds exist.
