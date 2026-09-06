@@ -98,7 +98,7 @@ smoke-rdevd: agents
 	echo 'rdevd readiness/shutdown smoke: ok'
 
 stress-broker: agents
-	$(GO) test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=20 -timeout=2m
+	$(GO) test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m
 
 # vet and test depend on agents for the same reason check does: cmd/rdev cannot be
 # loaded at all until the binaries it embeds exist.
