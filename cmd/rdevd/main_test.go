@@ -197,6 +197,41 @@ func TestServeConnNegotiates(t *testing.T) {
 	}
 }
 
+func TestServeConnHandlesPipelinedHelloAndRequest(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	service := broker.NewService(nil)
+	owner := broker.Owner{ClientID: "pipeline", ProjectID: "p"}
+	if err := service.Grant(owner, "ping"); err != nil {
+		t.Fatal(err)
+	}
+	service.SetDispatcher(func(context.Context, string, *proto.Request) (*proto.Response, error) { return &proto.Response{}, nil })
+	go serveConn(b, service)
+	writeErr := make(chan error, 1)
+	go func() {
+		enc := json.NewEncoder(a)
+		if err := enc.Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}); err != nil {
+			writeErr <- err
+			return
+		}
+		writeErr <- enc.Encode(broker.Request{ID: "pipelined", Owner: owner, Operation: "ping", Host: "h", Wire: &proto.Request{Op: proto.OpPing}})
+	}()
+	var hello proto.BrokerHelloResponse
+	if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+		t.Fatalf("hello failed: %v %+v", err, hello)
+	}
+	var response broker.Response
+	if err := json.NewDecoder(a).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.ID != "pipelined" {
+		t.Fatalf("pipelined request failed: %+v", response)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestServeConnConsumesRiskApprovalOnce(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()

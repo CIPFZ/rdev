@@ -192,8 +192,15 @@ func (s *Service) DispatchShared(ctx context.Context, key string, fn func() (*pr
 	s.sharedMu.Unlock()
 	return current.resp, current.err
 }
-func (s *Service) BeginRequest() bool { return s.config != nil && s.config.BeginRequest() }
+func (s *Service) BeginRequest() bool {
+	if s.config == nil || !s.config.BeginRequest() {
+		return false
+	}
+	s.lease.Begin()
+	return true
+}
 func (s *Service) EndRequest() {
+	s.lease.End()
 	if s.config != nil {
 		s.config.EndRequest()
 	}
@@ -214,6 +221,8 @@ func (s *Service) ReloadConfig(c Config) error {
 	if err := s.config.Reload(c); err != nil {
 		return err
 	}
+	s.Quota.SetHostLimit(c.MaxHosts)
+	s.lease.SetGrace(c.IdleTTL)
 	s.weightMu.Lock()
 	s.weights = make(map[string]int, len(c.OwnerWeights))
 	for owner, weight := range c.OwnerWeights {

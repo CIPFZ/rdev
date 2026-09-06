@@ -19,6 +19,15 @@ type Quota struct {
 	waiting                 int
 }
 
+func (q *Quota) SetHostLimit(limit int) {
+	if limit < 1 {
+		limit = 1
+	}
+	q.mu.Lock()
+	q.host = limit
+	q.mu.Unlock()
+}
+
 func NewQuota(host, perClient, queue int) *Quota {
 	return &Quota{host: host, perClient: perClient, queued: queue, owners: make(map[string]int), hosts: make(map[string]int), notify: make(chan struct{}, 1)}
 }

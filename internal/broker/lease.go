@@ -12,8 +12,9 @@ type Lease struct {
 	grace             time.Duration
 }
 
-func NewLease(grace time.Duration) *Lease { return &Lease{grace: grace} }
-func (l *Lease) Attach()                  { l.mu.Lock(); l.clients++; l.detachedAt = time.Time{}; l.mu.Unlock() }
+func NewLease(grace time.Duration) *Lease     { return &Lease{grace: grace} }
+func (l *Lease) SetGrace(grace time.Duration) { l.mu.Lock(); l.grace = grace; l.mu.Unlock() }
+func (l *Lease) Attach()                      { l.mu.Lock(); l.clients++; l.detachedAt = time.Time{}; l.mu.Unlock() }
 func (l *Lease) Detach() {
 	l.mu.Lock()
 	if l.clients > 0 {

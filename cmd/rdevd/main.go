@@ -169,7 +169,8 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 	}
 	var hello proto.BrokerHello
-	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&hello); err != nil {
+	reader := bufio.NewReader(conn)
+	if err := json.NewDecoder(reader).Decode(&hello); err != nil {
 		return
 	}
 	local := proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}
@@ -186,7 +187,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		return
 	}
 	defer service.DetachClient()
-	dec := json.NewDecoder(bufio.NewReader(conn))
+	dec := json.NewDecoder(reader)
 	enc := json.NewEncoder(conn)
 	connCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()

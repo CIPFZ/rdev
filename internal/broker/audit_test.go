@@ -35,6 +35,25 @@ func TestAuditLogPersistsAndRotatesFile(t *testing.T) {
 	}
 }
 
+func TestAuditLogRecoversAfterRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	a := NewAuditLog(32)
+	if err := a.ConfigureFile(path, 120); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "exec", Result: "event-with-padding"})
+	}
+	b := NewAuditLog(32)
+	if err := b.ConfigureFile(path, 120); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.QueryOwner(time.Time{}, "owner"); len(got) == 0 {
+		t.Fatal("rotated audit history was not recoverable")
+	}
+}
+
 func TestAuditLogSanitizesFields(t *testing.T) {
 	a := NewAuditLog(4)
 	a.Append(AuditEvent{At: time.Now(), Owner: "owner\nsecret", Result: "secret=top-secret token=abc"})

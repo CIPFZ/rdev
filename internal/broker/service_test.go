@@ -99,6 +99,29 @@ func TestServiceReloadConfigAppliesOwnerWeights(t *testing.T) {
 	}
 }
 
+func TestServiceReloadConfigAppliesRuntimeLimits(t *testing.T) {
+	s := NewService(nil)
+	if err := s.ReloadConfig(Config{MaxHosts: 2, IdleTTL: 3 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Quota.AcquireHost(context.Background(), "h", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Quota.AcquireHost(context.Background(), "h", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Quota.AcquireHost(context.Background(), "h", "c"); err != ErrQueueFull {
+		t.Fatalf("limit not applied: %v", err)
+	}
+	s.Quota.ReleaseHost("h", "a")
+	s.Quota.ReleaseHost("h", "b")
+	s.AttachClient()
+	s.DetachClient()
+	if !s.lease.Reapable(time.Now().Add(4 * time.Second)) {
+		t.Fatal("idle ttl was not applied")
+	}
+}
+
 func TestServiceRejectsAttachAfterClose(t *testing.T) {
 	s := NewService(nil)
 	if err := s.Close(nil); err != nil {
