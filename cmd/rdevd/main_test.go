@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +58,60 @@ func TestUnixBrokerMultipleClientsShareService(t *testing.T) {
 			t.Fatalf("shared broker request failed: %v %s", callErr, resp.Error)
 		}
 	}
+}
+
+func TestUnixBrokerTwentyClients(t *testing.T) {
+	socket := filepath.Join("/tmp", "rdevd-20-"+fmt.Sprint(os.Getpid())+".sock")
+	_ = os.Remove(socket)
+	defer os.Remove(socket)
+	listener, err := broker.Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	service := broker.NewService(nil)
+	const clients = 20
+	owners := make([]broker.Owner, clients)
+	for i := range owners {
+		owners[i] = broker.Owner{ClientID: fmt.Sprintf("client-%d", i), ProjectID: "stress"}
+		if err := service.Grant(owners[i], "status"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go serveConn(conn, service)
+		}
+	}()
+	clientsOpened := make([]*broker.Client, 0, clients)
+	for _, owner := range owners {
+		c, dialErr := broker.DialClient(context.Background(), socket, owner)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		clientsOpened = append(clientsOpened, c)
+	}
+	defer func() {
+		for _, c := range clientsOpened {
+			_ = c.Close()
+		}
+	}()
+	var wg sync.WaitGroup
+	for _, c := range clientsOpened {
+		wg.Add(1)
+		go func(c *broker.Client) {
+			defer wg.Done()
+			resp, callErr := c.Do(broker.Request{Operation: "status"})
+			if callErr != nil || !resp.OK {
+				t.Errorf("stress request failed: %v %s", callErr, resp.Error)
+			}
+		}(c)
+	}
+	wg.Wait()
 }
 
 func TestServeConnCancelsInFlightDispatchOnDisconnect(t *testing.T) {
