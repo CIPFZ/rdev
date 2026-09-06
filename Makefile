@@ -17,7 +17,7 @@ COMMIT      := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
 STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build test vet fmt clean install check-agents check
+.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd
 
 all: agents build
 
@@ -82,6 +82,20 @@ check-agents:
 
 # check is what CI and a pre-push run should use: correctness plus build consistency.
 check: vet test check-agents
+
+# Start the real broker binary, wait for readiness, then verify signal-driven
+# shutdown removes both the readiness marker and private socket.
+smoke-rdevd: agents
+	@tmp=$$(mktemp -d); \
+	sock=$$tmp/rdevd.sock; ready=$$tmp/ready; log=$$tmp/log; \
+	trap 'kill -TERM $$pid 2>/dev/null || true; wait $$pid 2>/dev/null || true; rm -rf $$tmp' EXIT; \
+	bin=$$tmp/rdevd; $(GO) build -trimpath -o "$$bin" ./cmd/rdevd; \
+	"$$bin" -socket "$$sock" -ready-file "$$ready" -agent-dir "$$tmp/agents" >"$$log" 2>&1 & pid=$$!; \
+	for i in $$(seq 1 100); do test -f "$$ready" && break; sleep 0.1; done; \
+	test -f "$$ready"; kill -TERM $$pid; \
+	for i in $$(seq 1 100); do kill -0 $$pid 2>/dev/null || break; sleep 0.1; done; \
+	wait $$pid; test ! -e "$$ready"; test ! -e "$$sock"; \
+	echo 'rdevd readiness/shutdown smoke: ok'
 
 # vet and test depend on agents for the same reason check does: cmd/rdev cannot be
 # loaded at all until the binaries it embeds exist.

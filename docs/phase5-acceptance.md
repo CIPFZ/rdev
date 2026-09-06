@@ -21,7 +21,7 @@ runtime path is exercised.
 | P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, and policy administration RPC | In progress | Principal lifecycle and weighted-policy configuration still need runtime coverage |
 | P5-13 | Digest-bound, expiring, one-time approval tokens on risky requests | Complete | Risk taxonomy needs broader operation coverage |
 | P5-14 | Bounded/sanitized rotating JSONL audit, history restore, owner-scoped query RPC, secret/token redaction | In progress | Long-running rotation/recovery test is still required |
-| P5-15 | Readiness gate, optional readiness file, flock recovery, signal-driven listener close, systemd/launchd templates, and real process smoke test | In progress | Service-manager manager-specific smoke tests are still required |
+| P5-15 | Readiness gate, optional readiness file, flock recovery, signal-driven listener close, systemd/launchd templates, and reproducible `make smoke-rdevd` | In progress | Manager-specific systemd/launchd installation tests are still required |
 | P5-16 | JSON config reload on SIGHUP, bounded drain, ordered persistence, and worker waitgroup shutdown | In progress | Mutation replay/failure injection test is still required |
 
 The final Phase 5 gate requires every “In progress” row to have runtime
