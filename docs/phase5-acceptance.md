@@ -13,7 +13,7 @@ runtime path is exercised.
 | P5-04 | Owner validation and wire client/project binding; persisted job owner | Complete | Capability administration is still internal |
 | P5-05 | Per-connection context cancellation, shared client pool, and disconnect integration test | In progress | Cancellation under an in-flight transport retry still needs transport-level evidence |
 | P5-06 | Quota admission held through dispatch, per-host accounting, and multi-client Unix test | In progress | Queued quota pressure needs stress coverage |
-| P5-07 | Per-lane fair queues with owner weights and worker pools | In progress | Weighted fairness benchmark is still required |
+| P5-07 | Per-lane fair queues with owner weights, config reload, and worker pools | In progress | Sustained weighted fairness benchmark is still required |
 | P5-08 | Control/exec/bulk classification, separate worker pools, and control-under-bulk latency test | In progress | Production latency SLO benchmark is still required |
 | P5-09 | Shared job-wait dispatch coalescing and WatchHub publication | In progress | WatchHub event streaming across reconnects is not yet exposed |
 | P5-10 | Atomic job registry and startup remote re-discovery | In progress | Crash/restart mutation integration test is still required |
