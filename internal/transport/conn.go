@@ -1661,6 +1661,10 @@ func (c *Conn) stopAfterReadFailure(err error) {
 	c.mu.Unlock()
 	if writer != nil {
 		writer.Fail(err)
+		// The writer may already be closed (for example after a prior write
+		// failure), in which case its callback is not invoked. Always publish
+		// the connection failure here so callers cannot reuse a polluted stream.
+		c.stopAfterWriteFailure(err)
 		return
 	}
 	c.stopAfterWriteFailure(err)
