@@ -193,6 +193,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 	defer cancel()
 	requests := make(chan broker.Request, 16)
 	decodeErr := make(chan error, 1)
+	var boundOwner broker.Owner
 	go func() {
 		for {
 			var req broker.Request
@@ -227,6 +228,14 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				admitDone = false
 				service.EndRequest()
 			}
+		}
+		if boundOwner != (broker.Owner{}) && req.Owner != boundOwner {
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: "owner cannot change on an authenticated connection"})
+			endRequest()
+			continue
+		}
+		if boundOwner == (broker.Owner{}) {
+			boundOwner = req.Owner
 		}
 		if err := req.Owner.Validate(); err != nil {
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})

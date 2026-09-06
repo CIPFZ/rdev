@@ -10,7 +10,7 @@ runtime path is exercised.
 | P5-01 | Broker hello version/min-version negotiation, incompatible-peer tests, and pipelined hello/request integration test | Complete | Cross-version release matrix still needs CI coverage |
 | P5-02 | 0600 socket, 0700 parent, flock lock, stale socket recovery, peer credentials | Complete | Cross-UID integration test is platform-dependent |
 | P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch; pipelined request test; `make stress-broker` runs 20-client wire test 100 times | In progress | Installed frontend adoption and multi-process remote-session benchmark remain |
-| P5-04 | Owner validation and wire client/project binding; persisted job owner | Complete | Capability administration is still internal |
+| P5-04 | Owner validation, connection-level owner binding, wire client/project binding; persisted job owner | In progress | Same-UID initial principal spoofing still needs a signed principal/token mechanism |
 | P5-05 | Per-connection context cancellation, shared client pool, disconnect integration test, and full race test | In progress | Cancellation under an in-flight transport retry still needs broker-to-transport integration evidence |
 | P5-06 | Quota admission held through dispatch, runtime `MaxHosts` reload, per-host accounting, bounded queued admission, and 20-client stress target | In progress | Longer duration pressure beyond 20 repeated runs is still required |
 | P5-07 | Per-lane fair queues with owner weights, config reload, and worker pools | In progress | Sustained weighted fairness benchmark is still required |
@@ -18,7 +18,7 @@ runtime path is exercised.
 | P5-09 | Shared job-wait dispatch coalescing, WatchHub publication, and latest-event replay on reconnect | In progress | Full durable event history and external streaming RPC remain |
 | P5-10 | Atomic job registry replacement on restart load and startup remote re-discovery | In progress | Crash/restart mutation integration test is still required |
 | P5-11 | Lease grace and idle connection reaper, with in-flight request accounting and runtime `IdleTTL` reload | Complete | Reaper timing needs long-running service test |
-| P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, and policy administration RPC | In progress | Principal lifecycle and weighted-policy configuration still need runtime coverage |
+| P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, policy administration RPC, and connection owner switching rejection | In progress | Principal lifecycle and signed principal/token configuration still need runtime coverage |
 | P5-13 | Digest-bound, expiring, one-time approval tokens on risky requests | Complete | Risk taxonomy needs broader operation coverage |
 | P5-14 | Bounded/sanitized rotating JSONL audit, history restore after rotation, owner-scoped query RPC, secret/token redaction | In progress | Long-running rotation/recovery test is still required |
 | P5-15 | Readiness gate, optional readiness file, flock recovery, signal-driven listener close, systemd/launchd templates, and reproducible `make smoke-rdevd` | In progress | Manager-specific systemd/launchd installation tests are still required |

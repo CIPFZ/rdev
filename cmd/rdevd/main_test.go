@@ -176,8 +176,11 @@ func TestServeConnPolicyAdministrationRequiresGrant(t *testing.T) {
 	}
 	_ = json.NewEncoder(a).Encode(broker.Request{ID: "target", Owner: target, Operation: "status"})
 	var targetResp broker.Response
-	if err := json.NewDecoder(a).Decode(&targetResp); err != nil || !targetResp.OK {
-		t.Fatalf("target grant failed: %v %s", err, targetResp.Error)
+	if err := json.NewDecoder(a).Decode(&targetResp); err != nil {
+		t.Fatal(err)
+	}
+	if targetResp.OK || targetResp.Error == "" {
+		t.Fatalf("owner switch was accepted: %+v", targetResp)
 	}
 }
 
