@@ -108,7 +108,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop")) {
+		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm")) {
 			return
 		}
 	}
@@ -444,6 +444,51 @@ func brokerJob(ctx context.Context, args []string) error {
 			return errors.New("broker job stop returned no result")
 		}
 		return json.NewEncoder(os.Stdout).Encode(resp.Job.Info)
+	case "wait":
+		fs, err := parseFlags(args[1:], map[string]bool{"any": true}, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 2 {
+			return errors.New("usage: rdev job wait <host> <job-id>... [-any] [-timeout N] [-tail N]")
+		}
+		params := &proto.JobParams{WaitAny: fs.bools["any"], WaitTimeoutSec: fs.num("timeout"), TailOnExit: fs.num("tail")}
+		if len(fs.pos) == 2 {
+			params.ID = fs.pos[1]
+		} else {
+			params.IDs = fs.pos[1:]
+		}
+		resp, err := brokerWire(ctx, "job_wait", fs.pos[0], &proto.Request{Op: proto.OpJobWait, Job: params})
+		if err != nil {
+			return err
+		}
+		if resp.Job == nil {
+			return errors.New("broker job wait returned no result")
+		}
+		if resp.Job.Logs != "" {
+			fmt.Fprintln(os.Stderr, resp.Job.Logs)
+		}
+		return json.NewEncoder(os.Stdout).Encode(resp.Job)
+	case "rm":
+		fs, err := parseFlags(args[1:], nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 1 {
+			return errors.New("usage: rdev job rm <host> [<job-id>] [-older-than SEC] [-keep-last N]")
+		}
+		params := &proto.JobParams{OlderThanSec: fs.num("older-than"), KeepLast: fs.num("keep-last")}
+		if len(fs.pos) > 1 {
+			params.ID = fs.pos[1]
+		}
+		resp, err := brokerWire(ctx, "job_rm", fs.pos[0], &proto.Request{Op: proto.OpJobRm, Job: params})
+		if err != nil {
+			return err
+		}
+		if resp.Job == nil {
+			return errors.New("broker job rm returned no result")
+		}
+		return json.NewEncoder(os.Stdout).Encode(resp.Job)
 	default:
 		return nil
 	}
