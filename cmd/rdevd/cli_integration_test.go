@@ -109,6 +109,18 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	if capErr != nil || !strings.Contains(string(capOut), "probe_version") {
 		t.Fatalf("broker capability failed: err=%v output=%q", capErr, capOut)
 	}
+	listCmd := exec.Command(cli, "job", "list", "remote-that-is-not-an-ssh-host")
+	listCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	listOut, listErr := listCmd.CombinedOutput()
+	if listErr != nil || !strings.Contains(string(listOut), "job-1") {
+		t.Fatalf("broker job list failed: err=%v output=%q", listErr, listOut)
+	}
+	statusCmd := exec.Command(cli, "job", "status", "remote-that-is-not-an-ssh-host", "job-1")
+	statusCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	statusOut, statusErr := statusCmd.CombinedOutput()
+	if statusErr != nil || !strings.Contains(string(statusOut), "job-1") {
+		t.Fatalf("broker job status failed: err=%v output=%q", statusErr, statusOut)
+	}
 
 	deniedErr := <-deniedErrCh
 	deniedOut := deniedBuf.Bytes()
@@ -141,7 +153,7 @@ func runCLIBrokerDaemon(t *testing.T) {
 	if err := service.Grant(allowed, "ping"); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"exec", "read_file", "write_file", "capability_probe"} {
+	for _, operation := range []string{"exec", "read_file", "write_file", "capability_probe", "job_list", "job_status"} {
 		if err := service.Grant(allowed, operation); err != nil {
 			t.Fatal(err)
 		}
@@ -166,6 +178,12 @@ func runCLIBrokerDaemon(t *testing.T) {
 		}
 		if req.Op == proto.OpCapabilityProbe {
 			return &proto.Response{OK: true, Capability: &proto.CapabilityResult{ProbeVersion: "broker-test"}}, nil
+		}
+		if req.Op == proto.OpJobList {
+			return &proto.Response{OK: true, Job: &proto.JobResult{List: []*proto.JobInfo{{ID: "job-1"}}, Total: 1}}, nil
+		}
+		if req.Op == proto.OpJobStatus {
+			return &proto.Response{OK: true, Job: &proto.JobResult{Info: &proto.JobInfo{ID: "job-1"}}}, nil
 		}
 		return &proto.Response{OK: true, Ping: &proto.PingResult{Version: 3, Binary: "broker-test-agent", OS: "test", Arch: "test"}}, nil
 	})

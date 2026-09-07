@@ -101,12 +101,14 @@ func main() {
 			brokerErr = brokerWrite(context.Background(), os.Args[2:])
 		case "capability":
 			brokerErr = brokerCapability(context.Background(), os.Args[2:])
+		case "job":
+			brokerErr = brokerJob(context.Background(), os.Args[2:])
 		}
 		if brokerErr != nil {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" {
+		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "list" || os.Args[2] == "status")) {
 			return
 		}
 	}
@@ -333,6 +335,48 @@ func brokerCapability(ctx context.Context, args []string) error {
 		return errors.New("broker capability returned no result")
 	}
 	return json.NewEncoder(os.Stdout).Encode(resp.Capability)
+}
+
+func brokerJob(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: rdev job list|status ...")
+	}
+	switch args[0] {
+	case "list":
+		fs, err := parseFlags(args[1:], nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 1 {
+			return errors.New("usage: rdev job list <host> [-limit N]")
+		}
+		resp, err := brokerWire(ctx, "job_list", fs.pos[0], &proto.Request{Op: proto.OpJobList, Job: &proto.JobParams{Limit: fs.num("limit")}})
+		if err != nil {
+			return err
+		}
+		if resp.Job == nil {
+			return errors.New("broker job list returned no result")
+		}
+		return json.NewEncoder(os.Stdout).Encode(struct {
+			Jobs      []*proto.JobInfo `json:"Jobs"`
+			Total     int              `json:"Total"`
+			Truncated bool             `json:"Truncated"`
+		}{resp.Job.List, resp.Job.Total, resp.Job.Truncated})
+	case "status":
+		if len(args) < 3 {
+			return errors.New("usage: rdev job status <host> <job-id>")
+		}
+		resp, err := brokerWire(ctx, "job_status", args[1], &proto.Request{Op: proto.OpJobStatus, Job: &proto.JobParams{ID: args[2]}})
+		if err != nil {
+			return err
+		}
+		if resp.Job == nil || resp.Job.Info == nil {
+			return errors.New("broker job status returned no result")
+		}
+		return json.NewEncoder(os.Stdout).Encode(resp.Job.Info)
+	default:
+		return nil
+	}
 }
 
 func brokerWire(ctx context.Context, operation, host string, wire *proto.Request) (*proto.Response, error) {
