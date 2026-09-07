@@ -108,7 +108,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status")) {
+		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop")) {
 			return
 		}
 	}
@@ -406,6 +406,42 @@ func brokerJob(ctx context.Context, args []string) error {
 		}
 		if resp.Job == nil || resp.Job.Info == nil {
 			return errors.New("broker job status returned no result")
+		}
+		return json.NewEncoder(os.Stdout).Encode(resp.Job.Info)
+	case "logs":
+		fs, err := parseFlags(args[1:], nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 2 {
+			return errors.New("usage: rdev job logs <host> <job-id> [-stream S] [-tail N] [-grep S]")
+		}
+		resp, err := brokerWire(ctx, "job_logs", fs.pos[0], &proto.Request{Op: proto.OpJobLogs, Job: &proto.JobParams{ID: fs.pos[1], Stream: fs.str("stream"), TailLines: fs.num("tail"), Grep: fs.str("grep")}})
+		if err != nil {
+			return err
+		}
+		if resp.Job == nil {
+			return errors.New("broker job logs returned no result")
+		}
+		fmt.Println(resp.Job.Logs)
+		if resp.Job.LogsTruncation.Truncated {
+			fmt.Fprintf(os.Stderr, "rdev: logs truncated operation_id=%s terminal=%t execution_state=%s retained=%d original=%d dropped=%d\n", resp.Job.OperationID, resp.Job.Terminal, resp.Job.Execution, resp.Job.LogsTruncation.RetainedBytes, resp.Job.LogsTruncation.OriginalBytes, resp.Job.LogsTruncation.DroppedBytes)
+		}
+		return nil
+	case "stop":
+		fs, err := parseFlags(args[1:], nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 2 {
+			return errors.New("usage: rdev job stop <host> <job-id> [-signal S] [-grace N]")
+		}
+		resp, err := brokerWire(ctx, "job_stop", fs.pos[0], &proto.Request{Op: proto.OpJobStop, Job: &proto.JobParams{ID: fs.pos[1], Signal: fs.str("signal"), GraceSec: fs.num("grace")}})
+		if err != nil {
+			return err
+		}
+		if resp.Job == nil || resp.Job.Info == nil {
+			return errors.New("broker job stop returned no result")
 		}
 		return json.NewEncoder(os.Stdout).Encode(resp.Job.Info)
 	default:
