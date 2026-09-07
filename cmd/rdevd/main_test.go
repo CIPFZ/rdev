@@ -60,6 +60,43 @@ func TestUnixBrokerMultipleClientsShareService(t *testing.T) {
 	}
 }
 
+func TestServeConnValidatesPrincipalToken(t *testing.T) {
+	t.Setenv("RDEV_PRINCIPAL_SECRET", "runtime-secret")
+	owner := broker.Owner{ClientID: "principal", ProjectID: "project"}
+	service := broker.NewService(nil)
+	if err := service.Grant(owner, "ping"); err != nil {
+		t.Fatal(err)
+	}
+	service.SetDispatcher(func(context.Context, string, *proto.Request) (*proto.Response, error) {
+		return &proto.Response{}, nil
+	})
+	a, b := net.Pipe()
+	go serveConn(b, service)
+	if err := json.NewEncoder(a).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion, ClientID: owner.ClientID, ProjectID: owner.ProjectID, PrincipalToken: broker.PrincipalToken("runtime-secret", owner)}); err != nil {
+		t.Fatal(err)
+	}
+	var hello proto.BrokerHelloResponse
+	if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+		t.Fatalf("valid principal rejected: %v %+v", err, hello)
+	}
+	_ = a.Close()
+
+	c, d := net.Pipe()
+	go serveConn(d, service)
+	if err := json.NewEncoder(c).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion, ClientID: owner.ClientID, ProjectID: owner.ProjectID, PrincipalToken: "bad"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(c).Decode(&hello); err != nil || !hello.OK {
+		t.Fatalf("handshake negotiation failed: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(time.Second))
+	var request broker.Response
+	if err := json.NewDecoder(c).Decode(&request); err == nil {
+		t.Fatal("invalid principal connection remained usable")
+	}
+	_ = c.Close()
+}
+
 func TestUnixBrokerTwentyClients(t *testing.T) {
 	socket := filepath.Join("/tmp", "rdevd-20-"+fmt.Sprint(os.Getpid())+".sock")
 	_ = os.Remove(socket)
