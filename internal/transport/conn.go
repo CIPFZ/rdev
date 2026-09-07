@@ -1656,18 +1656,21 @@ func (c *Conn) rememberCompletedLocked(id string) {
 // longer trustworthy, so merely marking Conn closed would leak the SSH process:
 // Close observes the closed bit and deliberately becomes a no-op.
 func (c *Conn) stopAfterReadFailure(err error) {
+	// Publish the terminal state before touching the writer. The writer may
+	// already be closed, and its failure callback is therefore not a reliable
+	// place to make the connection unusable.
+	c.failAllPending(err)
 	c.mu.Lock()
 	writer := c.writer
+	cmd := c.cmd
 	c.mu.Unlock()
 	if writer != nil {
 		writer.Fail(err)
-		// The writer may already be closed (for example after a prior write
-		// failure), in which case its callback is not invoked. Always publish
-		// the connection failure here so callers cannot reuse a polluted stream.
-		c.stopAfterWriteFailure(err)
-		return
 	}
-	c.stopAfterWriteFailure(err)
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		c.startCommandWait(cmd)
+	}
 }
 
 // stopAfterWriteFailure is invoked by the fixed writer watchdog. Publishing the
