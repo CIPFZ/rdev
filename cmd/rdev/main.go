@@ -101,6 +101,8 @@ func main() {
 			brokerErr = brokerWrite(context.Background(), os.Args[2:])
 		case "capability":
 			brokerErr = brokerCapability(context.Background(), os.Args[2:])
+		case "serve":
+			brokerErr = brokerServe(context.Background())
 		case "job":
 			brokerErr = brokerJob(context.Background(), os.Args[2:])
 		}
@@ -108,7 +110,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm")) {
+		if os.Args[1] == "serve" || os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm")) {
 			return
 		}
 	}
@@ -199,6 +201,15 @@ func brokerPing(ctx context.Context, args []string) error {
 		return errors.New("broker ping returned no ping result")
 	}
 	return json.NewEncoder(os.Stdout).Encode(resp.Wire.Ping)
+}
+
+func brokerServe(ctx context.Context) error {
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	srv, err := mcpsrv.NewBroker(os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return err
+	}
+	return srv.Run(ctx, &mcp.StdioTransport{})
 }
 
 func brokerExec(ctx context.Context, args []string) error {
