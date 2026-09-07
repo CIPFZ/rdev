@@ -88,12 +88,21 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	if os.Args[1] == "ping" && os.Getenv("RDEV_BROKER_SOCKET") != "" {
-		if err := brokerPing(context.Background(), os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+	if os.Getenv("RDEV_BROKER_SOCKET") != "" {
+		var brokerErr error
+		switch os.Args[1] {
+		case "ping":
+			brokerErr = brokerPing(context.Background(), os.Args[2:])
+		case "exec":
+			brokerErr = brokerExec(context.Background(), os.Args[2:])
+		}
+		if brokerErr != nil {
+			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		return
+		if os.Args[1] == "ping" || os.Args[1] == "exec" {
+			return
+		}
 	}
 
 	c := client.New(lookupAgent)
@@ -182,6 +191,69 @@ func brokerPing(ctx context.Context, args []string) error {
 		return errors.New("broker ping returned no ping result")
 	}
 	return json.NewEncoder(os.Stdout).Encode(resp.Wire.Ping)
+}
+
+func brokerExec(ctx context.Context, args []string) error {
+	flagArgs, argv, err := splitArgv(args)
+	if err != nil {
+		return err
+	}
+	fs, err := parseFlags(flagArgs, map[string]bool{"no-login": true}, nil)
+	if err != nil {
+		return err
+	}
+	if len(fs.pos) < 1 || len(argv) == 0 {
+		return errors.New("usage: rdev exec <host> [-cwd DIR] -- <argv...>")
+	}
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	if err := owner.Validate(); err != nil {
+		return fmt.Errorf("broker principal: %w", err)
+	}
+	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	login := !fs.bools["no-login"]
+	res, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "exec", Host: fs.pos[0], Wire: &proto.Request{
+		Op: proto.OpExec, ClientID: owner.ClientID, ProjectID: owner.ProjectID,
+		Exec: &proto.ExecParams{Argv: argv, Cwd: fs.str("cwd"), TimeoutSec: fs.num("timeout"), LoginShell: login},
+	}})
+	if err != nil {
+		return err
+	}
+	if !res.OK {
+		return errors.New(res.Error)
+	}
+	if res.Wire == nil || res.Wire.Exec == nil {
+		return errors.New("broker exec returned no result")
+	}
+	execRes := res.Wire.Exec
+	stdout, stderr := []byte(execRes.Stdout), []byte(execRes.Stderr)
+	if execRes.StdoutB64 {
+		stdout, err = base64.StdEncoding.DecodeString(execRes.Stdout)
+		if err != nil {
+			return proto.NewError(proto.CodeInvalidFrame, execRes.OperationID, proto.StateCompleted)
+		}
+	}
+	if execRes.StderrB64 {
+		stderr, err = base64.StdEncoding.DecodeString(execRes.Stderr)
+		if err != nil {
+			return proto.NewError(proto.CodeInvalidFrame, execRes.OperationID, proto.StateCompleted)
+		}
+	}
+	_, _ = os.Stdout.Write(stdout)
+	_, _ = os.Stderr.Write(stderr)
+	if execRes.StdoutTruncation.Truncated || execRes.StderrTruncation.Truncated {
+		fmt.Fprint(os.Stderr, execTruncationNotice(&client.ExecResult{ExecResult: execRes}))
+	}
+	if execRes.TimedOut {
+		return fmt.Errorf("timed out after %ds", fs.num("timeout"))
+	}
+	if execRes.ExitCode != 0 {
+		os.Exit(execRes.ExitCode)
+	}
+	return nil
 }
 
 func cliErrorLine(c *client.Client, envelope *proto.ErrorEnvelope) string {

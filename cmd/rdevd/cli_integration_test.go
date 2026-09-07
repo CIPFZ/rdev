@@ -84,6 +84,12 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	if ping.Binary != "broker-test-agent" || ping.OS != "test" {
 		t.Fatalf("unexpected broker ping: %+v", ping)
 	}
+	execCmd := exec.Command(cli, "exec", "remote-that-is-not-an-ssh-host", "--", "echo", "broker")
+	execCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	execOut, execErr := execCmd.CombinedOutput()
+	if execErr != nil || string(execOut) != "broker\n" {
+		t.Fatalf("broker exec failed: err=%v output=%q", execErr, execOut)
+	}
 
 	deniedErr := <-deniedErrCh
 	deniedOut := deniedBuf.Bytes()
@@ -116,6 +122,9 @@ func runCLIBrokerDaemon(t *testing.T) {
 	if err := service.Grant(allowed, "ping"); err != nil {
 		t.Fatal(err)
 	}
+	if err := service.Grant(allowed, "exec"); err != nil {
+		t.Fatal(err)
+	}
 	service.SetDispatcher(func(_ context.Context, host string, req *proto.Request) (*proto.Response, error) {
 		f, err := os.OpenFile(events, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
@@ -125,6 +134,9 @@ func runCLIBrokerDaemon(t *testing.T) {
 		owner := req.ClientID
 		line, _ := json.Marshal(map[string]string{"client": owner, "host": host, "op": req.Op})
 		_, _ = fmt.Fprintln(f, string(line))
+		if req.Op == proto.OpExec {
+			return &proto.Response{OK: true, Exec: &proto.ExecResult{Terminal: true, Execution: proto.StateCompleted, ExitCode: 0, Stdout: "broker\n"}}, nil
+		}
 		return &proto.Response{OK: true, Ping: &proto.PingResult{Version: 3, Binary: "broker-test-agent", OS: "test", Arch: "test"}}, nil
 	})
 	go func() {
