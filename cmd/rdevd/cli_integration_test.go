@@ -103,6 +103,12 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	if writeErr != nil || !strings.Contains(string(writeOut), "bytes_written") {
 		t.Fatalf("broker write failed: err=%v output=%q", writeErr, writeOut)
 	}
+	capCmd := exec.Command(cli, "capability", "remote-that-is-not-an-ssh-host")
+	capCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	capOut, capErr := capCmd.CombinedOutput()
+	if capErr != nil || !strings.Contains(string(capOut), "probe_version") {
+		t.Fatalf("broker capability failed: err=%v output=%q", capErr, capOut)
+	}
 
 	deniedErr := <-deniedErrCh
 	deniedOut := deniedBuf.Bytes()
@@ -135,7 +141,7 @@ func runCLIBrokerDaemon(t *testing.T) {
 	if err := service.Grant(allowed, "ping"); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"exec", "read_file", "write_file"} {
+	for _, operation := range []string{"exec", "read_file", "write_file", "capability_probe"} {
 		if err := service.Grant(allowed, operation); err != nil {
 			t.Fatal(err)
 		}
@@ -157,6 +163,9 @@ func runCLIBrokerDaemon(t *testing.T) {
 		}
 		if req.Op == proto.OpWriteFile {
 			return &proto.Response{OK: true, Cat: &proto.WriteResult{Terminal: true, Execution: proto.StateCompleted, BytesWritten: len(req.Cat.Content)}}, nil
+		}
+		if req.Op == proto.OpCapabilityProbe {
+			return &proto.Response{OK: true, Capability: &proto.CapabilityResult{ProbeVersion: "broker-test"}}, nil
 		}
 		return &proto.Response{OK: true, Ping: &proto.PingResult{Version: 3, Binary: "broker-test-agent", OS: "test", Arch: "test"}}, nil
 	})

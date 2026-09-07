@@ -99,12 +99,14 @@ func main() {
 			brokerErr = brokerRead(context.Background(), os.Args[2:])
 		case "write":
 			brokerErr = brokerWrite(context.Background(), os.Args[2:])
+		case "capability":
+			brokerErr = brokerCapability(context.Background(), os.Args[2:])
 		}
 		if brokerErr != nil {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" {
+		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" {
 			return
 		}
 	}
@@ -313,6 +315,24 @@ func brokerWrite(ctx context.Context, args []string) error {
 		return errors.New("broker write returned no result")
 	}
 	return json.NewEncoder(os.Stdout).Encode(resp.Cat)
+}
+
+func brokerCapability(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: rdev capability <host> [-refresh]")
+	}
+	fs, err := parseFlags(args[1:], map[string]bool{"refresh": true}, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := brokerWire(ctx, "capability_probe", args[0], &proto.Request{Op: proto.OpCapabilityProbe, Capability: &proto.CapabilityParams{Refresh: fs.bools["refresh"]}})
+	if err != nil {
+		return err
+	}
+	if resp.Capability == nil {
+		return errors.New("broker capability returned no result")
+	}
+	return json.NewEncoder(os.Stdout).Encode(resp.Capability)
 }
 
 func brokerWire(ctx context.Context, operation, host string, wire *proto.Request) (*proto.Response, error) {
