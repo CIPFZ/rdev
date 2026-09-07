@@ -239,5 +239,31 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		j := resp.Wire.Job
 		return nil, JobRmOut{Removed: j.Removed, RemovedCount: len(j.Removed), Skipped: j.Skipped, FreedBytes: j.FreedBytes}, nil
 	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_wait", Description: "Wait for supervised jobs through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobWaitIn) (*mcp.CallToolResult, JobWaitOut, error) {
+		c, err := broker.DialClient(ctx, socket, owner)
+		if err != nil {
+			return nil, JobWaitOut{}, err
+		}
+		defer c.Close()
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_wait", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobWait, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, IDs: in.IDs, WaitAny: in.WaitAny, WaitTimeoutSec: in.TimeoutSec, TailOnExit: in.TailOnExit}}})
+		if err != nil {
+			return nil, JobWaitOut{}, err
+		}
+		if !resp.OK {
+			return nil, JobWaitOut{}, errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil {
+			return nil, JobWaitOut{}, errors.New("broker job wait returned no result")
+		}
+		j := resp.Wire.Job
+		out := JobWaitOut{TimedOut: j.TimedOut, WaitedMS: j.WaitedMS, Logs: j.Logs, LogsTruncation: j.LogsTruncation, OperationID: j.OperationID, Terminal: j.Terminal, ExecutionState: j.Execution}
+		if j.Info != nil {
+			out.Job = toJobOut(j.Info)
+		}
+		for _, w := range j.Waited {
+			out.Waited = append(out.Waited, WaitedJobOut{ID: w.ID, Job: toJobOut(w.Info), Err: w.Err, Logs: w.Logs, LogsTruncation: w.LogsTruncation})
+		}
+		return nil, out, nil
+	})
 	return s, nil
 }
