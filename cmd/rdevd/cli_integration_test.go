@@ -90,6 +90,19 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	if execErr != nil || string(execOut) != "broker\n" {
 		t.Fatalf("broker exec failed: err=%v output=%q", execErr, execOut)
 	}
+	readCmd := exec.Command(cli, "read", "remote-that-is-not-an-ssh-host", "/tmp/broker.txt")
+	readCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	readOut, readErr := readCmd.CombinedOutput()
+	if readErr != nil || string(readOut) != "broker-read" {
+		t.Fatalf("broker read failed: err=%v output=%q", readErr, readOut)
+	}
+	writeCmd := exec.Command(cli, "write", "remote-that-is-not-an-ssh-host", "/tmp/broker.txt")
+	writeCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	writeCmd.Stdin = strings.NewReader("broker-write")
+	writeOut, writeErr := writeCmd.CombinedOutput()
+	if writeErr != nil || !strings.Contains(string(writeOut), "bytes_written") {
+		t.Fatalf("broker write failed: err=%v output=%q", writeErr, writeOut)
+	}
 
 	deniedErr := <-deniedErrCh
 	deniedOut := deniedBuf.Bytes()
@@ -122,8 +135,10 @@ func runCLIBrokerDaemon(t *testing.T) {
 	if err := service.Grant(allowed, "ping"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Grant(allowed, "exec"); err != nil {
-		t.Fatal(err)
+	for _, operation := range []string{"exec", "read_file", "write_file"} {
+		if err := service.Grant(allowed, operation); err != nil {
+			t.Fatal(err)
+		}
 	}
 	service.SetDispatcher(func(_ context.Context, host string, req *proto.Request) (*proto.Response, error) {
 		f, err := os.OpenFile(events, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -136,6 +151,12 @@ func runCLIBrokerDaemon(t *testing.T) {
 		_, _ = fmt.Fprintln(f, string(line))
 		if req.Op == proto.OpExec {
 			return &proto.Response{OK: true, Exec: &proto.ExecResult{Terminal: true, Execution: proto.StateCompleted, ExitCode: 0, Stdout: "broker\n"}}, nil
+		}
+		if req.Op == proto.OpReadFile {
+			return &proto.Response{OK: true, Read: &proto.ReadResult{Terminal: true, Execution: proto.StateCompleted, Content: "broker-read"}}, nil
+		}
+		if req.Op == proto.OpWriteFile {
+			return &proto.Response{OK: true, Cat: &proto.WriteResult{Terminal: true, Execution: proto.StateCompleted, BytesWritten: len(req.Cat.Content)}}, nil
 		}
 		return &proto.Response{OK: true, Ping: &proto.PingResult{Version: 3, Binary: "broker-test-agent", OS: "test", Arch: "test"}}, nil
 	})

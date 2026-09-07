@@ -95,12 +95,16 @@ func main() {
 			brokerErr = brokerPing(context.Background(), os.Args[2:])
 		case "exec":
 			brokerErr = brokerExec(context.Background(), os.Args[2:])
+		case "read":
+			brokerErr = brokerRead(context.Background(), os.Args[2:])
+		case "write":
+			brokerErr = brokerWrite(context.Background(), os.Args[2:])
 		}
 		if brokerErr != nil {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "ping" || os.Args[1] == "exec" {
+		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" {
 			return
 		}
 	}
@@ -254,6 +258,84 @@ func brokerExec(ctx context.Context, args []string) error {
 		os.Exit(execRes.ExitCode)
 	}
 	return nil
+}
+
+func brokerRead(ctx context.Context, args []string) error {
+	fs, err := parseFlags(args, nil, nil)
+	if err != nil {
+		return err
+	}
+	if len(fs.pos) < 2 {
+		return errors.New("usage: rdev read <host> <path> [-limit N]")
+	}
+	resp, err := brokerWire(ctx, "read_file", fs.pos[0], &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: fs.pos[1], Offset: int64(fs.num("offset")), Limit: int64(fs.num("limit"))}})
+	if err != nil {
+		return err
+	}
+	if resp.Read == nil {
+		return errors.New("broker read returned no result")
+	}
+	if resp.Read.ContentB64 {
+		return errors.New("remote file contains binary data; use rdev sync to fetch it")
+	}
+	fmt.Print(resp.Read.Content)
+	if resp.Read.Truncation.Truncated {
+		fmt.Fprintf(os.Stderr, "\nrdev: read truncated operation_id=%s terminal=%t execution_state=%s retained=%d original=%d dropped=%d\n", resp.Read.OperationID, resp.Read.Terminal, resp.Read.Execution, resp.Read.Truncation.RetainedBytes, resp.Read.Truncation.OriginalBytes, resp.Read.Truncation.DroppedBytes)
+	}
+	return nil
+}
+
+func brokerWrite(ctx context.Context, args []string) error {
+	fs, err := parseFlags(args, map[string]bool{"append": true}, nil)
+	if err != nil {
+		return err
+	}
+	if len(fs.pos) < 2 {
+		return errors.New("usage: rdev write <host> <path> [-mode 644] < content")
+	}
+	body, err := readAllStdin()
+	if err != nil {
+		return err
+	}
+	var mode uint32
+	if value := fs.str("mode"); value != "" {
+		parsed, parseErr := strconv.ParseUint(value, 8, 32)
+		if parseErr != nil {
+			return fmt.Errorf("invalid -mode %q (expected octal like 644)", value)
+		}
+		mode = uint32(parsed)
+	}
+	resp, err := brokerWire(ctx, "write_file", fs.pos[0], &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: fs.pos[1], Content: body, Mode: mode, Append: fs.bools["append"]}})
+	if err != nil {
+		return err
+	}
+	if resp.Cat == nil {
+		return errors.New("broker write returned no result")
+	}
+	return json.NewEncoder(os.Stdout).Encode(resp.Cat)
+}
+
+func brokerWire(ctx context.Context, operation, host string, wire *proto.Request) (*proto.Response, error) {
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	if err := owner.Validate(); err != nil {
+		return nil, fmt.Errorf("broker principal: %w", err)
+	}
+	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: operation, Host: host, Wire: wire})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, errors.New(resp.Error)
+	}
+	if resp.Wire == nil {
+		return nil, errors.New("broker returned no wire result")
+	}
+	return resp.Wire, nil
 }
 
 func cliErrorLine(c *client.Client, envelope *proto.ErrorEnvelope) string {

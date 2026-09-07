@@ -341,7 +341,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		switch req.Operation {
 		case "exec", "job.start", "job.stop", "job.wait":
 			lane = broker.LaneExec
-		case "sync.push", "sync.pull", "write":
+		case "sync.push", "sync.pull", "write", "write_file":
 			lane = broker.LaneBulk
 		}
 		if err := service.Lanes.AcquireContext(connCtx, lane); err != nil {
