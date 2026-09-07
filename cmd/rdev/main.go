@@ -108,7 +108,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "list" || os.Args[2] == "status")) {
+		if os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status")) {
 			return
 		}
 	}
@@ -342,6 +342,40 @@ func brokerJob(ctx context.Context, args []string) error {
 		return errors.New("usage: rdev job list|status ...")
 	}
 	switch args[0] {
+	case "start":
+		flagArgs, argv, err := splitArgv(args[1:])
+		if err != nil {
+			return err
+		}
+		fs, err := parseFlags(flagArgs, map[string]bool{"no-login": true}, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) < 1 || len(argv) == 0 {
+			return errors.New("usage: rdev job start <host> [-cwd DIR] [-label L] -- <argv...>")
+		}
+		owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+		if err := owner.Validate(); err != nil {
+			return fmt.Errorf("broker principal: %w", err)
+		}
+		c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		login := !fs.bools["no-login"]
+		wire := &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: argv, Cwd: fs.str("cwd"), LoginShell: login}, Label: fs.str("label")}}
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_start", Host: fs.pos[0], Wire: wire})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
+			return errors.New("broker job start returned no result")
+		}
+		return json.NewEncoder(os.Stdout).Encode(resp.Wire.Job.Info)
 	case "list":
 		fs, err := parseFlags(args[1:], nil, nil)
 		if err != nil {

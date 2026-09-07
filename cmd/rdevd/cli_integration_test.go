@@ -121,6 +121,12 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	if statusErr != nil || !strings.Contains(string(statusOut), "job-1") {
 		t.Fatalf("broker job status failed: err=%v output=%q", statusErr, statusOut)
 	}
+	startCmd := exec.Command(cli, "job", "start", "remote-that-is-not-an-ssh-host", "--", "echo", "background")
+	startCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	startOut, startErr := startCmd.CombinedOutput()
+	if startErr != nil || !strings.Contains(string(startOut), "job-2") {
+		t.Fatalf("broker job start failed: err=%v output=%q", startErr, startOut)
+	}
 
 	deniedErr := <-deniedErrCh
 	deniedOut := deniedBuf.Bytes()
@@ -153,7 +159,7 @@ func runCLIBrokerDaemon(t *testing.T) {
 	if err := service.Grant(allowed, "ping"); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"exec", "read_file", "write_file", "capability_probe", "job_list", "job_status"} {
+	for _, operation := range []string{"exec", "read_file", "write_file", "capability_probe", "job_list", "job_status", "job_start"} {
 		if err := service.Grant(allowed, operation); err != nil {
 			t.Fatal(err)
 		}
@@ -184,6 +190,9 @@ func runCLIBrokerDaemon(t *testing.T) {
 		}
 		if req.Op == proto.OpJobStatus {
 			return &proto.Response{OK: true, Job: &proto.JobResult{Info: &proto.JobInfo{ID: "job-1"}}}, nil
+		}
+		if req.Op == proto.OpJobStart {
+			return &proto.Response{OK: true, Job: &proto.JobResult{Info: &proto.JobInfo{ID: "job-2"}}}, nil
 		}
 		return &proto.Response{OK: true, Ping: &proto.PingResult{Version: 3, Binary: "broker-test-agent", OS: "test", Arch: "test"}}, nil
 	})
