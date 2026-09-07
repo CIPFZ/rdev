@@ -178,7 +178,10 @@ func brokerPing(ctx context.Context, args []string) error {
 	if !resp.OK {
 		return errors.New(resp.Error)
 	}
-	return json.NewEncoder(os.Stdout).Encode(resp.Wire)
+	if resp.Wire == nil || resp.Wire.Ping == nil {
+		return errors.New("broker ping returned no ping result")
+	}
+	return json.NewEncoder(os.Stdout).Encode(resp.Wire.Ping)
 }
 
 func cliErrorLine(c *client.Client, envelope *proto.ErrorEnvelope) string {

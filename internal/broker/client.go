@@ -45,6 +45,16 @@ func DialClient(ctx context.Context, socket string, owner Owner) (*Client, error
 }
 
 func (c *Client) Do(req Request) (Response, error) {
+	return c.DoContext(context.Background(), req)
+}
+
+// DoContext sends one request and tears down this local broker connection when
+// ctx is canceled. The remote transport remains owned by rdevd and is not
+// affected by cancellation of this frontend connection.
+func (c *Client) DoContext(ctx context.Context, req Request) (Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn == nil {
@@ -60,11 +70,28 @@ func (c *Client) Do(req Request) (Response, error) {
 	if err := req.Owner.Validate(); err != nil {
 		return Response{}, err
 	}
+	stopWatch := make(chan struct{})
+	go func(conn net.Conn) {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
+	}(c.conn)
+	defer close(stopWatch)
 	if err := json.NewEncoder(c.conn).Encode(req); err != nil {
+		if ctx.Err() != nil {
+			c.conn = nil
+			return Response{}, ctx.Err()
+		}
 		return Response{}, err
 	}
 	var response Response
 	if err := json.NewDecoder(c.conn).Decode(&response); err != nil {
+		if ctx.Err() != nil {
+			c.conn = nil
+			return Response{}, ctx.Err()
+		}
 		return Response{}, err
 	}
 	return response, nil
