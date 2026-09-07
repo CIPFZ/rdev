@@ -183,5 +183,61 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		}
 		return nil, toJobOut(resp.Wire.Job.Info), nil
 	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_logs", Description: "Read supervised job output through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobLogsIn) (*mcp.CallToolResult, JobLogsOut, error) {
+		c, err := broker.DialClient(ctx, socket, owner)
+		if err != nil {
+			return nil, JobLogsOut{}, err
+		}
+		defer c.Close()
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_logs", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobLogs, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Stream: in.Stream, TailLines: in.TailLines, Grep: in.Grep, SinceOffset: in.SinceOffset}}})
+		if err != nil {
+			return nil, JobLogsOut{}, err
+		}
+		if !resp.OK {
+			return nil, JobLogsOut{}, errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil {
+			return nil, JobLogsOut{}, errors.New("broker job logs returned no result")
+		}
+		j := resp.Wire.Job
+		return nil, JobLogsOut{Logs: j.Logs, NextOffset: j.NextOffset, LogSize: j.LogSize, Matched: j.Matched, Truncation: j.LogsTruncation, OperationID: j.OperationID, Terminal: j.Terminal, ExecutionState: j.Execution, Ledger: j.LogLedger}, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_stop", Description: "Stop a supervised job through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStopIn) (*mcp.CallToolResult, JobOut, error) {
+		c, err := broker.DialClient(ctx, socket, owner)
+		if err != nil {
+			return nil, JobOut{}, err
+		}
+		defer c.Close()
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_stop", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStop, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Signal: in.Signal, GraceSec: in.GraceSec}}})
+		if err != nil {
+			return nil, JobOut{}, err
+		}
+		if !resp.OK {
+			return nil, JobOut{}, errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
+			return nil, JobOut{}, errors.New("broker job stop returned no result")
+		}
+		return nil, toJobOut(resp.Wire.Job.Info), nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_rm", Description: "Remove supervised job records through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobRmIn) (*mcp.CallToolResult, JobRmOut, error) {
+		c, err := broker.DialClient(ctx, socket, owner)
+		if err != nil {
+			return nil, JobRmOut{}, err
+		}
+		defer c.Close()
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_rm", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobRm, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, OlderThanSec: in.OlderThanSec, KeepLast: in.KeepLast}}})
+		if err != nil {
+			return nil, JobRmOut{}, err
+		}
+		if !resp.OK {
+			return nil, JobRmOut{}, errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil {
+			return nil, JobRmOut{}, errors.New("broker job rm returned no result")
+		}
+		j := resp.Wire.Job
+		return nil, JobRmOut{Removed: j.Removed, RemovedCount: len(j.Removed), Skipped: j.Skipped, FreedBytes: j.FreedBytes}, nil
+	})
 	return s, nil
 }
