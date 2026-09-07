@@ -73,7 +73,7 @@ func TestBrokerServerRegistersSharedTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"rdev_ping": false, "rdev_exec": false, "rdev_read": false, "rdev_write": false, "rdev_capability": false}
+	want := map[string]bool{"rdev_ping": false, "rdev_exec": false, "rdev_read": false, "rdev_write": false, "rdev_capability": false, "rdev_job_start": false, "rdev_job_list": false, "rdev_job_status": false}
 	for _, tool := range tools.Tools {
 		if _, ok := want[tool.Name]; ok {
 			want[tool.Name] = true

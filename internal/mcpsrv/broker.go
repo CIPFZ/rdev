@@ -119,5 +119,69 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		}
 		return nil, *resp.Wire.Capability, nil
 	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_start", Description: "Start a supervised background job through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStartIn) (*mcp.CallToolResult, JobOut, error) {
+		c, err := broker.DialClient(ctx, socket, owner)
+		if err != nil {
+			return nil, JobOut{}, err
+		}
+		defer c.Close()
+		login := true
+		if in.LoginShell != nil {
+			login = *in.LoginShell
+		}
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_start", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Label: in.Label, Spec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login}}}})
+		if err != nil {
+			return nil, JobOut{}, err
+		}
+		if !resp.OK {
+			return nil, JobOut{}, errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
+			return nil, JobOut{}, errors.New("broker job start returned no result")
+		}
+		return nil, toJobOut(resp.Wire.Job.Info), nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_list", Description: "List supervised background jobs through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobListIn) (*mcp.CallToolResult, JobListOut, error) {
+		c, err := broker.DialClient(ctx, socket, owner)
+		if err != nil {
+			return nil, JobListOut{}, err
+		}
+		defer c.Close()
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_list", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobList, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Limit: in.Limit}}})
+		if err != nil {
+			return nil, JobListOut{}, err
+		}
+		if !resp.OK {
+			return nil, JobListOut{}, errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil {
+			return nil, JobListOut{}, errors.New("broker job list returned no result")
+		}
+		out := JobListOut{Jobs: make([]JobOut, 0, len(resp.Wire.Job.List))}
+		for _, j := range resp.Wire.Job.List {
+			out.Jobs = append(out.Jobs, toJobOut(j))
+		}
+		out.Total = resp.Wire.Job.Total
+		out.Truncated = resp.Wire.Job.Truncated
+		return nil, out, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_status", Description: "Read a supervised background job status through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobRefIn) (*mcp.CallToolResult, JobOut, error) {
+		c, err := broker.DialClient(ctx, socket, owner)
+		if err != nil {
+			return nil, JobOut{}, err
+		}
+		defer c.Close()
+		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_status", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStatus, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID}}})
+		if err != nil {
+			return nil, JobOut{}, err
+		}
+		if !resp.OK {
+			return nil, JobOut{}, errors.New(resp.Error)
+		}
+		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
+			return nil, JobOut{}, errors.New("broker job status returned no result")
+		}
+		return nil, toJobOut(resp.Wire.Job.Info), nil
+	})
 	return s, nil
 }
