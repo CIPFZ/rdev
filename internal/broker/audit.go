@@ -37,13 +37,16 @@ func (a *AuditLog) ConfigureFile(path string, maxBytes int64) error {
 	if path == "" || maxBytes < 1 {
 		return os.ErrInvalid
 	}
+	// Restore the rotated segment before the active segment so a broker restart
+	// can answer queries spanning the rotation boundary.
+	rotated, _ := os.ReadFile(path + ".1")
 	prior, _ := os.ReadFile(path)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	loaded := make([]AuditEvent, 0)
-	for _, line := range bytes.Split(prior, []byte{'\n'}) {
+	for _, line := range bytes.Split(append(append([]byte{}, rotated...), prior...), []byte{'\n'}) {
 		var event AuditEvent
 		if len(line) > 0 && json.Unmarshal(line, &event) == nil {
 			loaded = append(loaded, event)

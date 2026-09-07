@@ -20,7 +20,7 @@ runtime path is exercised.
 | P5-11 | Lease grace and idle connection reaper, with in-flight request accounting and runtime `IdleTTL` reload | Complete | Reaper timing needs long-running service test |
 | P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, policy administration RPC, and connection owner switching rejection | In progress | Principal lifecycle and signed principal/token configuration still need runtime coverage |
 | P5-13 | Digest-bound, expiring, one-time approval tokens on risky requests | Complete | Risk taxonomy needs broader operation coverage |
-| P5-14 | Bounded/sanitized rotating JSONL audit, history restore after rotation, owner-scoped query RPC, secret/token redaction | In progress | Long-running rotation/recovery test is still required |
+| P5-14 | Bounded/sanitized rotating JSONL audit, restart restoration across active and rotated segments, owner-scoped query RPC, secret/token redaction | In progress | Long-running rotation/recovery test is still required |
 | P5-15 | Readiness gate, optional readiness file, flock recovery, signal-driven listener close, manager syntax checks (`systemd-analyze verify`/`plutil -lint` when installed), and reproducible `make smoke-rdevd` | In progress | Manager-specific install/enable/start tests remain environment-dependent |
 | P5-16 | JSON config reload on SIGHUP, bounded drain, ordered persistence, and worker waitgroup shutdown | In progress | Mutation replay/failure injection test is still required |
 

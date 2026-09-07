@@ -80,3 +80,22 @@ func TestAuditLogLoadsHistoryAndScopesOwner(t *testing.T) {
 		t.Fatalf("history/scope count=%d", len(got))
 	}
 }
+
+func TestAuditLogRestartRestoresRotatedSegment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	a := NewAuditLog(32)
+	if err := a.ConfigureFile(path, 100); err != nil {
+		t.Fatal(err)
+	}
+	a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "before", Result: "padding-xxxxxxxxxxxxxxxxxxxxxxxx"})
+	a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "after", Result: "padding-xxxxxxxxxxxxxxxxxxxxxxxx"})
+	b := NewAuditLog(32)
+	if err := b.ConfigureFile(path, 100); err != nil {
+		t.Fatal(err)
+	}
+	events := b.QueryOwner(time.Time{}, "owner")
+	if len(events) < 2 {
+		t.Fatalf("restart lost rotated history: got %d events", len(events))
+	}
+}
