@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/xml"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,5 +42,25 @@ func TestServiceTemplatesDeclareReadinessAndRestartPolicy(t *testing.T) {
 		if !strings.Contains(document.Dict.Raw, required) {
 			t.Fatalf("launchd template missing %q", required)
 		}
+	}
+}
+
+func TestServiceTemplatesPassManagerSyntaxChecks(t *testing.T) {
+	root := filepath.Join("..", "..")
+	if tool, err := exec.LookPath("systemd-analyze"); err == nil {
+		cmd := exec.Command(tool, "verify", filepath.Join(root, "deploy", "systemd", "rdevd.service"))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("systemd-analyze verify failed: %v\n%s", err, out)
+		}
+	} else {
+		t.Log("systemd-analyze unavailable; manager syntax check skipped")
+	}
+	if tool, err := exec.LookPath("plutil"); err == nil {
+		cmd := exec.Command(tool, "-lint", filepath.Join(root, "deploy", "launchd", "com.cipfz.rdevd.plist"))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("plutil -lint failed: %v\n%s", err, out)
+		}
+	} else {
+		t.Log("plutil unavailable; launchd syntax check skipped")
 	}
 }
