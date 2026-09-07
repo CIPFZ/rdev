@@ -11,11 +11,12 @@ const BrokerMinVersion = 1
 
 // BrokerHello is exchanged before any broker request is accepted.
 type BrokerHello struct {
-	Version    int      `json:"version"`
-	MinVersion int      `json:"min_version"`
-	ClientID   string   `json:"client_id,omitempty"`
-	ProjectID  string   `json:"project_id,omitempty"`
-	Features   []string `json:"features,omitempty"`
+	Version        int      `json:"version"`
+	MinVersion     int      `json:"min_version"`
+	ClientID       string   `json:"client_id,omitempty"`
+	ProjectID      string   `json:"project_id,omitempty"`
+	PrincipalToken string   `json:"principal_token,omitempty"`
+	Features       []string `json:"features,omitempty"`
 }
 
 // BrokerHelloResponse reports the negotiated protocol range.

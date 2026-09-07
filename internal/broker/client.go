@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -28,6 +29,9 @@ func DialClient(ctx context.Context, socket string, owner Owner) (*Client, error
 		return nil, err
 	}
 	hello := proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion, ClientID: owner.ClientID, ProjectID: owner.ProjectID}
+	if secret := os.Getenv("RDEV_PRINCIPAL_SECRET"); secret != "" {
+		hello.PrincipalToken = PrincipalToken(secret, owner)
+	}
 	if err := json.NewEncoder(conn).Encode(hello); err != nil {
 		_ = conn.Close()
 		return nil, err

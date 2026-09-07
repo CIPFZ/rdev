@@ -199,6 +199,9 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		if err := boundOwner.Validate(); err != nil {
 			return
 		}
+		if secret := os.Getenv("RDEV_PRINCIPAL_SECRET"); secret != "" && !broker.ValidatePrincipalToken(secret, boundOwner, hello.PrincipalToken) {
+			return
+		}
 	}
 	go func() {
 		for {
