@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -59,6 +60,30 @@ func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
 	}
 	t.Cleanup(func() { cs.Close() })
 	return cs
+}
+
+func TestBrokerServerRegistersSharedTools(t *testing.T) {
+	owner := broker.Owner{ClientID: "mcp", ProjectID: "phase5"}
+	srv, err := NewBroker("/tmp/rdev-mcp-test.sock", owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := connectServer(t, srv)
+	tools, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"rdev_ping": false, "rdev_exec": false, "rdev_read": false, "rdev_write": false, "rdev_capability": false}
+	for _, tool := range tools.Tools {
+		if _, ok := want[tool.Name]; ok {
+			want[tool.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("broker tool %s not registered", name)
+		}
+	}
 }
 
 // callTool invokes a tool and decodes its structured result.
