@@ -1,0 +1,8 @@
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:336: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=906090; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:337: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:338: SIGTERM with remote mutation response held: bounded shutdown=8.022580006s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:339: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (97.27s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	98.297s

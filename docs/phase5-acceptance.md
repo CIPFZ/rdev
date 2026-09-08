@@ -159,7 +159,7 @@ evidence document; a passing command applies only to the scenario it exercises.
 | P5-07 | `6f62f60` | Continuously backlogged real SSH owners, live 3:1 to 1:3 weight reversal |
 | P5-08 | `6f62f60` | Three real bulk/control p95 SLO runs, ratios 1.267–1.488 |
 | P5-09 | `bd03436` | Three normal and two race 20-process shared-wait runs; one remote operation ID |
-| P5-10 | `e3ac9c2`, `bd03436`, `a96b359` | Acknowledged and pre-ACK job/append recovery, fresh-agent durable tombstones, CLI/MCP queries and owner isolation |
+| P5-10 | `e3ac9c2`, `bd03436`, `a96b359`, `a3ccb8d` | Acknowledged and pre-ACK job/append recovery, fresh-agent durable tombstones, CLI/MCP queries and owner isolation |
 | P5-11 | `2a61674`, `bd03436` | Six real lease cycles, zero-subscriber observation lease and shutdown release |
 | P5-12 | `020230b`, `669f18f`, `e3ac9c2` | Default-deny credentials, exact-host policy/crash tests, granted-project job isolation |
 | P5-13 | `915fb5e` | Real mandatory exact-request approval substitution/replay/expiry/restart negatives |
@@ -204,3 +204,10 @@ mutation scenario to twenty independent status processes released from a remote
 response barrier. This corrects concurrent recovery without changing owner/
 target/digest checks or enabling mutation replay. Full validation is recorded
 in the runtime evidence; overall Phase5 remains In progress.
+
+
+Concurrent recovery implementation `a3ccb8d` passed committed-source full check,
+broker/daemon race, three real mutation runs with twenty independent resolvers,
+three shared-wait runs and an actual daemon race recovery run. The record links
+normal and race measurements and the artifact digest. This closes the concurrent
+transition defect; the remaining P5/Multi Agent Gate items stay In progress.

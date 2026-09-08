@@ -752,3 +752,19 @@ status, then verifies successful recovery for every process. Its initial isolate
 worktree run passed all crash/append/CLI/MCP/shutdown checks in 11.844 seconds.
 Committed-source commands and results follow below. This is implementing-agent
 review; independent external review remains pending.
+
+
+## Committed-source verification: a3ccb8d
+
+Implementation: `a3ccb8db10e794137c0f5f8706c17f0ff00da9cb` (`fix: coalesce
+concurrent durable job recovery outcomes`), pushed before validation.
+
+- [Full check and real regressions](evidence/phase5/2026-09-09/committed-check-a3ccb8d.log): `make check remote-mutation remote-wait` passed. Three mutation runs each recovered the same pre-ACK job with twenty independent status processes, alongside all crash, replay, owner, CLI/MCP and shutdown assertions. Stalled-response shutdown was 7.017–7.020 seconds. Three separate twenty-process shared-wait regressions also passed.
+- [Broker and daemon race](evidence/phase5/2026-09-09/committed-race-a3ccb8d.log): `go test -race ./internal/broker ./cmd/rdevd -count=1` passed, including the 32-caller durable-resolution regression.
+- [Actual daemon race recovery](evidence/phase5/2026-09-09/remote-race-a3ccb8d.log): twenty independent status processes recovered the same intent successfully with the production daemon and test frontends built using `-race`; the full scenario passed in 98.297 seconds. Stalled-response shutdown was 8.023 seconds. Daemon SHA-256: `b26498378bb064605ef4032c65561d721d8bb98b2ed72f69a8a2400955c157da`.
+
+The broader full-repository race, stress, QoS and Linux systemd measurements
+remain those of `a96b359`; this narrower correction was checked with the full
+repository check plus affected-package race and real recovery/wait paths.
+Durable event history, remaining shared routes, operational retention, platform
+coverage and independent external review remain unfinished.
