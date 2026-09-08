@@ -625,3 +625,18 @@ and capability refresh substitution. No manifest may be created. All three
 working-tree runs passed. This direct-agent test intentionally avoids the local
 Client's currently regenerated operation IDs, so it proves the remote digest
 boundary without claiming durable broker mutation-intent recovery.
+
+
+## Committed-source verification: 20b4615
+
+Implementation commit: `20b4615` (`fix: bind state and capability controls to
+replay digests`).
+
+- [Complete check and remote regression](evidence/phase5/2026-09-08/committed-check-20b4615.log): `make check remote-replay-digest remote-wait remote-jobs remote-approval remote-policy stress-broker smoke-rdevd remote-phase5-runtime` passed from the clean commit.
+- Three real remote replay-digest runs rejected state migrate/repair dry_run substitution and capability refresh substitution with operation_id_conflict; the preview state root retained no manifest. Three real 20-process wait runs, three job recovery runs, mandatory approval and policy negatives also passed.
+- [Full repository race](evidence/phase5/2026-09-08/committed-race-20b4615.log): `go test -race ./... -count=1` passed.
+- The 100-run broker stress, local readiness smoke, remote Linux daemon lifecycle and systemd user installation/enable/start/reload/SIGKILL recovery/stop/start all passed (PID `860724 -> 860819`). Remote daemon SHA-256: `4a45773f43a7658b49deb475716451a0480b824d13da35fdcb3339006483326b`.
+
+This closes the discovered digest omission. It does not add durable operation
+IDs, broker mutation intents or persistent remote deduplication. P5-10/P5-16
+and the crash/replay gate remain In progress.

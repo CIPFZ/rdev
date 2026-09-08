@@ -134,3 +134,35 @@ Replay digest follow-up adds the previously omitted state dry_run and capability
 refresh controls to remote operation identity. `make remote-replay-digest` has
 three real SSH substitution negatives with no state manifest creation. Stable
 IDs across broker recovery and durable mutation intents remain unfinished.
+
+
+Replay digest implementation `20b4615` passed committed-source `make check
+remote-replay-digest remote-wait remote-jobs remote-approval remote-policy
+stress-broker smoke-rdevd remote-phase5-runtime` and full repository race. The
+linked logs include real state/capability replay negatives and repeated Linux
+systemd recovery. No new Complete claim follows from this narrower correction.
+
+## Evidence commit index
+
+The status and risks in the primary table above remain authoritative. Each
+implementation commit below has its own committed-source log in the runtime
+evidence document; a passing command applies only to the scenario it exercises.
+
+| Item | Implementation commits | Passing evidence / verification |
+|---|---|---|
+| P5-01 | `020230b` and predecessors | Broker negotiation/pipelining tests; repeated full check/race |
+| P5-02 | `020230b` | Real daemon duplicate-start, SIGKILL, private socket and foreign UID denial |
+| P5-03 | `b5e9422` | Three 20-process / 500-call SSH shared-session benchmarks |
+| P5-04 | `020230b`, `b5e9422`, `e3ac9c2` | Real principal provision/expiry/rotation, remote identity and two-project job negatives |
+| P5-05 | `2a61674`, `bd03436` | Real retry/frontend cancellation/SIGKILL and shared-wait disconnect/reconnect |
+| P5-06 | `6f62f60`, `bd03436` | Remote sustained file-I/O admission and bounded owner wait observers/subscribers |
+| P5-07 | `6f62f60` | Continuously backlogged real SSH owners, live 3:1 to 1:3 weight reversal |
+| P5-08 | `6f62f60` | Three real bulk/control p95 SLO runs, ratios 1.267–1.488 |
+| P5-09 | `bd03436` | Three normal and two race 20-process shared-wait runs; one remote operation ID |
+| P5-10 | `e3ac9c2`, `bd03436` | Acknowledged jobs survive SIGKILL/outage/reload/delete failure and observation shutdown |
+| P5-11 | `2a61674`, `bd03436` | Six real lease cycles, zero-subscriber observation lease and shutdown release |
+| P5-12 | `020230b`, `669f18f`, `e3ac9c2` | Default-deny credentials, exact-host policy/crash tests, granted-project job isolation |
+| P5-13 | `915fb5e` | Real mandatory exact-request approval substitution/replay/expiry/restart negatives |
+| P5-14 | `455ff16`, `6f62f60` | Exact owner audit privacy, 146438 records, three rotations, zero sink errors/drops |
+| P5-15 | `020230b`; repeated through `20b4615` | Actual Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start |
+| P5-16 | `020230b`, `669f18f`, `e3ac9c2`, `bd03436`, `20b4615` | Invalid reload preservation, durable policy ACK, job deletion recovery, wait drain, replay digest negatives |

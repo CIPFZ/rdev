@@ -1,0 +1,149 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.007s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.786s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	3.864s
+ok  	github.com/CIPFZ/rdev/internal/broker	2.289s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.004s
+ok  	github.com/CIPFZ/rdev/internal/client	0.478s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.044s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.783s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.014s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.012s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.007s
+ok  	github.com/CIPFZ/rdev/internal/session	13.429s
+ok  	github.com/CIPFZ/rdev/internal/state	0.103s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.035s
+ok  	github.com/CIPFZ/rdev/internal/support	0.003s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.620s
+ok       rdev-agent-linux-amd64 bd815272568c
+ok       rdev-agent-linux-arm64 605863f7eefd
+ok       rdev-agent-darwin-amd64 0470c638c7d3
+ok       rdev-agent-darwin-arm64 cfa4280e4253
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteAgentReplayDigest$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteAgentReplayDigest
+    remote_replay_digest_test.go:61: real remote replay: state_migrate/state_repair dry_run and capability refresh substitution rejected; state manifest remains absent
+        
+--- PASS: TestRemoteAgentReplayDigest (0.90s)
+=== RUN   TestRemoteAgentReplayDigest
+    remote_replay_digest_test.go:61: real remote replay: state_migrate/state_repair dry_run and capability refresh substitution rejected; state manifest remains absent
+        
+--- PASS: TestRemoteAgentReplayDigest (0.90s)
+=== RUN   TestRemoteAgentReplayDigest
+    remote_replay_digest_test.go:61: real remote replay: state_migrate/state_repair dry_run and capability refresh substitution rejected; state manifest remains absent
+        
+--- PASS: TestRemoteAgentReplayDigest (0.90s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.707s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerSharedWait$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=11.333634ms; detached PID=859091 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (1.76s)
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=8.756358ms; detached PID=859195 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (1.78s)
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=10.416097ms; detached PID=859345 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (1.75s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	5.297s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerJobRecovery$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:187: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:188: remote supervisor PIDs retained across recovery: project A=859431 project B=859441; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (1.62s)
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:187: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:188: remote supervisor PIDs retained across recovery: project A=859545 project B=859555; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (1.63s)
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:187: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:188: remote supervisor PIDs retained across recovery: project A=859659 project B=859670; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (1.65s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	4.904s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerApprovalIsolation$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (1.12s)
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (1.12s)
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (1.14s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	3.380s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerPolicyIsolation$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerPolicyIsolation
+    remote_policy_test.go:234: real SSH policy: queued_decision=ba733de29dfc9bef4f3861699c5e332241599a1c6608378eb91053641432d95a revoked_decision=557591ebf3e179919b7a8915db494c2f8011fd8b5906f7150235a8458771cc2f grant_and_revoke_survived_SIGKILL=true exact_host_and_project_isolation=true caller_capability_substitution=denied persistence_failure=rolled_back audit_owner_and_digest=verified
+--- PASS: TestRemoteBrokerPolicyIsolation (1.15s)
+=== RUN   TestRemoteBrokerPolicyIsolation
+    remote_policy_test.go:234: real SSH policy: queued_decision=ba733de29dfc9bef4f3861699c5e332241599a1c6608378eb91053641432d95a revoked_decision=557591ebf3e179919b7a8915db494c2f8011fd8b5906f7150235a8458771cc2f grant_and_revoke_survived_SIGKILL=true exact_host_and_project_isolation=true caller_capability_substitution=denied persistence_failure=rolled_back audit_owner_and_digest=verified
+--- PASS: TestRemoteBrokerPolicyIsolation (1.12s)
+=== RUN   TestRemoteBrokerPolicyIsolation
+    remote_policy_test.go:234: real SSH policy: queued_decision=ba733de29dfc9bef4f3861699c5e332241599a1c6608378eb91053641432d95a revoked_decision=557591ebf3e179919b7a8915db494c2f8011fd8b5906f7150235a8458771cc2f grant_and_revoke_survived_SIGKILL=true exact_host_and_project_isolation=true caller_capability_substitution=denied persistence_failure=rolled_back audit_owner_and_digest=verified
+--- PASS: TestRemoteBrokerPolicyIsolation (1.13s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	3.413s
+/data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	0.339s
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+RDEV_REMOTE_RUNTIME=1 RDEV_REMOTE_SERVICE=1 RDEV_REMOTE_SSH='' RDEV_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' RDEV_GO='/data/tmp/rdev-toolchain/go/bin/go' sh scripts/remote-rdevd-smoke.sh
+remote validation source: 20b4615
+rdevd artifact sha256: 4a45773f43a7658b49deb475716451a0480b824d13da35fdcb3339006483326b
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+=== RUN   TestDaemonRuntimeLifecycle
+=== RUN   TestDaemonRuntimeLifecycle/principal_provision_expire_rotate
+    runtime_integration_test.go:241: real daemon: provisioning, principal/project binding, default deny, expiry, atomic config/key reload, established-session revocation, restart passed
+=== RUN   TestDaemonRuntimeLifecycle/single_instance_crash_signal
+    runtime_integration_test.go:256: real UID 65534 process denied access to root-owned broker socket
+    runtime_integration_test.go:283: real daemon: private socket, duplicate-start readiness, SIGKILL stale-socket recovery and SIGTERM cleanup passed
+=== RUN   TestDaemonRuntimeLifecycle/audit_owner_query_restart
+    runtime_integration_test.go:345: real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_hosts
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_hosts
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_host_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_hosts
+--- PASS: TestDaemonRuntimeLifecycle (1.70s)
+    --- PASS: TestDaemonRuntimeLifecycle/principal_provision_expire_rotate (1.54s)
+    --- PASS: TestDaemonRuntimeLifecycle/single_instance_crash_signal (0.05s)
+    --- PASS: TestDaemonRuntimeLifecycle/audit_owner_query_restart (0.04s)
+    --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed (0.08s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_config (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_hosts (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_hosts (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_host_field (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_hosts (0.01s)
+PASS
+Created symlink /root/.config/systemd/user/rdevd-phase5-service-860702.service → /tmp/rdev-remote-smoke.oDGeWl/service/rdevd-phase5-service-860702.service.
+Created symlink /root/.config/systemd/user/default.target.wants/rdevd-phase5-service-860702.service → /tmp/rdev-remote-smoke.oDGeWl/service/rdevd-phase5-service-860702.service.
+systemd user install/enable/start/reload/SIGKILL recovery/stop/start: ok (pid 860724 -> 860819)

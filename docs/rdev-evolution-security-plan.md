@@ -1073,6 +1073,14 @@ Phase 3 完成记录：
 - [ ] destructive approval 绑定精确目标 snapshot 和 operation digest。
 - [ ] broker reload、升级和异常退出不影响已脱离 SSH 的后台 job。
 
+2026-09-08 后续证据：`e3ac9c2` 验证已确认后台 job 在 daemon SIGKILL、
+SSH 不可用启动、reload 和远端删除/本地持久化失败后保留 owner；`bd03436`
+验证 20 个真实进程合并 wait、断开重连、跨项目拒绝、TERM 输出保留和 observation
+shutdown；`20b4615` 修复并实测 replay digest 的 state/capability 参数遗漏。
+这些测试尚未覆盖 pre-ACK mutation intent、持久事件 replay、完整混合负载、
+launchd 和独立外部 review，所以上述未勾选 Gate 保持未完成。详细提交及日志见
+`docs/phase5-acceptance.md` 和 `docs/phase5-runtime-evidence.md`。
+
 ### Phase 6：CLI、兼容性、文档和发布收口
 
 覆盖：ENG-012、ENG-013、ENG-014、ENG-016、ENG-023、ENG-036。
