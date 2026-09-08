@@ -26,6 +26,7 @@ type Service struct {
 	policy           *Policy
 	lease            *Lease
 	closed           atomic.Bool
+	Ingress          *Ingress
 	Scheduler        *Scheduler
 	Watches          *WatchHub
 	Events           *JobHistory
@@ -68,6 +69,7 @@ func NewService(lookup client.AgentLookup) *Service {
 	s.SetReady(true)
 	s.Mutations = NewMutationRegistry()
 	s.Events = NewJobHistory()
+	s.Ingress = NewIngress()
 	return s
 }
 
@@ -132,6 +134,19 @@ func (s *Service) SubscribeJob(key string) (<-chan any, func()) {
 // DispatchShared coalesces concurrent observations of the same detached job
 // set. Only the first caller performs remote work; followers receive its result.
 func (s *Service) DispatchShared(ctx context.Context, owner, request string, fn func(context.Context) (*proto.Response, error)) (*proto.Response, error) {
+	return s.dispatchShared(ctx, owner, request, 0, fn)
+}
+
+// DispatchSharedIngress charges only a newly created observer. Followers share
+// its request and charge, which outlive a disconnected initiating frontend.
+func (s *Service) DispatchSharedIngress(ctx context.Context, owner, request string, bytes int64, fn func(context.Context) (*proto.Response, error)) (*proto.Response, error) {
+	if bytes <= 0 {
+		return nil, ErrIngressLimit
+	}
+	return s.dispatchShared(ctx, owner, request, bytes, fn)
+}
+
+func (s *Service) dispatchShared(ctx context.Context, owner, request string, bytes int64, fn func(context.Context) (*proto.Response, error)) (*proto.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -160,9 +175,19 @@ func (s *Service) DispatchShared(ctx context.Context, owner, request string, fn 
 			s.sharedMu.Unlock()
 			return nil, ErrQueueFull
 		}
+		releaseIngress := func() {}
+		if bytes > 0 {
+			var err error
+			releaseIngress, err = s.Ingress.Hold(owner, bytes)
+			if err != nil {
+				s.sharedMu.Unlock()
+				return nil, err
+			}
+		}
 		// The observer has its own lease and drain accounting. Losing every
 		// frontend must neither release its active transport nor strand shutdown.
 		if !s.BeginRequest() {
+			releaseIngress()
 			s.sharedMu.Unlock()
 			return nil, ErrClosed
 		}
@@ -170,6 +195,7 @@ func (s *Service) DispatchShared(ctx context.Context, owner, request string, fn 
 		s.shared[key] = current
 		go func() {
 			defer s.EndRequest()
+			defer releaseIngress()
 			current.resp, current.err = fn(s.observationCtx)
 			if current.err == nil && current.resp != nil {
 				// Detailed metadata is durable in Events before the worker

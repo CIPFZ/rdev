@@ -822,3 +822,40 @@ The first three logs are final-code pre-commit validation, not falsely labeled
 as committed-source runs. The last log proves the rebuilt committed artifacts.
 Push streaming, prolonged history-retention pressure, independent review and
 the remaining broader Phase5 gates retain their incomplete status.
+
+## Frontend ingress accounting and cancellation
+
+The ingress follow-up bounds sockets before creating goroutines, authenticates
+before owner admission, replaces unlimited JSON decoding with document and
+aggregate byte budgets, and bounds per-connection queued requests and response
+write time. Exact client/project status never exposes another principal's usage.
+
+An implementing-agent review found two lifetime details requiring corrections:
+first-byte arrival must not extend the absolute handshake deadline, and a shared
+wait must retain an independent byte charge after its initiating frontend exits.
+A separate delimiter arriving after a document also must not start a partial-frame
+timer on an otherwise idle authenticated session. Targeted tests cover these
+cases and idempotent detached-charge release; this is not external independent
+review.
+
+The real ingress scenario uses the actual daemon, Unix sockets, OpenSSH and
+remote agent. It saturates 32 connections for one owner, sends 28 MiB of incomplete
+JSON, rejects the next request by owner byte budget, rejects an oversized frame,
+expires 16 anonymous handshakes including a late first byte, and reclaims a slow
+reader after two seconds. A selected real SSH response is held while the frontend
+queue overflows; the active request must cancel and another project must still
+ping through the original remote agent PID. The existing event-history runtime
+scenario additionally asserts that a zero-subscriber observation keeps its byte
+charge until its terminal event has been persisted, then releases it.
+
+An initial slow-reader assertion sampled the kernel-buffered request before the
+daemon had decoded it completely. The corrected test waits for the full encoded
+charge, then independently requires the two-second write timeout to release it.
+No timeout, byte cap, owner-isolation assertion or control SLO was relaxed.
+Final-code pre-commit `make check remote-ingress remote-events remote-wait
+remote-mutation stress-broker smoke-rdevd` passed. Three ingress runs took
+8.56–8.62 seconds each; each retained the original remote agent. Three event
+runs verified detached observation accounting, three twenty-process shared-wait
+runs passed, and three mutation crash runs drained held-response shutdown in
+7.019–7.028 seconds. Full repository `go test -race ./... -count=1` also passed.
+Actual-daemon race and committed-artifact evidence follow below.

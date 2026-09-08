@@ -444,3 +444,37 @@ checks project isolation after job removal, injects a real rename failure and
 repairs the history by an owned status call. Push streaming and extended remote
 retention pressure remain outstanding; passing this test does not complete
 the entire Phase5 gate.
+
+## Frontend ingress and slow readers
+
+The listener admits at most 128 sockets, including at most 16 unauthenticated
+handshakes. Admission happens before spawning the connection worker. An
+unauthenticated handshake has a fixed five-second deadline and a 16 KiB encoded
+JSON limit. Successful authentication binds the socket to the exact client and
+project and enforces a 32-connection owner limit. Token expiry and rotation still
+close the session. Anonymous pressure cannot close existing authenticated
+sessions; continuous anonymous connection flooding can still delay new admission.
+
+Request JSON is bounded to the wire absolute request limit (8 MiB) plus 16 KiB
+for the broker envelope. A partial document must complete within five seconds.
+Concatenated and pretty JSON, and pipelined hello plus request, remain supported.
+Idle authenticated connections do not expire because of JSON delimiter whitespace.
+A connection may queue two decoded requests. Queue overflow closes that frontend
+and cancels its active connection-owned work. Clients should normally send one
+request and read its response before sending the next.
+
+Encoded request bytes, including reserved read capacity, are bounded to 64 MiB
+across the daemon and 32 MiB per exact owner. Bytes stay charged through handling
+and response writing. A newly shared wait observer has its own additional charge,
+retained after the initiating socket and every subscriber disconnect; followers
+share that observer charge. Completion releases it. `status` requires an explicit
+policy grant and returns only the caller's `ingress.connections`,
+`reserved_request_bytes` and `observation_request_bytes`. These are resource
+accounting values, not RSS or remote payload lane measurements.
+
+Every response write has a two-second deadline capped by principal expiry.
+A stalled reader is closed and its connection work is canceled. This bounds
+socket write retention; the broader response-allocation, persistence-stall,
+mixed-workload and host-capacity matrix remains under the Phase5 acceptance gate.
+`make remote-ingress` exercises real sockets and SSH with owner connection/byte
+pressure, anonymous/partial JSON, slow output and a held remote response.

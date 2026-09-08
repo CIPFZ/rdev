@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -50,7 +49,21 @@ func agentLookup(dir string) func(string, string) (*transport.AgentBinary, error
 }
 
 func serveConn(conn net.Conn, service *broker.Service) {
+	lease, err := service.Ingress.Open()
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	serveIngressConn(conn, service, lease)
+}
+
+func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.IngressLease) {
+	defer lease.Close()
 	defer conn.Close()
+	connCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	enc := &boundedBrokerEncoder{conn: conn, cancel: cancel}
+
 	if !service.Ready() {
 		return
 	}
@@ -60,16 +73,19 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 	}
 	var hello proto.BrokerHello
-	reader := bufio.NewReader(conn)
-	dec := json.NewDecoder(reader)
-	if err := dec.Decode(&hello); err != nil {
+	handshakeDeadline := time.Now().Add(brokerFrameTimeout)
+	_ = conn.SetReadDeadline(handshakeDeadline)
+	dec := &boundedBrokerDecoder{conn: conn, lease: lease, deadline: handshakeDeadline}
+	releaseHello, err := dec.Decode(&hello, broker.MaxBrokerHelloBytes)
+	if err != nil {
 		return
 	}
+	releaseHello()
 	local := proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}
 	resp := proto.BrokerHelloResponse{Version: local.Version, MinVersion: local.MinVersion}
 	if err := proto.ValidateBrokerHello(local, hello); err != nil {
 		resp.Error = err.Error()
-		_ = json.NewEncoder(conn).Encode(resp)
+		_ = enc.Encode(resp)
 		return
 	}
 	var boundOwner broker.Owner
@@ -77,7 +93,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		boundOwner = broker.Owner{ClientID: hello.ClientID, ProjectID: hello.ProjectID}
 		if err := boundOwner.Validate(); err != nil {
 			resp.Error = err.Error()
-			_ = json.NewEncoder(conn).Encode(resp)
+			_ = enc.Encode(resp)
 			return
 		}
 	}
@@ -85,12 +101,19 @@ func serveConn(conn net.Conn, service *broker.Service) {
 	principalDeadline, revoked, err := service.Principals.Authenticate(boundOwner, hello.PrincipalToken)
 	if err != nil {
 		resp.Error = err.Error()
-		_ = json.NewEncoder(conn).Encode(resp)
+		_ = enc.Encode(resp)
 		return
 	}
-	if !principalDeadline.IsZero() {
-		_ = conn.SetDeadline(principalDeadline)
+	if boundOwner != (broker.Owner{}) {
+		if err := lease.Bind(boundOwner); err != nil {
+			resp.Error = err.Error()
+			_ = enc.Encode(resp)
+			return
+		}
 	}
+	dec.deadline = principalDeadline
+	enc.deadline = principalDeadline
+	_ = conn.SetReadDeadline(principalDeadline)
 	// Rotation closes authenticated sessions, including idle clients and calls.
 	sessionDone := make(chan struct{})
 	defer close(sessionDone)
@@ -109,38 +132,50 @@ func serveConn(conn net.Conn, service *broker.Service) {
 	}
 	defer service.DetachClient()
 	resp.OK = true
-	if err := json.NewEncoder(conn).Encode(resp); err != nil {
+	if err := enc.Encode(resp); err != nil {
 		return
 	}
-	enc := json.NewEncoder(conn)
-	connCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	requests := make(chan broker.Request, 16)
-	decodeErr := make(chan error, 1)
+	type queuedRequest struct {
+		request broker.Request
+		bytes   int64
+		release func()
+	}
+	requests := make(chan queuedRequest, 2)
 	go func() {
+		defer cancel()
 		for {
 			var req broker.Request
-			if err := dec.Decode(&req); err != nil {
-				cancel()
-				decodeErr <- err
+			release, err := dec.Decode(&req, maxBrokerRequestBytes)
+			if err != nil {
+				_ = conn.Close()
 				return
 			}
 			select {
-			case requests <- req:
+			case requests <- queuedRequest{req, dec.lastBytes, release}:
 			case <-connCtx.Done():
+				release()
+				return
+			default:
+				// Never block the reader behind a full queue: it must detect disconnect
+				// and cancel the active request independently of response consumption.
+				release()
+				_ = conn.Close()
 				return
 			}
 		}
 	}()
 	for {
-		var req broker.Request
+		var item queuedRequest
 		select {
-		case req = <-requests:
-		case <-decodeErr:
-			return
+		case item = <-requests:
 		case <-connCtx.Done():
 			return
 		}
+		if connCtx.Err() != nil {
+			item.release()
+			return
+		}
+		req := item.request
 		select {
 		case <-revoked:
 			return
@@ -151,6 +186,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		if !service.BeginRequest() {
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: "broker draining"})
+			item.release()
 			continue
 		}
 		admitDone := true
@@ -158,6 +194,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			if admitDone {
 				admitDone = false
 				service.EndRequest()
+				item.release()
 			}
 		}
 		requestCtx := connCtx
@@ -167,6 +204,11 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		if boundOwner == (broker.Owner{}) {
+			if err := lease.Bind(req.Owner); err != nil {
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+				endRequest()
+				return
+			}
 			boundOwner = req.Owner
 		}
 		if err := req.Owner.Validate(); err != nil {
@@ -355,7 +397,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
 				jobKey, _ := json.Marshal([]any{req.Owner, req.Host, req.Wire.Job, req.Wire.DeadlineUnixMilli})
 				jobDigest := sha256.Sum256(jobKey)
-				wireResp, err = service.DispatchShared(requestCtx, req.Owner.Key(), hex.EncodeToString(jobDigest[:]), dispatch)
+				wireResp, err = service.DispatchSharedIngress(requestCtx, req.Owner.Key(), hex.EncodeToString(jobDigest[:]), item.bytes, dispatch)
 			} else if broker.IsWireMutation(req) {
 				wireResp, mutation, err = service.DispatchMutation(requestCtx, req, approvedPlan)
 			} else {
@@ -376,16 +418,19 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
+		var ingress *broker.IngressSnapshot
 		var scheduler *broker.SchedulerSnapshot
 		var sharedWaits *broker.SharedWaitStatus
 		if req.Operation == "status" {
+			in := service.Ingress.Snapshot(req.Owner.Key())
+			ingress = &in
 			snapshot := service.Scheduler.Snapshot(req.Owner.Key())
 			scheduler = &snapshot
 			waits := service.SharedWaitStatus(req.Owner.Key())
 			sharedWaits = &waits
 		}
 		service.Audit.Append(broker.AuditEvent{OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
-		_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Scheduler: scheduler, SharedWaits: sharedWaits})
+		_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Scheduler: scheduler, SharedWaits: sharedWaits, Ingress: ingress})
 		endRequest()
 	}
 }

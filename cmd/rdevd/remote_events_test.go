@@ -90,7 +90,7 @@ func TestRemoteBrokerJobEventHistory(t *testing.T) {
 	}
 	waitCounts := func(observers, subscribers int) bool {
 		r := policyRuntimeRequest(t, wires[a], broker.Request{Owner: a, Operation: "status"})
-		return r.OK && r.SharedWaits != nil && r.SharedWaits.Observers == observers && r.SharedWaits.Subscribers == subscribers
+		return r.OK && r.Ingress != nil && (r.Ingress.ObservationBytes > 0) == (observers > 0) && r.SharedWaits != nil && r.SharedWaits.Observers == observers && r.SharedWaits.Subscribers == subscribers
 	}
 	awaitRuntime(t, 5*time.Second, "one shared observation and twenty subscribers", func() bool { return waitCounts(1, 20) })
 	for _, c := range clients {
@@ -107,6 +107,7 @@ func TestRemoteBrokerJobEventHistory(t *testing.T) {
 		r := query(a, job.ID, first.History.Cursor, 0)
 		return r.OK && r.History != nil && len(r.History.Events) == 1 && r.History.Events[0].State == proto.JobExited && r.History.Cursor.Sequence == 2
 	})
+	awaitRuntime(t, 3*time.Second, "terminal observer releases detached ingress bytes", func() bool { return waitCounts(0, 0) })
 	d.stop(syscall.SIGKILL)
 	d.start()
 	connect()
@@ -162,7 +163,7 @@ func TestRemoteBrokerJobEventHistory(t *testing.T) {
 	if r := call(&proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: second.ID}}); !r.OK {
 		t.Fatal("second job cleanup failed", r.Error)
 	}
-	t.Log("real job history: 20 independent wait clients killed; one zero-subscriber observation persisted exactly one terminal event; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot")
+	t.Log("real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot")
 }
 
 func verifyJobEventFrontends(t *testing.T, d *runtimeDaemon, owner, other broker.Owner, jobID string, cursor broker.JobEventCursor) {

@@ -236,7 +236,12 @@ func runDaemon(args []string) error {
 			}
 			return err
 		}
-		go serveConn(conn, service)
+		lease, err := service.Ingress.Open()
+		if err != nil {
+			_ = conn.Close()
+			continue
+		}
+		go serveIngressConn(conn, service, lease)
 	}
 }
 
