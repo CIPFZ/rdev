@@ -1,0 +1,66 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.007s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.434s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.846s
+ok  	github.com/CIPFZ/rdev/internal/broker	1.652s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.003s
+ok  	github.com/CIPFZ/rdev/internal/client	0.443s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.038s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.807s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.006s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.004s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.006s
+ok  	github.com/CIPFZ/rdev/internal/session	9.479s
+ok  	github.com/CIPFZ/rdev/internal/state	0.108s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.039s
+ok  	github.com/CIPFZ/rdev/internal/support	0.003s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.457s
+ok       rdev-agent-linux-amd64 e10a52955389
+ok       rdev-agent-linux-arm64 32388f73b7cd
+ok       rdev-agent-darwin-amd64 07cec6f54b53
+ok       rdev-agent-darwin-arm64 db975f46d3b4
+/data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	0.306s
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+RDEV_REMOTE_RUNTIME=1 RDEV_REMOTE_SERVICE=1 RDEV_REMOTE_SSH='' RDEV_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' RDEV_GO='/data/tmp/rdev-toolchain/go/bin/go' sh scripts/remote-rdevd-smoke.sh
+remote validation source: 020230b
+rdevd artifact sha256: 3c0c4e6de2d9099522c1ff1da5e52b8b8c79128c8c8dad3a2f5fd4caa496a4d8
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+=== RUN   TestDaemonRuntimeLifecycle
+=== RUN   TestDaemonRuntimeLifecycle/principal_provision_expire_rotate
+    runtime_integration_test.go:236: real daemon: provisioning, principal/project binding, default deny, expiry, atomic config/key reload, established-session revocation, restart passed
+=== RUN   TestDaemonRuntimeLifecycle/single_instance_crash_signal
+    runtime_integration_test.go:251: real UID 65534 process denied access to root-owned broker socket
+    runtime_integration_test.go:278: real daemon: private socket, duplicate-start readiness, SIGKILL stale-socket recovery and SIGTERM cleanup passed
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs
+--- PASS: TestDaemonRuntimeLifecycle (1.67s)
+    --- PASS: TestDaemonRuntimeLifecycle/principal_provision_expire_rotate (1.60s)
+    --- PASS: TestDaemonRuntimeLifecycle/single_instance_crash_signal (0.04s)
+    --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed (0.03s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_config (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs (0.00s)
+PASS
+Created symlink /root/.config/systemd/user/rdevd-phase5-service-738103.service → /tmp/rdev-remote-smoke.Z4QNn1/service/rdevd-phase5-service-738103.service.
+Created symlink /root/.config/systemd/user/default.target.wants/rdevd-phase5-service-738103.service → /tmp/rdev-remote-smoke.Z4QNn1/service/rdevd-phase5-service-738103.service.
+systemd user install/enable/start/reload/SIGKILL recovery/stop/start: ok (pid 738125 -> 738347)

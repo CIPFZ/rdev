@@ -8,8 +8,8 @@ Baseline: clean `d5622477e2999faac8b8ec83a222de8c3140ec64`, equal to
 this container). Remote: the authorized `service-deploy` SSH host, Linux amd64,
 systemd user manager running. No SSH private key is included in these artifacts.
 
-Implementation is included with this report; a subsequent verification entry
-records its immutable commit ID and tests run against the committed source.
+Implementation commit: `020230b43e0ac6e74322728e72b7c7c02fee206e`
+(`fix: authenticate broker sessions and verify daemon service lifecycle`).
 
 | Evidence | Command / actual scope | Result |
 |---|---|---|
@@ -89,3 +89,15 @@ recovery. In particular:
 The P5-11 and P5-13 Complete labels were withdrawn because their runtime
 invariants are not proven. Do not count the passing synthetic stress test as
 the required 20-process, one-remote-session benchmark.
+
+
+## Committed-source verification: 020230b
+
+On `020230b43e0ac6e74322728e72b7c7c02fee206e`, with a clean worktree:
+
+- [Combined check/stress/local smoke/remote runtime log](evidence/phase5/2026-09-08/committed-check-020230b.log): `make check stress-broker smoke-rdevd remote-phase5-runtime` passed. Remote output explicitly records source `020230b` and daemon SHA-256 `3c0c4e6de2d9099522c1ff1da5e52b8b8c79128c8c8dad3a2f5fd4caa496a4d8`.
+- [Full repository race log](evidence/phase5/2026-09-08/full-race-020230b.log): `go test -race ./... -count=1` passed all 17 packages. The agent package ran for 51.174 seconds; no race report occurred.
+- The remote systemd automatic-recovery run observed PID `738125 -> 738347`; follow-up unit-file and temporary-directory queries again returned no test artifacts.
+
+These checks validate the scope of this batch. They do not replace the missing
+remote session, fairness, mutation or audit-soak evidence listed above.

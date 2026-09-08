@@ -52,3 +52,10 @@ prove their runtime invariants. No Phase5-wide Complete claim is made.
 | Unauthorized host/secret/job/Fleet use denied | Actual daemon authentication and default-deny process tests | Granted-owner target/secret boundaries and remote owner identity still incomplete |
 | Destructive approval binds exact target snapshot and digest | Approval primitive tests | Server-derived risk/digest, policy version binding and negative runtime tests required |
 | Reload/upgrade/crash preserve detached background jobs | Actual daemon reload/SIGKILL/service restart lifecycle | Real detached remote jobs and mutation failure injection still required |
+
+
+Batch commit `020230b43e0ac6e74322728e72b7c7c02fee206e` passed committed-source
+`make check`, full `go test -race ./...`, `make stress-broker`, local smoke and
+`make remote-phase5-runtime` (daemon credentials/crash tests and real systemd
+user service recovery). Logs and artifact SHA-256 are linked from the runtime
+evidence record. Phase5 and the Multi Agent Gate remain **In progress**.
