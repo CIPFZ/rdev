@@ -1,0 +1,14 @@
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:209: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:210: remote supervisor PIDs retained across recovery: project A=841144 project B=841190; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (31.82s)
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:209: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:210: remote supervisor PIDs retained across recovery: project A=841773 project B=841995; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (31.80s)
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:209: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:210: remote supervisor PIDs retained across recovery: project A=843422 project B=843445; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (31.81s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	96.454s

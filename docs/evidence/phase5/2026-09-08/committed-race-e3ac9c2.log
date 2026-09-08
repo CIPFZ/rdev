@@ -1,0 +1,16 @@
+ok  	github.com/CIPFZ/rdev/cmd/rdev	1.021s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	51.600s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	5.175s
+ok  	github.com/CIPFZ/rdev/internal/broker	3.545s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	1.016s
+ok  	github.com/CIPFZ/rdev/internal/client	1.531s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	1.084s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	6.440s
+ok  	github.com/CIPFZ/rdev/internal/observe	1.045s
+ok  	github.com/CIPFZ/rdev/internal/proto	1.020s
+ok  	github.com/CIPFZ/rdev/internal/secrets	1.027s
+ok  	github.com/CIPFZ/rdev/internal/session	15.211s
+ok  	github.com/CIPFZ/rdev/internal/state	1.121s
+ok  	github.com/CIPFZ/rdev/internal/storage	1.063s
+ok  	github.com/CIPFZ/rdev/internal/support	1.022s
+ok  	github.com/CIPFZ/rdev/internal/transport	4.113s

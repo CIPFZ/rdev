@@ -109,3 +109,12 @@ Three 20-process runs met the control p95 SLO (1.27–1.49 times baseline), exac
 owner queue isolation, weight reload, SIGKILL isolation, bulk TTL and bounded
 audit rotation checks. Runtime logs, artifact digests and remaining risks are
 linked from the runtime evidence record. Overall Phase5 remains In progress.
+
+
+Detached-job recovery implementation `e3ac9c2` passed committed-source
+`make check remote-jobs remote-approval remote-policy remote-phase5-runtime`,
+full repository race and three real recovery runs using a race-instrumented
+daemon. Private versioned snapshots, scoped pagination and acknowledged-job
+SIGKILL/SSH-outage/reload/deletion-failure recovery now have runtime evidence.
+Pre-ACK job-start mutation intents, event history, upgrade and bounded shutdown
+remain incomplete; evidence and remaining risks are linked above.

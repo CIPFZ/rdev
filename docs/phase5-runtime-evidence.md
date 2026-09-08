@@ -532,8 +532,23 @@ removal and the other project's ownership across further SIGKILLs. Each remote
 command writes a proof file exactly once. Cleanup is restricted to this test's
 remote namespace and verified supervisor/child process groups.
 
-The first working-tree runtime passed. Committed-source results follow after
-review and complete validation. This does **not** close the pre-ACK job-start
+The working-tree runtime and committed-source validation below passed. This does **not** close the pre-ACK job-start
 crash window: durable mutation intents, stable operation IDs, job event history,
 upgrade and bounded shutdown still need implementation/runtime evidence.
 P5-09/P5-10/P5-16 and the overall gate remain In progress.
+
+
+## Committed-source verification: e3ac9c2
+
+Implementation commit: `e3ac9c2` (`fix: preserve detached job ownership through
+recovery failures`).
+
+- [Complete check and real integrations](evidence/phase5/2026-09-08/committed-check-e3ac9c2.log): `make check remote-jobs remote-approval remote-policy remote-phase5-runtime` passed from the clean commit.
+- Three normal-daemon real job recovery runs passed; each tested acknowledged start, scoped/omitted-parameter listing, granted other-project denial, SSH-unavailable restart, SIGHUP and deletion persistence recovery. Supervisor PID and exactly-once proof-file assertions passed.
+- [Full repository race](evidence/phase5/2026-09-08/committed-race-e3ac9c2.log): `go test -race ./... -count=1` passed.
+- [Real daemon race recovery](evidence/phase5/2026-09-08/remote-race-e3ac9c2.log): three additional real job recovery runs passed with both frontend tests and actual daemon instrumented by `-race` (96.454 seconds total). Daemon SHA-256: `cb04c7147be1862cec255a7dcadfb9d2014b4ea6a68432e7aadefd11dc353838`.
+- Actual Linux systemd user installation/enable/start/reload/SIGKILL recovery/stop/start passed again (PID `842964 -> 843028`). Existing remote policy and approval negatives also passed.
+
+This evidence covers acknowledged detached-job recovery and removal failure,
+not durable pre-ACK start intents/replay, persistent event history or bounded
+shutdown. No additional Phase5 row or Multi Agent Gate is marked Complete.
