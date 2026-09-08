@@ -1502,3 +1502,35 @@ macOS and independent review remain open; no additional Complete label is added.
 The final actual race-daemon import scenario, including an owner audit-query
 durability barrier and checks that import records exist without source paths or
 values, passed in 3.694 seconds. Committed-source full verification follows.
+
+
+## Committed remote secret import validation (`21996d4`)
+
+[Committed full check and runtime log](evidence/phase5/2026-09-09/committed-secret-import-21996d4.log)
+records passing `make check remote-secret-import remote-secrets remote-approval
+remote-qos stress-broker smoke-rdevd remote-phase5-runtime` on the fixed clean
+commit. Three import runs and three core secret/approval runs passed. The three
+20-process QoS runs measured control p95 ratios 1.340–1.436; audit sinks wrote
+146365 / accepted 146368 records with six rotations and zero errors/drops.
+One self-health event was pending at measurement per run. These QoS fixtures
+still used empty credential archives; populated-archive pressure is a separate
+pending scenario.
+
+Remote artifact SHA-256:
+`240d9fcc48197f0cc9d4ec6f736b1097a9a828381fa327c0184fc54b33a60a42`.
+Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start passed,
+PID `1150485 -> 1150745`.
+
+Supporting logs: [initial unit verification](evidence/phase5/2026-09-09/secret-import-initial-unit.log),
+[initial unused-import compile failure](evidence/phase5/2026-09-09/secret-import-initial-runtime.log),
+[corrected runtime](evidence/phase5/2026-09-09/secret-import-runtime.log),
+[check and broader runtime regression](evidence/phase5/2026-09-09/secret-import-check-runtime.log),
+[full race before the payload-meter correction](evidence/phase5/2026-09-09/secret-import-full-race.log),
+[final source-byte meter runtime](evidence/phase5/2026-09-09/secret-import-meter-runtime.log),
+[final changed-package race](evidence/phase5/2026-09-09/secret-import-final-race.log),
+[actual race daemon suite](evidence/phase5/2026-09-09/secret-import-remote-race.log), and
+[final actual race import/audit assertions](evidence/phase5/2026-09-09/secret-import-audit-race.log).
+The initial compile failure is retained as diagnostic history and is not counted
+as passing evidence. Implementing-agent review does not replace independent
+review. Declarative delegation, archive retirement/load/storage/upgrade cases,
+shared sync/session, macOS runtime and independent review remain unfinished.
