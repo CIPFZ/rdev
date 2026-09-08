@@ -21,7 +21,7 @@ runtime path is exercised.
 | P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, policy administration RPC, connection owner switching rejection, and runtime HMAC principal-token validation via `RDEV_PRINCIPAL_SECRET` with daemon handshake coverage | In progress | Principal secret provisioning/rotation lifecycle remains |
 | P5-13 | Digest-bound, expiring, one-time approval tokens on risky requests | Complete | Risk taxonomy needs broader operation coverage |
 | P5-14 | Bounded/sanitized rotating JSONL audit, restart restoration across active and rotated segments, owner-scoped query RPC, secret/token redaction | In progress | Long-running rotation/recovery test is still required |
-| P5-15 | Readiness gate, optional readiness file, flock recovery, signal-driven listener close, manager syntax checks (`systemd-analyze verify`/`plutil -lint` when installed), reproducible `make smoke-rdevd`, and remote Linux amd64 readiness/signal smoke | In progress | Manager-specific install/enable/start tests remain environment-dependent |
+| P5-15 | Readiness gate, optional readiness file, flock recovery, signal-driven listener close, manager syntax checks (`systemd-analyze verify`/`plutil -lint` when installed), reproducible `make smoke-rdevd`, and repeatable `make remote-smoke` against SSH alias `service-deploy` (Linux amd64 readiness, permissions, signal shutdown, socket cleanup) | In progress | Manager-specific install/enable/start tests remain environment-dependent |
 | P5-16 | JSON config reload on SIGHUP, bounded drain, ordered persistence, and worker waitgroup shutdown | In progress | Mutation replay/failure injection test is still required |
 
 The final Phase 5 gate requires every “In progress” row to have runtime

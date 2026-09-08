@@ -589,6 +589,7 @@ make agents        # 交叉编译 4 个平台的 agent
 make build         # 编译 rdev（含 embed）
 make check-agents  # 校验 embed 的 agent 确实由当前源码构出
 make check         # = vet + test + check-agents
+make remote-smoke  # 在 SSH 配置的 service-deploy 上验证 Linux rdevd readiness/权限/关闭
 make test
 make vet
 ```
