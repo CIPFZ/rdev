@@ -1107,3 +1107,42 @@ The host test uses 100 logical aliases on one endpoint. It does not prove a
 100-machine failure/backoff matrix. Mixed exec/job/sync load, complete shared
 routes, independent external review and actual macOS service recovery remain
 open. No additional P5 item or Multi Agent Gate is marked Complete.
+
+
+## Broker route validation and scoped administration
+
+The implementing-agent audit found three actual authorization/dispatch defects:
+granted absent or missing-wire operations could return success without running a
+handler; a host-scoped policy/approval administrator could substitute a different
+nested target; and mutation.status could return another host's intent under a
+host-limited read grant. The new route validator runs after default-deny policy,
+before approval consumption, durable updates or dialing. Host-local administration
+remains supported when outer and nested targets match. Unfiltered local queries
+reject host scopes and outer wire frames. Mutation outcomes use indistinguishable
+absent/out-of-scope errors and retain exact project ownership.
+
+`TestRemoteBrokerRoutes` reproduced all three defects against the unmodified
+`a47c59a` production code (built from documentation-only successor `3ed9c6a`).
+The predecessor daemon SHA-256 was
+`23efe178a0a968b740ab8d2f6f8363449c954befc79f5b1948aa3391f82f01b0`.
+It changed persisted grants outside the authorized host and exposed another
+host's mutation before and after SIGKILL. These expected failing regressions are
+recorded separately from the passing correction.
+
+The first corrected runtime test caught a missed audit allowlist entry: new
+route-rejection results became `unknown`. The fixed enum now preserves
+`route_rejected` and the previously omitted `pool.health` operation, with the
+existing low-sensitivity filtering intact. The final test additionally verifies
+byte-identical persisted policy after rejected grant/revoke attempts, preservation
+of existing global/other-host grants, cross-project administrator denial, valid
+same-host grant/revoke surviving SIGKILL, untouched approval tokens after malformed
+requests and exactly two authorized appends across crash/restart.
+
+Final production code passed full `make check`, three actual route scenarios,
+three policy/approval/mutation/frontend regressions, full repository race and an
+actual race-daemon route test (23.85 seconds). Race daemon SHA-256:
+`0306801ad70f5b409e54ee7d6ce779ee83d581c7d28f60696d4aeb130e9b8ecb`.
+Committed-artifact validation and archived logs follow after completion. This is
+implementing-agent review, not independent external review. Complete shared
+secret/sync/session routing, full route audit correlation, mixed workload and
+platform matrices remain open; no Phase5-wide Complete claim follows.

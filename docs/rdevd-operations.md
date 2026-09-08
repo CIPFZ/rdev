@@ -578,3 +578,31 @@ the final slot after probe but before installation. It checks retained base/bulk
 sessions, project identity, one approved append and preservation of preexisting
 sessions. Production SSH setup and retry behavior remain unchanged by the warm
 pool implementation.
+
+
+## Broker route and administrative host boundaries
+
+Every authorized request must match an implemented local handler or a registered
+remote operation with a matching `wire.op` and nonempty host. Policy denial runs
+first; absent handlers and malformed envelopes then fail before approval use,
+state mutation or transport admission. Granting an unimplemented operation does
+not make it available. Shared sync/secret/session implementation remains open.
+
+Local `status`, `pool.health`, `audit.health` and `audit_query` require an empty
+host and no wire envelope, because these queries do not filter their data by
+host. `job.events` and `mutation.status` support a host filter. Mutation queries
+return the same error for absent, other-project and out-of-host records.
+
+A host-scoped `policy.grant` request must set both `host` and `grant_host` to the
+same alias; it can grant/revoke within that host but cannot change global or
+another host's grants. A host-scoped `approval.create` request must bind its outer
+host to `approval_spec.host`. Administrators with explicit global grants can use
+an empty outer host. Administrative requests cannot include an outer wire frame.
+These checks do not replace the target principal's operation policy or exact
+request/target/policy approval binding.
+
+`make remote-routes` runs the actual daemon and SSH: missing-handler negatives,
+pre-dial malformed rejection, durable grant/revoke and SIGKILL, scoped approval
+issuance, approval preservation, exactly-once appends and host/project-filtered
+mutation outcomes. Rejections use the fixed `route_rejected` audit result without
+recording raw request parameters.

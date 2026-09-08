@@ -227,17 +227,13 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			endRequest()
 			continue
 		}
+		if err := broker.ValidateRoute(req); err != nil {
+			service.Audit.Append(broker.AuditEvent{OperationRef: broker.OperationReference(req), PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "route_rejected"})
+			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+			endRequest()
+			continue
+		}
 		if req.Wire != nil {
-			if req.Host == "" {
-				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "host required for wire request"})
-				endRequest()
-				continue
-			}
-			if req.Operation != "" && req.Wire.Op != req.Operation {
-				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "operation mismatch"})
-				endRequest()
-				continue
-			}
 			if (req.Wire.ClientID != "" && req.Wire.ClientID != req.Owner.ClientID) || (req.Wire.ProjectID != "" && req.Wire.ProjectID != req.Owner.ProjectID) {
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "wire owner mismatch"})
 				endRequest()
@@ -307,11 +303,6 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		if req.Wire != nil {
 			service.Audit.Append(broker.AuditEvent{OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
 		}
-		if (req.Operation == "pool.health" || req.Operation == "audit.health") && (req.Host != "" || req.Wire != nil) {
-			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "global health requires an unscoped administrative request"})
-			endRequest()
-			continue
-		}
 		if req.Operation == "pool.health" {
 			health := service.PoolHealth()
 			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Pool: &health})
@@ -326,6 +317,9 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		}
 		if req.Operation == "mutation.status" {
 			m, err := service.Mutations.Get(req.Owner.Key(), req.MutationID)
+			if err == nil && req.Host != "" && m.Host != req.Host {
+				err = errors.New("mutation unknown for principal")
+			}
 			if err != nil {
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
 			} else {
@@ -426,6 +420,11 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			}
 			service.Audit.Append(broker.AuditEvent{OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Wire: wireResp, Mutation: mutation})
+			endRequest()
+			continue
+		}
+		if req.Operation != "status" {
+			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "unsupported broker operation"})
 			endRequest()
 			continue
 		}
