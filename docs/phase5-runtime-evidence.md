@@ -1082,3 +1082,28 @@ The final corrected overlap gate also passed three real SSH retry/cancellation
 runs, six final-client lease cycles over 65.94 seconds and three real durable
 history runs. This completes the selected pre-commit regressions; committed
 artifact validation and archived logs follow below.
+
+
+## Committed warm pool verification: a47c59a
+
+Implementation `a47c59a28589ccd481c81d1a82da37194d090d0e` was pushed to
+`origin/main`. The following committed-source command exited successfully:
+
+```sh
+make GO=/data/tmp/rdev-toolchain/go/bin/go \
+  RDEV_REMOTE_SSH=service-deploy \
+  RDEV_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config \
+  check remote-warm-pool remote-mux-capacity remote-mutation remote-qos \
+  stress-broker smoke-rdevd remote-phase5-runtime
+```
+
+- [Committed regression log](evidence/phase5/2026-09-09/committed-warm-a47c59a.log): full check, real 100-alias warm-pool test (45.83 seconds), three paired mux-saturation tests, three mutation crash/recovery tests, three QoS runs, stress, readiness and Linux service recovery passed.
+- Control p95 ratios were 1.553/1.668, 1.526/1.533 and 1.474/1.488; each met the unchanged two-times threshold. Live weighted file-I/O service tracked 3:1 then 1:3, with every sampled window backlogged. The three audit sinks wrote 146313 records, rotated three times and reported zero drops/errors.
+- Remote daemon SHA-256: `4963be6316a46db5cde94089a960129c566f2672b2ed56fd9ed9802c13ee5279`. Actual systemd user install/enable/start/reload/SIGKILL recovery/stop/start passed, PID `1058697 -> 1058759`.
+- Final-code pre-commit [check](evidence/phase5/2026-09-09/warm-final-code-check.log), [full race](evidence/phase5/2026-09-09/warm-final-code-race.log), [100-repeat pool/admission race](evidence/phase5/2026-09-09/warm-final-admission-race.log), [overlapping mutation/lifecycle/history](evidence/phase5/2026-09-09/warm-final-native-overlap.log) and [actual daemon/CLI race](evidence/phase5/2026-09-09/warm-final-native-remote-race.log) passed.
+- The wrapper diagnosis is separately retained in the [before/after real-child proof](evidence/phase5/2026-09-09/warm-wrapper-before-after.log), [EOF regression](evidence/phase5/2026-09-09/warm-wrapper-eof-regression.log) and [native mux/wrapper run](evidence/phase5/2026-09-09/warm-native-mux-wrapper.log). These distinguish the corrected fixture from unchanged production SSH behavior.
+
+The host test uses 100 logical aliases on one endpoint. It does not prove a
+100-machine failure/backoff matrix. Mixed exec/job/sync load, complete shared
+routes, independent external review and actual macOS service recovery remain
+open. No additional P5 item or Multi Agent Gate is marked Complete.

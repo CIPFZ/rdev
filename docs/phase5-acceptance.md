@@ -331,3 +331,13 @@ concurrently after the EOF wrapper correction. The runtime record separates this
 pre-commit validation from the subsequent committed-artifact gate and preserves
 the failed-wrapper diagnosis. Full mixed workload, remaining shared routes,
 platform and independent review work are still open.
+
+
+Committed warm-pool implementation `a47c59a` passed full check, actual 100-alias
+capacity/LRU/reload/exec/zero-subscriber observation coverage, three paired native
+mux-saturation and mutation regressions, stress, readiness and Linux systemd
+recovery. Three real QoS runs passed at 1.474–1.668 times baseline, with 146313
+audit records, three rotations and zero reported sink drops/errors. Full race
+and actual daemon/CLI race passed before commit. Logs and artifact digests are
+linked in the runtime evidence record. Multi-machine recovery, full mixed load,
+shared routes, macOS and independent review keep Phase5 In progress.

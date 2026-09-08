@@ -1,0 +1,19 @@
+=== RUN   TestRemoteBrokerFrontendBoundary
+    remote_frontend_test.go:204: actual CLI/MCP global pool health separately granted; two other projects denied; base count/capacity projected
+    remote_frontend_test.go:205: actual CLI/MCP broker status: owner A has 8 held sockets, B sees only itself, default-denied project gets no result; remote ls uses policy and shared agent PID 1045055; unsupported sync/secret/host/state/env/job commands neither spawn SSH/rsync nor mutate local registry; ungranted host and principal denied
+--- PASS: TestRemoteBrokerFrontendBoundary (15.86s)
+=== RUN   TestRemoteBrokerSaturatedControlMaster
+=== RUN   TestRemoteBrokerSaturatedControlMaster/probe_full
+    remote_mux_test.go:190: actual private ControlMaster install_race=false saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+=== RUN   TestRemoteBrokerSaturatedControlMaster/install_race
+    remote_mux_test.go:190: actual private ControlMaster install_race=true saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+--- PASS: TestRemoteBrokerSaturatedControlMaster (17.55s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/probe_full (8.96s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/install_race (8.60s)
+=== RUN   TestRemoteBrokerWarmPool
+    remote_pool_test.go:139: 100 configured aliases: cold SSH=0, sequential requests=100, peak retained SSH=16, final remote agents=16, LRU retirements=84
+    remote_pool_test.go:252: zero-subscriber shared wait retained its warm host through TTL/capacity pressure; another project was denied job observation; approved warm stop released observation and queued cold host progressed
+    remote_pool_test.go:279: real active exec preserved through capacity shrink and TTL; other project control retained same agent while cold host queued; disconnected waiter released; next cold host progressed; idle and last-client cleanup returned SSH to zero; default pool-health deny and invalid reload retained
+--- PASS: TestRemoteBrokerWarmPool (63.60s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	97.020s

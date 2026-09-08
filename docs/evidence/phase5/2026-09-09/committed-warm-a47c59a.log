@@ -1,0 +1,166 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.005s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.654s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	9.272s
+ok  	github.com/CIPFZ/rdev/internal/broker	3.204s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.003s
+ok  	github.com/CIPFZ/rdev/internal/client	0.474s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.037s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.638s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.003s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.004s
+ok  	github.com/CIPFZ/rdev/internal/session	9.495s
+ok  	github.com/CIPFZ/rdev/internal/state	0.080s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.024s
+ok  	github.com/CIPFZ/rdev/internal/support	0.003s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.267s
+ok       rdev-agent-linux-amd64 3b651ef215d2
+ok       rdev-agent-linux-arm64 fc4c809cf8da
+ok       rdev-agent-darwin-amd64 0f8614db6ada
+ok       rdev-agent-darwin-arm64 bfff0d4cc6f3
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerWarmPool$' -count=1 -timeout=15m -v
+=== RUN   TestRemoteBrokerWarmPool
+    remote_pool_test.go:139: 100 configured aliases: cold SSH=0, sequential requests=100, peak retained SSH=16, final remote agents=16, LRU retirements=84
+    remote_pool_test.go:252: zero-subscriber shared wait retained its warm host through TTL/capacity pressure; another project was denied job observation; approved warm stop released observation and queued cold host progressed
+    remote_pool_test.go:279: real active exec preserved through capacity shrink and TTL; other project control retained same agent while cold host queued; disconnected waiter released; next cold host progressed; idle and last-client cleanup returned SSH to zero; default pool-health deny and invalid reload retained
+--- PASS: TestRemoteBrokerWarmPool (45.83s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	45.837s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerSaturatedControlMaster$' -count=3 -timeout=5m -v
+=== RUN   TestRemoteBrokerSaturatedControlMaster
+=== RUN   TestRemoteBrokerSaturatedControlMaster/probe_full
+    remote_mux_test.go:190: actual private ControlMaster install_race=false saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+=== RUN   TestRemoteBrokerSaturatedControlMaster/install_race
+    remote_mux_test.go:190: actual private ControlMaster install_race=true saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+--- PASS: TestRemoteBrokerSaturatedControlMaster (5.98s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/probe_full (3.20s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/install_race (2.78s)
+=== RUN   TestRemoteBrokerSaturatedControlMaster
+=== RUN   TestRemoteBrokerSaturatedControlMaster/probe_full
+    remote_mux_test.go:190: actual private ControlMaster install_race=false saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+=== RUN   TestRemoteBrokerSaturatedControlMaster/install_race
+    remote_mux_test.go:190: actual private ControlMaster install_race=true saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+--- PASS: TestRemoteBrokerSaturatedControlMaster (5.95s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/probe_full (3.17s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/install_race (2.79s)
+=== RUN   TestRemoteBrokerSaturatedControlMaster
+=== RUN   TestRemoteBrokerSaturatedControlMaster/probe_full
+    remote_mux_test.go:190: actual private ControlMaster install_race=false saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+=== RUN   TestRemoteBrokerSaturatedControlMaster/install_race
+    remote_mux_test.go:190: actual private ControlMaster install_race=true saturated with 10 live sessions: base/bulk setup completed under mux saturation, shared base/principal isolation retained, append exactly once, existing master and all saturation sessions alive
+--- PASS: TestRemoteBrokerSaturatedControlMaster (5.97s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/probe_full (3.18s)
+    --- PASS: TestRemoteBrokerSaturatedControlMaster/install_race (2.79s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	17.903s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerMutationCrashRecovery$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1055290; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.015110895s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.15s)
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1055680; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.014445277s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.16s)
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1055904; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.015551631s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.16s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	33.480s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerQoS$' -count=3 -timeout=4m -v
+=== RUN   TestRemoteBrokerQoS
+    remote_qos_test.go:200: sustained real SSH phase: weights 3:1, two backlogged owners, 18 bulk processes and two control processes
+    remote_qos_test.go:313: real remote QoS evidence: {"audit_sink":{"incomplete":false,"unclean_recoveries":0,"rotations":1,"state":"ok","accepted":48780,"written":48780,"dropped":0,"errors":0,"recovered":0,"pending":0},"bulk_idle_reaped":true,"bulk_idle_ttl_ms":1000,"bulk_processes":18,"bytes_per_read":344064,"control_latency":{"0":{"baseline_p95_ms":1.368,"bulk_p95_ms":2.125,"ratio":1.5533625730994152},"1":{"baseline_p95_ms":1.372,"bulk_p95_ms":2.289,"ratio":1.6683673469387754}},"control_processes":2,"dedicated_bulk_transport":true,"owner_a_payload_bytes":212631552,"owner_b_payload_bytes":243941376,"owner_sigkill_recovery":true,"processes":20,"same_base_agent":true,"windows":[{"phase":"weight-3-1","A":459,"B":152,"ratio_a_b":3.0197368421052633,"Samples":25,"Backlogged":25,"MaxGapA":1.00982236,"MaxGapB":1.00982236,"ARejected":4432,"BRejected":4736},{"phase":"weight-1-3","A":153,"B":459,"ratio_a_b":0.3333333333333333,"Samples":25,"Backlogged":25,"MaxGapA":1.010537607,"MaxGapB":1.010537607,"ARejected":4739,"BRejected":4434}]}
+--- PASS: TestRemoteBrokerQoS (66.16s)
+=== RUN   TestRemoteBrokerQoS
+    remote_qos_test.go:200: sustained real SSH phase: weights 3:1, two backlogged owners, 18 bulk processes and two control processes
+    remote_qos_test.go:313: real remote QoS evidence: {"audit_sink":{"incomplete":false,"unclean_recoveries":0,"rotations":1,"state":"ok","accepted":48766,"written":48766,"dropped":0,"errors":0,"recovered":0,"pending":0},"bulk_idle_reaped":true,"bulk_idle_ttl_ms":1000,"bulk_processes":18,"bytes_per_read":344064,"control_latency":{"0":{"baseline_p95_ms":1.379,"bulk_p95_ms":2.105,"ratio":1.5264684554024655},"1":{"baseline_p95_ms":1.393,"bulk_p95_ms":2.135,"ratio":1.5326633165829144}},"control_processes":2,"dedicated_bulk_transport":true,"owner_a_payload_bytes":212287488,"owner_b_payload_bytes":244285440,"owner_sigkill_recovery":true,"processes":20,"same_base_agent":true,"windows":[{"phase":"weight-3-1","A":458,"B":153,"ratio_a_b":2.9934640522875817,"Samples":25,"Backlogged":25,"MaxGapA":1.010047348,"MaxGapB":1.010047348,"ARejected":4432,"BRejected":4734},{"phase":"weight-1-3","A":153,"B":458,"ratio_a_b":0.33406113537117904,"Samples":25,"Backlogged":25,"MaxGapA":1.009798712,"MaxGapB":1.009798712,"ARejected":4737,"BRejected":4432}]}
+--- PASS: TestRemoteBrokerQoS (66.17s)
+=== RUN   TestRemoteBrokerQoS
+    remote_qos_test.go:200: sustained real SSH phase: weights 3:1, two backlogged owners, 18 bulk processes and two control processes
+    remote_qos_test.go:313: real remote QoS evidence: {"audit_sink":{"incomplete":false,"unclean_recoveries":0,"rotations":1,"state":"ok","accepted":48767,"written":48767,"dropped":0,"errors":0,"recovered":0,"pending":0},"bulk_idle_reaped":true,"bulk_idle_ttl_ms":1000,"bulk_processes":18,"bytes_per_read":344064,"control_latency":{"0":{"baseline_p95_ms":1.324,"bulk_p95_ms":1.951,"ratio":1.4735649546827794},"1":{"baseline_p95_ms":1.327,"bulk_p95_ms":1.975,"ratio":1.4883195177091184}},"control_processes":2,"dedicated_bulk_transport":true,"owner_a_payload_bytes":211943424,"owner_b_payload_bytes":244285440,"owner_sigkill_recovery":true,"processes":20,"same_base_agent":true,"windows":[{"phase":"weight-3-1","A":457,"B":153,"ratio_a_b":2.9869281045751634,"Samples":25,"Backlogged":25,"MaxGapA":1.009921091,"MaxGapB":1.009921091,"ARejected":4426,"BRejected":4737},{"phase":"weight-1-3","A":153,"B":458,"ratio_a_b":0.33406113537117904,"Samples":25,"Backlogged":25,"MaxGapA":1.01162893,"MaxGapB":1.01162893,"ARejected":4739,"BRejected":4432}]}
+--- PASS: TestRemoteBrokerQoS (66.16s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	198.494s
+/data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	0.382s
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+RDEV_REMOTE_RUNTIME=1 RDEV_REMOTE_SERVICE=1 RDEV_REMOTE_SSH='service-deploy' RDEV_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' RDEV_GO='/data/tmp/rdev-toolchain/go/bin/go' sh scripts/remote-rdevd-smoke.sh
+remote validation source: a47c59a
+rdevd artifact sha256: 4963be6316a46db5cde94089a960129c566f2672b2ed56fd9ed9802c13ee5279
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+=== RUN   TestDaemonRuntimeLifecycle
+=== RUN   TestDaemonRuntimeLifecycle/principal_provision_expire_rotate
+    runtime_integration_test.go:241: real daemon: provisioning, principal/project binding, default deny, expiry, atomic config/key reload, established-session revocation, restart passed
+=== RUN   TestDaemonRuntimeLifecycle/single_instance_crash_signal
+    runtime_integration_test.go:256: real UID 65534 process denied access to root-owned broker socket
+    runtime_integration_test.go:283: real daemon: private socket, duplicate-start readiness, SIGKILL stale-socket recovery and SIGTERM cleanup passed
+=== RUN   TestDaemonRuntimeLifecycle/audit_owner_query_restart
+    runtime_integration_test.go:345: real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_events
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_events
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_events
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_continuity
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_continuity
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_continuity
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_hosts
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_hosts
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_host_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_hosts
+--- PASS: TestDaemonRuntimeLifecycle (1.52s)
+    --- PASS: TestDaemonRuntimeLifecycle/principal_provision_expire_rotate (1.29s)
+    --- PASS: TestDaemonRuntimeLifecycle/single_instance_crash_signal (0.05s)
+    --- PASS: TestDaemonRuntimeLifecycle/audit_owner_query_restart (0.05s)
+    --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed (0.13s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_config (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_events (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_events (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_events (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_continuity (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_continuity (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_continuity (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_hosts (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_hosts (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_host_field (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_hosts (0.01s)
+PASS
+Created symlink /root/.config/systemd/user/rdevd-phase5-service-1058675.service → /tmp/rdev-remote-smoke.oSMaPA/service/rdevd-phase5-service-1058675.service.
+Created symlink /root/.config/systemd/user/default.target.wants/rdevd-phase5-service-1058675.service → /tmp/rdev-remote-smoke.oSMaPA/service/rdevd-phase5-service-1058675.service.
+systemd user install/enable/start/reload/SIGKILL recovery/stop/start: ok (pid 1058697 -> 1058759)
