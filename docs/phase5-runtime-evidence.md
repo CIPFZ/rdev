@@ -908,3 +908,19 @@ Changed-package race passed. Actual daemon and CLI race binaries passed the
 frontend boundary scenario in 11.41 seconds. The runtime harness accepts
 `RDEV_TEST_CLI_BINARY` to verify an explicitly built CLI artifact. Committed
 artifact validation and logs follow below.
+
+## Committed shared frontend verification: 08ff4fb
+
+Implementation `08ff4fb` was pushed to `origin/main`.
+
+- [Before/after fallback reproduction](evidence/phase5/2026-09-09/fallback-regression-08ff4fb.log): the old CLI returned a local secret-list result despite a missing broker socket; the corrected CLI rejects it without output.
+- [Full check and real regressions](evidence/phase5/2026-09-09/validation-check-08ff4fb.log): check, three actual frontend/history/mutation runs, three retry-cancellation runs and six real lease cycles over 65 seconds passed on the final production implementation before commit.
+- [Changed-package race](evidence/phase5/2026-09-09/validation-race-08ff4fb.log): CLI, MCP and broker packages passed.
+- [Actual daemon and CLI race](evidence/phase5/2026-09-09/validation-remote-race-08ff4fb.log): actual CLI/MCP status/list, eight other-project sockets, default/host denials and direct-transport/local-registry fallback traps passed in 11.41 seconds. CLI SHA-256: `78e0f1667f21ddd67ba6f542774893a17e74ab757dc829bc82623205ffb57ce3`; daemon is the previously verified ingress race artifact.
+- [Committed artifact verification](evidence/phase5/2026-09-09/committed-runtime-08ff4fb.log): `make check remote-frontends remote-events remote-mutation stress-broker smoke-rdevd remote-phase5-runtime` passed. Linux systemd installation, enable/start/reload and SIGKILL recovery passed with PID `958110 -> 958172`. Remote daemon SHA-256: `8ecdcacab1e3b433156dca45c517bc0b9b4d4e491d77690070b5ffb2167b3acc`.
+
+Shared sync, secret and session administration remain unimplemented and explicitly
+unavailable through this frontend. Full pool lifecycle/eviction projection and
+independent external review remain open. The preceding ingress QoS failure and
+isolated reruns remain part of the evidence; no wider contention guarantee is
+inferred from this frontend correction.

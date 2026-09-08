@@ -1,0 +1,3 @@
+before: missing broker socket; secrets list exit=0; stdout_present=True
+after: missing broker socket; secrets list exit=1; stdout_present=False
+Original shared-mode standalone fallback reproduced; corrected CLI rejects before local secret-store access.

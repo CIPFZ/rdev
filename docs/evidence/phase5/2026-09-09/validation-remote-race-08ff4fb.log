@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerFrontendBoundary
+    remote_frontend_test.go:174: actual CLI/MCP broker status: owner A has 8 held sockets, B sees only itself, default-denied project gets no result; remote ls uses policy and shared agent PID 953893; unsupported sync/secret/host/state/env/job commands neither spawn SSH/rsync nor mutate local registry; ungranted host and principal denied
+--- PASS: TestRemoteBrokerFrontendBoundary (11.41s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	12.431s

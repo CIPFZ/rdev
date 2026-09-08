@@ -152,7 +152,7 @@ evidence document; a passing command applies only to the scenario it exercises.
 |---|---|---|
 | P5-01 | `020230b` and predecessors | Broker negotiation/pipelining tests; repeated full check/race |
 | P5-02 | `020230b` | Real daemon duplicate-start, SIGKILL, private socket and foreign UID denial |
-| P5-03 | `b5e9422` | Three 20-process / 500-call SSH shared-session benchmarks |
+| P5-03 | `b5e9422`, `08ff4fb` | Three 20-process / 500-call SSH shared-session benchmarks |
 | P5-04 | `020230b`, `b5e9422`, `e3ac9c2` | Real principal provision/expiry/rotation, remote identity and two-project job negatives |
 | P5-05 | `2a61674`, `bd03436`, `7026bdf` | Real retry/frontend cancellation/SIGKILL and shared-wait disconnect/reconnect |
 | P5-06 | `6f62f60`, `bd03436`, `7026bdf` | Remote sustained file-I/O admission and bounded owner wait observers/subscribers |
@@ -161,7 +161,7 @@ evidence document; a passing command applies only to the scenario it exercises.
 | P5-09 | `bd03436`, `371fa30`, `7026bdf` | Real shared waits plus 20-client zero-subscriber durable terminal history, restart cursors, CLI/MCP replay, removal isolation and storage repair |
 | P5-10 | `e3ac9c2`, `bd03436`, `a96b359`, `a3ccb8d` | Acknowledged and pre-ACK job/append recovery, fresh-agent durable tombstones, CLI/MCP queries and owner isolation |
 | P5-11 | `2a61674`, `bd03436` | Six real lease cycles, zero-subscriber observation lease and shutdown release |
-| P5-12 | `020230b`, `669f18f`, `e3ac9c2` | Default-deny credentials, exact-host policy/crash tests, granted-project job isolation |
+| P5-12 | `020230b`, `669f18f`, `e3ac9c2`, `08ff4fb` | Default-deny credentials, exact-host policy/crash tests, granted-project job isolation |
 | P5-13 | `915fb5e` | Real mandatory exact-request approval substitution/replay/expiry/restart negatives |
 | P5-14 | `455ff16`, `6f62f60`, `a96b359` | Exact owner audit privacy, 146438 records, three rotations, zero sink errors/drops |
 | P5-15 | `020230b`; repeated through `20b4615` | Actual Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start |
@@ -264,3 +264,11 @@ or transport initialization. Actual CLI/MCP status and directory listing have
 initial exact-project/host/default-deny evidence, with unchanged shared remote
 agent identity. Full shared sync/secret/session implementation, full pool status
 and independent review remain unfinished; no additional Complete label is added.
+
+
+Shared frontend implementation `08ff4fb` passed committed-artifact full check,
+three real CLI/MCP status/list/default-deny/fallback scenarios, history and
+mutation regressions, stress, readiness and Linux systemd recovery. Actual CLI
+and daemon race binaries also passed the frontend scenario. The runtime record
+links the original fallback reproduction, passing logs, artifact digests and
+remaining shared-route/status/review risks. Overall Phase5 remains In progress.
