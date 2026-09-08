@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (1.08s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	1.091s

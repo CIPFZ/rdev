@@ -85,3 +85,10 @@ committed-source `make check remote-policy remote-phase5-runtime`, broker/daemon
 race, and real SSH policy integration with a race-instrumented daemon. The
 runtime evidence records the three policy runs and remote systemd recovery.
 The P5-12/P5-14/P5-16 remaining requirements above retain In progress status.
+
+Mandatory wire-approval follow-up `915fb5e2f15d48ac078f44a417543517d5627d90`
+passed committed-source `make check remote-approval remote-session-benchmark
+remote-lifecycle remote-phase5-runtime`, changed-package race, and real SSH
+approval integration with a race-instrumented daemon. The evidence records
+separate administrator issuance and executor principals throughout. Remaining
+shared mutation routes and independent review keep P5-13 In progress.

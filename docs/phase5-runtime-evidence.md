@@ -364,3 +364,19 @@ retry/cancellation runs, and six lease cycles over 65.362 seconds. Each session
 run still had one SSH child, one remote agent and 20 distinct remote principals.
 [Changed-package race tests](evidence/phase5/2026-09-08/approval-race-initial.log)
 also passed. Committed-source verification below identifies the final artifact.
+
+## Committed-source verification: 915fb5e
+
+Implementation commit: `915fb5e2f15d48ac078f44a417543517d5627d90`
+(`fix: require request-bound approval for shared remote mutations`).
+
+- [Full check and runtime regression](evidence/phase5/2026-09-08/committed-check-915fb5e.log): `make check remote-approval remote-session-benchmark remote-lifecycle remote-phase5-runtime` passed against the clean commit. This includes three actual approval-negative runs, three approved 20-process/500-call SSH runs, three cancellation/retry runs, six lease cycles, remote Linux startup/credential/audit tests, and actual systemd user service recovery.
+- All session runs retained one daemon SSH child, one remote agent and 20 remote principal IDs. Workload elapsed time was 2514.195–3066.663 ms; ping p95 was 108.256–114.343 ms and exec p95 140.147–161.611 ms. Approval provisioning happens before the workload barrier. These short-load measurements do not establish sustained fairness or the bulk/control SLO.
+- The six-cycle lease run took 65.357 seconds and reclaimed every idle generation, ending with zero SSH children/agents. Cleanup was 4521.210–4785.471 ms for 250 ms grace plus the five-second reaper tick.
+- [Changed-package race verification](evidence/phase5/2026-09-08/committed-race-915fb5e.log): `go test -race ./internal/client ./internal/broker ./cmd/rdevd ./internal/mcpsrv -count=1` passed.
+- [Actual daemon approval race integration](evidence/phase5/2026-09-08/remote-race-915fb5e.log) passed with both daemon and frontend test executable built using `-race`. Daemon SHA-256: `c952bad4313ed3558b6f01deb8b300b33488d917d1d5181f013cc0dc3821d405`.
+- Remote non-race daemon SHA-256: `d492b4b63ef3f2106151a61c405eaafd994a14fdda1e76868775ee9e82dd3d08`; systemd install/enable/start/reload/SIGKILL recovery/stop/start passed (PID `793066 -> 793175`).
+
+The pending independent review and remaining shared mutation routes keep P5-13
+In progress. Job mutation durability, fairness, dedicated bulk transport, audit
+sink recovery and launchd runtime requirements remain separate open gates.
