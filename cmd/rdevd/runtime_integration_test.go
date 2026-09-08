@@ -345,7 +345,7 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 		t.Log("real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded")
 	})
 	t.Run("startup_fail_closed", func(t *testing.T) {
-		for _, kind := range []string{"missing_key", "weak_key", "public_key", "symlink_key", "bad_config", "null_config", "unknown_config_field", "bad_policy", "null_policy", "duplicate_policy", "public_policy", "bad_jobs", "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts"} {
+		for _, kind := range []string{"missing_key", "weak_key", "public_key", "symlink_key", "bad_config", "null_config", "unknown_config_field", "bad_policy", "null_policy", "duplicate_policy", "public_policy", "bad_jobs", "bad_events", "null_events", "public_events", "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts"} {
 			t.Run(kind, func(t *testing.T) {
 				d := newRuntimeDaemon(t, bin)
 				switch kind {
@@ -374,6 +374,12 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 					os.WriteFile(d.socket+".policy", []byte(`{}`), 0644)
 				case "bad_jobs":
 					os.WriteFile(d.socket+".jobs", []byte(`invalid-jobs`), 0o600)
+				case "bad_events":
+					os.WriteFile(d.socket+".events", []byte(`invalid-events`), 0600)
+				case "null_events":
+					os.WriteFile(d.socket+".events", []byte(`null`), 0600)
+				case "public_events":
+					os.WriteFile(d.socket+".events", []byte(`{"schema":1,"events":[]}`), 0644)
 				case "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts":
 					hosts := filepath.Join(d.dir, "hosts.json")
 					d.extraArgs = []string{"-hosts-file", hosts}
@@ -403,7 +409,7 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 				if _, err := os.Stat(d.ready); !os.IsNotExist(err) {
 					t.Fatal("invalid startup published readiness")
 				}
-				if kind == "bad_policy" || kind == "bad_jobs" {
+				if kind == "bad_policy" || kind == "bad_jobs" || kind == "bad_events" {
 					suffix := strings.TrimPrefix(kind, "bad_")
 					data, _ := os.ReadFile(d.socket + "." + suffix)
 					if string(data) != "invalid-"+suffix {

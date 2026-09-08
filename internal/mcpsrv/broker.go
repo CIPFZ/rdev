@@ -194,6 +194,21 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		}
 		return nil, *resp.Mutation, nil
 	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_events", Description: "Replay this principal's retained job state history using its cursor. Truncated reports unavailable earlier history; events exclude command text and output."}, func(ctx context.Context, _ *mcp.CallToolRequest, in struct {
+		Host   string                `json:"host"`
+		ID     string                `json:"id"`
+		Cursor broker.JobEventCursor `json:"cursor,omitempty"`
+		Limit  int                   `json:"limit,omitempty"`
+	}) (*mcp.CallToolResult, broker.JobEventPage, error) {
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Operation: "job.events", Host: in.Host, JobEvents: &broker.JobEventQuery{ID: in.ID, Cursor: in.Cursor, Limit: in.Limit}})
+		if err != nil {
+			return nil, broker.JobEventPage{}, err
+		}
+		if resp.History == nil {
+			return nil, broker.JobEventPage{}, errors.New("broker returned no job history")
+		}
+		return nil, *resp.History, nil
+	})
 	return s, nil
 }
 

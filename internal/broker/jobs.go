@@ -438,6 +438,18 @@ func (r *JobRegistry) RecordResponse(host, owner string, req *proto.Request, res
 		}
 		return nil
 	}
+	// Enforce the result union before any response or event projection. Extra
+	// job lists on a status/stop/start reply must not bypass owner filtering.
+	descriptor, known := proto.LookupOperation(req.Op)
+	if !known || !descriptor.UsesJobParams {
+		return errors.New("unexpected job result on another operation")
+	}
+	if req.Op != proto.OpJobList && len(resp.Job.List) != 0 || req.Op != proto.OpJobWait && len(resp.Job.Waited) != 0 || (req.Op == proto.OpJobList || req.Op == proto.OpJobRm) && resp.Job.Info != nil {
+		return errors.New("remote job response changed result scope")
+	}
+	if req.Op != proto.OpJobRm && len(resp.Job.Removed)+len(resp.Job.Missing)+len(resp.Job.Skipped) != 0 || req.Op != proto.OpJobLogs && req.Op != proto.OpJobWait && resp.Job.Logs != "" {
+		return errors.New("remote job response included unrelated lifecycle data")
+	}
 	if err := r.healthy(); err != nil {
 		return err
 	}
@@ -467,7 +479,7 @@ func (r *JobRegistry) RecordResponse(host, owner string, req *proto.Request, res
 			return fmt.Errorf("job removal target missing")
 		}
 		ids := append(append([]string(nil), resp.Job.Removed...), resp.Job.Missing...)
-		for _, id := range ids {
+		for _, id := range append(append([]string(nil), ids...), resp.Job.Skipped...) {
 			if id != req.Job.ID {
 				return fmt.Errorf("job removal response changed target")
 			}

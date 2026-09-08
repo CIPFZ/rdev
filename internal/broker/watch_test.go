@@ -1,9 +1,42 @@
 package broker
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestWatchHubBoundsCacheAndSubscriptions(t *testing.T) {
+	h := NewWatchHub()
+	for i := 0; i < maxWatchKeys+1; i++ {
+		h.Publish(fmt.Sprint(i), "complete")
+	}
+	if len(h.latest) != maxWatchKeys || len(h.order) != maxWatchKeys {
+		t.Fatal("unbounded completion history")
+	}
+	old, stopOld := h.Subscribe("0")
+	defer stopOld()
+	select {
+	case <-old:
+		t.Fatal("old completion was not evicted")
+	default:
+	}
+	h.Publish("oversize", strings.Repeat("x", maxWatchEventBytes+1))
+	if _, ok := h.latest["oversize"]; ok {
+		t.Fatal("oversize event retained")
+	}
+	stopOld()
+	for range maxWatchSubscribers {
+		_, cancel := h.Subscribe("bounded")
+		defer cancel()
+	}
+	denied, cancel := h.Subscribe("excess")
+	defer cancel()
+	if _, ok := <-denied; ok {
+		t.Fatal("subscriber cap did not reject excess watcher")
+	}
+}
 
 func TestWatchHubSharesOnePublication(t *testing.T) {
 	h := NewWatchHub()

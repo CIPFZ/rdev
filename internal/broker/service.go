@@ -28,6 +28,7 @@ type Service struct {
 	closed           atomic.Bool
 	Scheduler        *Scheduler
 	Watches          *WatchHub
+	Events           *JobHistory
 	Audit            *AuditLog
 	config           *ConfigStore
 	approvalMu       sync.Mutex
@@ -66,6 +67,7 @@ func NewService(lookup client.AgentLookup) *Service {
 	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[sharedKey]*sharedDispatch), Jobs: NewJobRegistry(), observationCtx: observationCtx, stopObservations: stopObservations}
 	s.SetReady(true)
 	s.Mutations = NewMutationRegistry()
+	s.Events = NewJobHistory()
 	return s
 }
 
@@ -170,7 +172,10 @@ func (s *Service) DispatchShared(ctx context.Context, owner, request string, fn 
 			defer s.EndRequest()
 			current.resp, current.err = fn(s.observationCtx)
 			if current.err == nil && current.resp != nil {
-				s.Watches.Publish(owner+"\x00"+request, current.resp)
+				// Detailed metadata is durable in Events before the worker
+				// returns. Keep only a small completion hint in the watch cache;
+				// retaining every wait response would retain raw output forever.
+				s.Watches.Publish(owner+"\x00"+request, "observation_complete")
 			}
 			s.sharedMu.Lock()
 			delete(s.shared, key)

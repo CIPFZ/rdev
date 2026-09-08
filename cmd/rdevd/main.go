@@ -281,6 +281,24 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
+		if req.Operation == "job.events" {
+			result := "completed"
+			if req.JobEvents == nil {
+				result = "dispatch_error"
+				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "job event query required"})
+			} else {
+				page, err := service.Events.Query(req.Owner.Key(), req.Host, req.JobEvents.ID, req.JobEvents.Cursor, req.JobEvents.Limit)
+				if err != nil {
+					result = "dispatch_error"
+					_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				} else {
+					_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, History: &page})
+				}
+			}
+			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, PolicyDigest: decision.Digest, Decision: "allow", Result: result})
+			endRequest()
+			continue
+		}
 		if req.Operation == "audit_query" {
 			flushCtx, flushCancel := context.WithTimeout(requestCtx, time.Second)
 			flushErr := service.Audit.Flush(flushCtx)
@@ -317,19 +335,27 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		lane := broker.LaneForOperation(req.Operation)
 		if req.Wire != nil {
 			dispatch := func(ctx context.Context) (*proto.Response, error) {
-				return service.DispatchScheduled(ctx, req.Host, req.Owner.Key(), lane, func(dispatchCtx context.Context) (*proto.Response, error) {
+				response, err := service.DispatchScheduled(ctx, req.Host, req.Owner.Key(), lane, func(dispatchCtx context.Context) (*proto.Response, error) {
 					if approvedTarget != "" {
 						return service.DispatchApproved(dispatchCtx, req.Host, req.Wire, approvedTarget)
 					}
 					return service.Dispatch(dispatchCtx, req.Host, req.Wire)
 				})
+				if err != nil {
+					return response, err
+				}
+				if err := service.RecordJobResponse(req.Host, req.Owner.Key(), req.Wire, response); err != nil {
+					return nil, errors.New("remote job response could not be validated or its history persisted")
+				}
+				return response, nil
 			}
 			var wireResp *proto.Response
 			var mutation *broker.MutationIntent
 			var err error
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
 				jobKey, _ := json.Marshal([]any{req.Owner, req.Host, req.Wire.Job, req.Wire.DeadlineUnixMilli})
-				wireResp, err = service.DispatchShared(requestCtx, req.Owner.Key(), string(jobKey), dispatch)
+				jobDigest := sha256.Sum256(jobKey)
+				wireResp, err = service.DispatchShared(requestCtx, req.Owner.Key(), hex.EncodeToString(jobDigest[:]), dispatch)
 			} else if broker.IsWireMutation(req) {
 				wireResp, mutation, err = service.DispatchMutation(requestCtx, req, approvedPlan)
 			} else {
@@ -342,25 +368,6 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				}
 				service.Audit.Append(broker.AuditEvent{OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: result})
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error(), Mutation: mutation})
-				endRequest()
-				continue
-			}
-			var recordErr error
-			if !broker.IsWireMutation(req) {
-				recordErr = service.Jobs.RecordResponse(req.Host, req.Owner.Key(), req.Wire, wireResp)
-			}
-			if recordErr == nil && wireResp != nil && wireResp.Job != nil {
-				recordErr = service.ResolveMutationJob(req.Host, req.Owner.Key(), wireResp.Job.Info)
-			}
-			if recordErr != nil {
-				// Remote mutation completed but durable ownership state did not.
-				// Return an ambiguous outcome and never replay the mutation.
-				failure := "remote job response could not be validated"
-				if broker.RequiresApproval(req) {
-					failure = "mutation completed but broker state was not persisted; query remote status"
-				}
-				service.Audit.Append(broker.AuditEvent{OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Result: "state_persist_failed"})
-				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: failure})
 				endRequest()
 				continue
 			}

@@ -111,7 +111,7 @@ func (s *Service) DispatchMutation(ctx context.Context, req Request, plan Approv
 		}
 		return resp, status(), err
 	}
-	if err := s.Jobs.RecordResponse(req.Host, intent.Owner, &wire, resp); err != nil {
+	if err := s.RecordJobResponse(req.Host, intent.Owner, &wire, resp); err != nil {
 		_ = s.Mutations.Transition(intent.Owner, intent.OperationID, "ambiguous", false)
 		return nil, status(), errors.New("mutation completed but broker state was not persisted; query mutation.status")
 	}
@@ -202,6 +202,12 @@ func (s *Service) RecoverMutationJobs(ctx context.Context) error {
 		r, err := s.Dispatch(ctx, m.Host, &proto.Request{Op: proto.OpJobStatus, ClientID: client, ProjectID: project, Job: &proto.JobParams{ID: m.JobID}})
 		if err != nil || r == nil || !r.OK || r.Job == nil || r.Job.Info == nil {
 			continue
+		}
+		if !mutationMatchesJob(m, r.Job.Info) {
+			return errors.New("recovered job identity conflicts with mutation intent")
+		}
+		if err := s.RecordJobResponse(m.Host, m.Owner, &proto.Request{Op: proto.OpJobStatus, Job: &proto.JobParams{ID: m.JobID}}, r); err != nil {
+			return err
 		}
 		if err := s.ResolveMutationJob(m.Host, m.Owner, r.Job.Info); err != nil {
 			return err

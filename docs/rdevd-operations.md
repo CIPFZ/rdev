@@ -319,8 +319,8 @@ Different owners never share broker results. Authenticated `status` includes
 owner-scoped `shared_waits.observers` and `shared_waits.subscribers`.
 
 SIGTERM cancels observations before draining requests; this does not stop the
-detached remote job. Reconnect after restart using the original owner. Durable
-event replay remains unfinished. Modern remote supervisors relay job_stop TERM
+detached remote job. Reconnect after restart using the original owner. Durable state-history cursor replay is described below; push streaming remains
+unfinished. Modern remote supervisors relay job_stop TERM
 to the command group and persist output before exiting, preserving tail-on-exit.
 Forced KILL and old supervisors can still lose in-memory output; their existing
 stop semantics are retained.
@@ -394,3 +394,53 @@ and waits for durable outcome publication within the original ten-second
 context. A held remote response becomes ambiguous; no shutdown path replays it.
 An uninterruptible filesystem operation and physical power-loss durability still
 require broader failure testing.
+
+
+## Job state history and replay
+
+Grant `job.events` with the server-selected `job` capability for each allowed
+host. The authenticated owner can query its retained history even after removing
+the corresponding remote job. Other projects receive the same unknown/expired
+error as any unavailable owned history.
+
+```sh
+rdev job events dev job_ID -limit 1
+rdev job events dev job_ID -stream STREAM_FROM_CURSOR -after SEQUENCE -limit 64
+```
+
+These commands require shared broker mode (`RDEV_BROKER_SOCKET`) and the original
+principal credentials. MCP exposes `rdev_job_events` with `host`, `id`, optional
+`cursor` (`stream`, `sequence`) and `limit`. Results have `events`, the next
+`cursor`, `more` and `truncated`. Use the returned cursor for the next page.
+A changed stream or evicted prefix sets `truncated`; fully expired histories
+return an explicit error. A cursor ahead of available history is rejected.
+
+Events contain job ID, host, state, PID, exit code, observation time and a hashed
+operation reference. They exclude command text, cwd, labels, environment and raw
+output. Repeated identical observations are coalesced; a late running reply does
+not reverse a terminal state. They describe observed state changes, not every
+remote process transition. Retrieve owned output through job logs.
+
+The private `.events` schema-1 snapshot beside the daemon socket retains at most
+8192 events globally, 1024 per owner and 64 per job, within 16 MiB. Oldest events
+are evicted under those budgets. A completely evicted history receives a new
+stream ID when observed again, making an old cursor's gap visible. The snapshot
+is fsynced and atomically replaced before publishing observations. Malformed,
+null, duplicate, future-schema and non-private snapshots fail startup without
+being overwritten. Late directory-sync uncertainty requires restart.
+
+A shared wait's worker records its terminal observation even if all local
+subscribers disconnect. A disk failure returns an error and preserves the old
+visible history; after repairing storage, an owned status call can record the
+terminal state exactly once. Daemon shutdown/crash never replays the job command
+to repair history. The in-memory watch cache retains only completion hints, with
+1024 keys, 512 subscriptions, a 1024-byte key bound and a 64 KiB event bound.
+Detailed replay uses the durable history query.
+
+`make remote-events RDEV_SSH_CONFIG=/path/to/ssh/config` runs twenty actual wait
+frontends, kills all of them, observes terminal persistence without subscribers,
+SIGKILLs/restarts the daemon, queries cursors through actual CLI/MCP processes,
+checks project isolation after job removal, injects a real rename failure and
+repairs the history by an owned status call. Push streaming and extended remote
+retention pressure remain outstanding; passing this test does not complete
+the entire Phase5 gate.

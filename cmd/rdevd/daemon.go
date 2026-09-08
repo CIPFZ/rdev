@@ -157,6 +157,9 @@ func runDaemon(args []string) error {
 	if err := service.Mutations.ConfigurePersistence(*socket + ".mutations"); err != nil {
 		return fmt.Errorf("mutation registry load failed: %w", err)
 	}
+	if err := service.Events.ConfigurePersistence(*socket + ".events"); err != nil {
+		return fmt.Errorf("job event history load failed: %w", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, 30*time.Second)

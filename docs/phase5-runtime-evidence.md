@@ -768,3 +768,40 @@ remain those of `a96b359`; this narrower correction was checked with the full
 repository check plus affected-package race and real recovery/wait paths.
 Durable event history, remaining shared routes, operational retention, platform
 coverage and independent external review remain unfinished.
+
+
+## Durable job state history
+
+The event-history implementation stores bounded owner/host/job-scoped metadata
+in a private versioned snapshot. It deduplicates identical observations, retains
+stream/sequence cursors across restart and explicitly reports retention gaps.
+A shared wait persists state in its single observation worker before fan-out,
+so losing every subscriber no longer loses the terminal history. The previous
+unbounded WatchHub cache of full response/output objects is replaced by bounded
+completion hints; the shared key is hashed rather than retaining request JSON.
+
+The post-implementation response review found that extra job-list/lifecycle
+fields could escape the operation-specific owner checks. Result-union validation
+now rejects those fields before any event or frontend projection; targeted
+negative coverage includes a status reply carrying another owner's job list.
+This is an implementing-agent review pass, not independent external review.
+
+`TestRemoteBrokerJobEventHistory` passed its initial real OpenSSH scenario in
+2.956 seconds: twenty independent wait frontends were SIGKILLed, one remaining
+observation persisted one terminal event without subscribers, daemon SIGKILL
+and restart preserved the original cursor, and removed-job history remained
+available only to its original owner. Actual CLI/MCP processes replayed the
+terminal/removal events and rejected another project. A real `.events` rename
+failure preserved the old snapshot; a later owned status repaired exactly one
+terminal event. The persisted file contained no command or output canary.
+
+Unit/race scenarios cover 32 simultaneous terminal observations sharing one
+durable event, cursor paging/restart, host/project isolation, owner/job retention
+gaps, immutable snapshots after write failure and uncertain-commit restart.
+Daemon runtime startup negatives include malformed/null/public event snapshots.
+Full and committed-source verification follows below.
+
+This records observed state changes and exposes a pull replay API. Full push
+streaming, prolonged remote event-retention pressure, physical power-loss tests
+and independent external review remain open, along with the broader shared
+secret/session/sync/Fleet and platform gates.

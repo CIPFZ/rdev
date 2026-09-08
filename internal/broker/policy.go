@@ -158,6 +158,8 @@ func CapabilityForOperation(operation string) string {
 	switch operation {
 	case "mutation.status":
 		return "mutation.read"
+	case "job.events":
+		return "job"
 	case "exec":
 		return "exec"
 	case "read_file", "list":

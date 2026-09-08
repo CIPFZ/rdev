@@ -1079,9 +1079,13 @@ SSH 不可用启动、reload 和远端删除/本地持久化失败后保留 owne
 shutdown；`20b4615` 修复并实测 replay digest 的 state/capability 参数遗漏。
 后续 `make remote-mutation` 增加真实 pre-ACK job/append 崩溃、稳定 operation ID、
 远端 durable tombstone、CLI/MCP 恢复查询及跨项目拒绝。这些测试尚未覆盖
-安全 identity retirement、持久事件 replay、完整混合负载、
+安全 identity retirement、完整混合负载、
 launchd 和独立外部 review，所以上述未勾选 Gate 保持未完成。详细提交及日志见
 `docs/phase5-acceptance.md` 和 `docs/phase5-runtime-evidence.md`。
+
+后续 `make remote-events` 增加 owner-scoped 状态事件 cursor replay、20 个
+wait client 全部退出后的唯一终态落盘、SIGKILL 后游标恢复、CLI/MCP 跨项目
+拒绝和真实 event rename 失败修复；仍未完成主动事件推送及长时间保留压力验证。
 
 ### Phase 6：CLI、兼容性、文档和发布收口
 

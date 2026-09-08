@@ -112,7 +112,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "mutation" || os.Args[1] == "serve" || os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm")) {
+		if os.Args[1] == "mutation" || os.Args[1] == "serve" || os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm" || os.Args[2] == "events")) {
 			return
 		}
 	}
@@ -378,6 +378,45 @@ func brokerJob(ctx context.Context, args []string) error {
 		return errors.New("usage: rdev job list|status ...")
 	}
 	switch args[0] {
+	case "events":
+		fs, err := parseFlags(args[1:], nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(fs.pos) != 2 {
+			return errors.New("usage: rdev job events <host> <job-id> [-stream ID -after N] [-limit N]")
+		}
+		var after uint64
+		if value := fs.str("after"); value != "" {
+			after, err = strconv.ParseUint(value, 10, 64)
+			if err != nil {
+				return errors.New("invalid event sequence")
+			}
+		}
+		var limit int
+		if value := fs.str("limit"); value != "" {
+			limit, err = strconv.Atoi(value)
+			if err != nil {
+				return errors.New("invalid event limit")
+			}
+		}
+		owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+		c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		resp, err := c.DoContext(ctx, broker.Request{Operation: "job.events", Host: fs.pos[0], JobEvents: &broker.JobEventQuery{ID: fs.pos[1], Cursor: broker.JobEventCursor{Stream: fs.str("stream"), Sequence: after}, Limit: limit}})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return errors.New(resp.Error)
+		}
+		if resp.History == nil {
+			return errors.New("broker returned no event history")
+		}
+		return json.NewEncoder(os.Stdout).Encode(resp.History)
 	case "start":
 		flagArgs, argv, err := splitArgv(args[1:])
 		if err != nil {

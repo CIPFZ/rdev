@@ -6,6 +6,7 @@ import (
 )
 
 type Request struct {
+	JobEvents       *JobEventQuery `json:"job_events,omitempty"`
 	MutationID      string         `json:"mutation_id,omitempty"`
 	ID              string         `json:"id"`
 	Owner           Owner          `json:"owner"`
@@ -25,6 +26,7 @@ type Request struct {
 	Since           time.Time      `json:"since,omitempty"`
 }
 type Response struct {
+	History         *JobEventPage      `json:"history,omitempty"`
 	Mutation        *MutationIntent    `json:"mutation,omitempty"`
 	SharedWaits     *SharedWaitStatus  `json:"shared_waits,omitempty"`
 	AuditHealth     *AuditSinkStatus   `json:"audit_health,omitempty"`

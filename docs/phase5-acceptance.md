@@ -15,7 +15,7 @@ runtime path is exercised.
 | P5-06 | Atomic fair admission with separate global/host/owner execution and queue limits, reserved control capacity, cancellable queued work and owner-only status snapshots; real 20-process remote bulk overload and owner SIGKILL tests | In progress | Remote file-I/O owner pressure now has runtime evidence; broader exec/job/sync pressure, frontend ingress buffers, active-host saturation and warm-pool capacity remain |
 | P5-07 | Eligible-owner weighted scheduling, removal of empty/canceled queues, live weight changes for existing backlog; real continuously queued SSH file reads with 3:1 weights reversed to 1:3 by SIGHUP | In progress | Remote weighted file-I/O evidence passes; mixed long exec/job wait/status/sync and independent review remain |
 | P5-08 | Reserved control handlers/queues, dedicated on-demand bulk transport, actual payload byte pacing, and real baseline-versus-bulk control p95 assertions in `make remote-qos` | In progress | Committed three-run real 20-process SLO passed (ratios 1.27–1.49); wider payload/job/sync/streaming and independent review remain |
-| P5-09 | Bounded owner-scoped wait coalescing with independently canceled subscribers and observation leases; real 20-process wait test covers initiator/follower SIGKILL, reconnect, SIGHUP, shared terminal operation ID/tail and prompt SIGTERM observation cancellation | In progress | Durable event history and external replay/streaming RPC remain; latest WatchHub retention still needs bounded persistence |
+| P5-09 | Bounded owner-scoped wait coalescing with independently canceled subscribers and observation leases; real 20-process wait test covers initiator/follower SIGKILL, reconnect, SIGHUP, shared terminal operation ID/tail and prompt SIGTERM observation cancellation; private bounded event history persists state changes in the observation worker, including zero-subscriber completion, and exposes job.events plus CLI/MCP cursor replay | In progress | Owner-scoped durable metadata history and CLI/MCP cursor replay now have initial real zero-subscriber/crash/removal/storage-failure evidence; full push streaming, extended retention pressure and independent review remain |
 | P5-10 | Versioned private bounded job registry with persist-before-publish updates and fail-closed uncertain commits; real two-project detached jobs survive repeated daemon SIGKILL, SSH-unavailable recovery, SIGHUP and remote-delete/local-rename failure (`make remote-jobs`); `make remote-mutation` exercises execution-before-ACK SIGKILL, SSH outage, durable job rediscovery, append replay refusal, intent rename failure, CLI/MCP stable IDs and exact-project outcome isolation | In progress | Pre-ACK job-start and append SIGKILL recovery, owner-bound stable IDs, fresh-agent durable tombstone recovery, and actual CLI/MCP outcome queries now pass; event replay, upgrade matrix, identity retirement and independent review remain |
 | P5-11 | Atomic lease admission/pool detachment, cleanup outside the lease lock, in-flight accounting, runtime `IdleTTL` reload, and six real remote lifecycle cycles over 65 seconds (normal exit/SIGKILL, 60 new-owner requests) | In progress | Atomic reaping defect fixed; repeated real SSH lifecycle passed. Real detached wait now keeps an independent lease through zero subscribers and releases it on observation shutdown; independent review and full drain failure matrix remain |
 | P5-12 | Default-deny owner policy, persisted grants, capability-scoped decisions, policy administration RPC, connection owner switching rejection, and runtime HMAC principal-token validation, private strict policy loading, durable grant/revoke, exact-host grants, server-derived capability, policy digests and `make remote-policy` real queued/crash/denial/failure-injection evidence | In progress | Principal lifecycle is now proven by real daemon tests; exact-host grants, server-selected capability and stable policy digests now have real queued/denial/SIGKILL evidence; complete secret resource permissions and independent review remain; wire approval now binds the host/session snapshot and exact request |
@@ -211,3 +211,20 @@ broker/daemon race, three real mutation runs with twenty independent resolvers,
 three shared-wait runs and an actual daemon race recovery run. The record links
 normal and race measurements and the artifact digest. This closes the concurrent
 transition defect; the remaining P5/Multi Agent Gate items stay In progress.
+
+
+## Job event history follow-up
+
+The event-history batch stores only owner-scoped job state metadata before
+acknowledgment, with explicit stream/sequence cursors and retention-gap signals.
+Twenty disconnected wait frontends still leave one worker to persist the terminal
+event. History survives daemon SIGKILL and job removal, while other projects
+remain denied. The watch cache now holds bounded small completion hints instead
+of unbounded raw wait responses.
+
+`make remote-events` covers actual CLI/MCP cursor replay, a real event-snapshot
+rename failure and later status repair. A response-scope review also rejects
+unrelated job lifecycle fields before ownership/event projection. These initial
+runtime assertions do not close push streaming, extended retention-pressure or
+independent-review gaps. Full validation and commit evidence are recorded below
+in the linked runtime evidence document; Phase5 remains In progress.
