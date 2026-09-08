@@ -859,3 +859,23 @@ runs verified detached observation accounting, three twenty-process shared-wait
 runs passed, and three mutation crash runs drained held-response shutdown in
 7.019–7.028 seconds. Full repository `go test -race ./... -count=1` also passed.
 Actual-daemon race and committed-artifact evidence follow below.
+
+
+## Committed ingress verification: 7026bdf
+
+Implementation `7026bdfa7372836a8be019d4acc3c534eeb5a8aa` was pushed to
+`origin/main`. This batch adds frontend resource bounds and detached-observer
+accounting; it does not mark additional P5 items Complete.
+
+- [Final-code check and regressions](evidence/phase5/2026-09-09/validation-check-7026bdf.log): full check; three real ingress/event/wait/mutation runs each; 100-run broker stress and readiness smoke passed before commit.
+- [Full repository race](evidence/phase5/2026-09-09/validation-race-7026bdf.log): every package passed on the final implementation code before commit.
+- [Actual daemon race](evidence/phase5/2026-09-09/validation-remote-race-7026bdf.log): zero-subscriber history/charge lifecycle passed in 42.103 seconds; ingress pressure passed in 14.973 seconds. Race daemon SHA-256: `cec346c23eb9c6c306206cfce3ac4ed754c4ff3669f3609bb577b3f98d98e193`.
+- [Committed check and first QoS attempt, including failure](evidence/phase5/2026-09-09/committed-check-qos-failure-7026bdf.log): committed-artifact full check and three ingress/event runs passed. The third QoS run failed one control p95 ratio at 2.043; the first two passed. A separate full-repository build/test batch overlapped the third run. The failure is retained, not discarded.
+- [Isolated QoS and service regressions](evidence/phase5/2026-09-09/committed-qos-runtime-7026bdf.log): after all other build/test processes completed, the unchanged committed code and unchanged two-times threshold passed three consecutive 20-process QoS runs, ratios 1.297–1.443. They wrote 146462 audit records, rotated three times and reported zero drops/errors. Stress, readiness, real daemon credentials/reload/crash and actual Linux systemd installation/recovery all passed. Systemd PID changed `950298 -> 950368`; remote daemon SHA-256: `d44ca0e01426af2404d1661661e753f90e601d840bdb2830bb2a3bee0e450bba`.
+
+The evidence proves the defined remote workload when run independently.
+Concurrent unrelated build/test activity is a plausible source of the observed
+2.043 ratio, not a proven causal diagnosis or a passing workload guarantee.
+Wider host-contention, mixed workload, response-allocation and independent-review
+coverage remain open. Do not overlap unrelated builds/stress with the final
+baseline-versus-bulk measurement; keep failed runs in the evidence record.

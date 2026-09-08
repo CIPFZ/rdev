@@ -154,11 +154,11 @@ evidence document; a passing command applies only to the scenario it exercises.
 | P5-02 | `020230b` | Real daemon duplicate-start, SIGKILL, private socket and foreign UID denial |
 | P5-03 | `b5e9422` | Three 20-process / 500-call SSH shared-session benchmarks |
 | P5-04 | `020230b`, `b5e9422`, `e3ac9c2` | Real principal provision/expiry/rotation, remote identity and two-project job negatives |
-| P5-05 | `2a61674`, `bd03436` | Real retry/frontend cancellation/SIGKILL and shared-wait disconnect/reconnect |
-| P5-06 | `6f62f60`, `bd03436` | Remote sustained file-I/O admission and bounded owner wait observers/subscribers |
+| P5-05 | `2a61674`, `bd03436`, `7026bdf` | Real retry/frontend cancellation/SIGKILL and shared-wait disconnect/reconnect |
+| P5-06 | `6f62f60`, `bd03436`, `7026bdf` | Remote sustained file-I/O admission and bounded owner wait observers/subscribers |
 | P5-07 | `6f62f60` | Continuously backlogged real SSH owners, live 3:1 to 1:3 weight reversal |
 | P5-08 | `6f62f60` | Three real bulk/control p95 SLO runs, ratios 1.267–1.488 |
-| P5-09 | `bd03436`, `371fa30` | Real shared waits plus 20-client zero-subscriber durable terminal history, restart cursors, CLI/MCP replay, removal isolation and storage repair |
+| P5-09 | `bd03436`, `371fa30`, `7026bdf` | Real shared waits plus 20-client zero-subscriber durable terminal history, restart cursors, CLI/MCP replay, removal isolation and storage repair |
 | P5-10 | `e3ac9c2`, `bd03436`, `a96b359`, `a3ccb8d` | Acknowledged and pre-ACK job/append recovery, fresh-agent durable tombstones, CLI/MCP queries and owner isolation |
 | P5-11 | `2a61674`, `bd03436` | Six real lease cycles, zero-subscriber observation lease and shutdown release |
 | P5-12 | `020230b`, `669f18f`, `e3ac9c2` | Default-deny credentials, exact-host policy/crash tests, granted-project job isolation |
@@ -248,3 +248,12 @@ The real ingress gate tests exact-project isolation and unchanged shared remote
 agent identity during connection, byte, pipeline and slow-reader pressure. The
 runtime evidence record tracks final validation and remaining matrix/review gaps;
 no additional P5 item or overall gate is marked Complete by this change.
+
+
+Ingress implementation `7026bdf` passed full check/race, actual daemon race,
+repeated real ingress and detached-observer tests, stress, readiness and Linux
+systemd recovery. The committed-artifact QoS record retains a 2.043-times p95
+failure during overlapping unrelated tests and three subsequent isolated passes
+at 1.297–1.443 times baseline. Broader host contention remains unproven. The
+linked runtime evidence contains both logs and artifact digests; the overall
+Phase5 and Multi Agent Gate remain In progress.

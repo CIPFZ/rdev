@@ -1,0 +1,68 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.005s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.728s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	8.908s
+ok  	github.com/CIPFZ/rdev/internal/broker	2.293s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.002s
+ok  	github.com/CIPFZ/rdev/internal/client	0.449s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.040s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.635s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.006s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.003s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.004s
+ok  	github.com/CIPFZ/rdev/internal/session	7.862s
+ok  	github.com/CIPFZ/rdev/internal/state	0.095s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.028s
+ok  	github.com/CIPFZ/rdev/internal/support	0.003s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.247s
+ok       rdev-agent-linux-amd64 987d5a1e9f90
+ok       rdev-agent-linux-arm64 45a2df0fc800
+ok       rdev-agent-darwin-amd64 874efc339c5d
+ok       rdev-agent-darwin-arm64 b1890d718f3c
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerIngressIsolation$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerIngressIsolation
+    remote_ingress_test.go:220: real daemon ingress: owner cap=32; anonymous cap=16 and handshake expiry; 28 MiB charged partial JSON plus excess rejected by owner byte budget; oversize frame rejected; 2-second slow-reader cleanup; full pipeline cancels real held SSH ping; exact-project status isolation; shared remote agent PID 942355 unchanged
+--- PASS: TestRemoteBrokerIngressIsolation (8.54s)
+=== RUN   TestRemoteBrokerIngressIsolation
+    remote_ingress_test.go:220: real daemon ingress: owner cap=32; anonymous cap=16 and handshake expiry; 28 MiB charged partial JSON plus excess rejected by owner byte budget; oversize frame rejected; 2-second slow-reader cleanup; full pipeline cancels real held SSH ping; exact-project status isolation; shared remote agent PID 942482 unchanged
+--- PASS: TestRemoteBrokerIngressIsolation (8.53s)
+=== RUN   TestRemoteBrokerIngressIsolation
+    remote_ingress_test.go:220: real daemon ingress: owner cap=32; anonymous cap=16 and handshake expiry; 28 MiB charged partial JSON plus excess rejected by owner byte budget; oversize frame rejected; 2-second slow-reader cleanup; full pipeline cancels real held SSH ping; exact-project status isolation; shared remote agent PID 942658 unchanged
+--- PASS: TestRemoteBrokerIngressIsolation (8.55s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	25.617s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerJobEventHistory$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:166: real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (2.51s)
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:166: real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (2.71s)
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:166: real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (2.70s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	7.918s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerQoS$' -count=3 -timeout=4m -v
+=== RUN   TestRemoteBrokerQoS
+    remote_qos_test.go:200: sustained real SSH phase: weights 3:1, two backlogged owners, 18 bulk processes and two control processes
+    remote_qos_test.go:313: real remote QoS evidence: {"audit_sink":{"rotations":1,"state":"ok","accepted":48796,"written":48796,"dropped":0,"errors":0,"recovered":0,"pending":0},"bulk_idle_reaped":true,"bulk_idle_ttl_ms":1000,"bulk_processes":18,"bytes_per_read":344064,"control_latency":{"0":{"baseline_p95_ms":1.333,"bulk_p95_ms":2.037,"ratio":1.528132033008252},"1":{"baseline_p95_ms":1.314,"bulk_p95_ms":1.976,"ratio":1.5038051750380517}},"control_processes":2,"dedicated_bulk_transport":true,"owner_a_payload_bytes":212287488,"owner_b_payload_bytes":244629504,"owner_sigkill_recovery":true,"processes":20,"same_base_agent":true,"windows":[{"phase":"weight-3-1","A":458,"B":153,"ratio_a_b":2.9934640522875817,"Samples":25,"Backlogged":25,"MaxGapA":1.011859097,"MaxGapB":1.011859097,"ARejected":4436,"BRejected":4735},{"phase":"weight-1-3","A":153,"B":459,"ratio_a_b":0.3333333333333333,"Samples":25,"Backlogged":25,"MaxGapA":1.011358839,"MaxGapB":1.011358839,"ARejected":4738,"BRejected":4432}]}
+--- PASS: TestRemoteBrokerQoS (66.10s)
+=== RUN   TestRemoteBrokerQoS
+    remote_qos_test.go:200: sustained real SSH phase: weights 3:1, two backlogged owners, 18 bulk processes and two control processes
+    remote_qos_test.go:313: real remote QoS evidence: {"audit_sink":{"rotations":1,"state":"ok","accepted":48812,"written":48812,"dropped":0,"errors":0,"recovered":0,"pending":0},"bulk_idle_reaped":true,"bulk_idle_ttl_ms":1000,"bulk_processes":18,"bytes_per_read":344064,"control_latency":{"0":{"baseline_p95_ms":1.292,"bulk_p95_ms":1.737,"ratio":1.3444272445820433},"1":{"baseline_p95_ms":1.288,"bulk_p95_ms":1.773,"ratio":1.3765527950310559}},"control_processes":2,"dedicated_bulk_transport":true,"owner_a_payload_bytes":212287488,"owner_b_payload_bytes":244629504,"owner_sigkill_recovery":true,"processes":20,"same_base_agent":true,"windows":[{"phase":"weight-3-1","A":458,"B":153,"ratio_a_b":2.9934640522875817,"Samples":25,"Backlogged":25,"MaxGapA":1.010599027,"MaxGapB":1.010599027,"ARejected":4435,"BRejected":4737},{"phase":"weight-1-3","A":153,"B":459,"ratio_a_b":0.3333333333333333,"Samples":25,"Backlogged":25,"MaxGapA":1.011597566,"MaxGapB":1.011597566,"ARejected":4740,"BRejected":4434}]}
+--- PASS: TestRemoteBrokerQoS (66.10s)
+=== RUN   TestRemoteBrokerQoS
+    remote_qos_test.go:200: sustained real SSH phase: weights 3:1, two backlogged owners, 18 bulk processes and two control processes
+    remote_qos_test.go:291: control p95 SLO failed: bulk 2.726 ms / baseline 1.334 ms = 2.04
+    remote_qos_test.go:313: real remote QoS evidence: {"audit_sink":{"rotations":1,"state":"ok","accepted":48480,"written":48480,"dropped":0,"errors":0,"recovered":0,"pending":0},"bulk_idle_reaped":true,"bulk_idle_ttl_ms":1000,"bulk_processes":18,"bytes_per_read":344064,"control_latency":{"0":{"baseline_p95_ms":1.373,"bulk_p95_ms":2.738,"ratio":1.9941733430444282},"1":{"baseline_p95_ms":1.334,"bulk_p95_ms":2.726,"ratio":2.043478260869565}},"control_processes":2,"dedicated_bulk_transport":true,"owner_a_payload_bytes":211943424,"owner_b_payload_bytes":243597312,"owner_sigkill_recovery":true,"processes":20,"same_base_agent":true,"windows":[{"phase":"weight-3-1","A":456,"B":152,"ratio_a_b":3,"Samples":25,"Backlogged":25,"MaxGapA":1.019827994,"MaxGapB":1.019827994,"ARejected":4351,"BRejected":4676},{"phase":"weight-1-3","A":153,"B":458,"ratio_a_b":0.33406113537117904,"Samples":25,"Backlogged":25,"MaxGapA":1.012718921,"MaxGapB":1.012718921,"ARejected":4740,"BRejected":4435}]}
+--- FAIL: TestRemoteBrokerQoS (66.10s)
+FAIL
+FAIL	github.com/CIPFZ/rdev/cmd/rdevd	198.306s
+FAIL
+make: *** [Makefile:120: remote-qos] Error 1

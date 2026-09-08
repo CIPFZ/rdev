@@ -1,0 +1,8 @@
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:166: real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (42.10s)
+=== RUN   TestRemoteBrokerIngressIsolation
+    remote_ingress_test.go:220: real daemon ingress: owner cap=32; anonymous cap=16 and handshake expiry; 28 MiB charged partial JSON plus excess rejected by owner byte budget; oversize frame rejected; 2-second slow-reader cleanup; full pipeline cancels real held SSH ping; exact-project status isolation; shared remote agent PID 941083 unchanged
+--- PASS: TestRemoteBrokerIngressIsolation (14.97s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	58.094s
