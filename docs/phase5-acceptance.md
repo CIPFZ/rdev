@@ -159,13 +159,13 @@ evidence document; a passing command applies only to the scenario it exercises.
 | P5-07 | `6f62f60` | Continuously backlogged real SSH owners, live 3:1 to 1:3 weight reversal |
 | P5-08 | `6f62f60` | Three real bulk/control p95 SLO runs, ratios 1.267–1.488 |
 | P5-09 | `bd03436` | Three normal and two race 20-process shared-wait runs; one remote operation ID |
-| P5-10 | `e3ac9c2`, `bd03436` | Acknowledged jobs survive SIGKILL/outage/reload/delete failure and observation shutdown |
+| P5-10 | `e3ac9c2`, `bd03436`, `a96b359` | Acknowledged and pre-ACK job/append recovery, fresh-agent durable tombstones, CLI/MCP queries and owner isolation |
 | P5-11 | `2a61674`, `bd03436` | Six real lease cycles, zero-subscriber observation lease and shutdown release |
 | P5-12 | `020230b`, `669f18f`, `e3ac9c2` | Default-deny credentials, exact-host policy/crash tests, granted-project job isolation |
 | P5-13 | `915fb5e` | Real mandatory exact-request approval substitution/replay/expiry/restart negatives |
-| P5-14 | `455ff16`, `6f62f60` | Exact owner audit privacy, 146438 records, three rotations, zero sink errors/drops |
+| P5-14 | `455ff16`, `6f62f60`, `a96b359` | Exact owner audit privacy, 146438 records, three rotations, zero sink errors/drops |
 | P5-15 | `020230b`; repeated through `20b4615` | Actual Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start |
-| P5-16 | `020230b`, `669f18f`, `e3ac9c2`, `bd03436`, `20b4615` | Invalid reload preservation, durable policy ACK, job deletion recovery, wait drain, replay digest negatives |
+| P5-16 | `020230b`, `669f18f`, `e3ac9c2`, `bd03436`, `20b4615`, `a96b359` | Invalid reload preservation, durable policy ACK, job deletion recovery, wait drain, replay digest negatives |
 
 
 ## Durable mutation intent follow-up
@@ -186,3 +186,12 @@ retirement, durable event replay, remaining shared routes, complete workload and
 platform matrices and independent external review are still open. This batch does
 not make Phase5 or any additional P5 item Complete. The runtime evidence document
 records commands, measurements, review findings and committed-source results.
+
+
+Mutation implementation `a96b359` passed clean-commit full check, full race,
+actual daemon race, all mutation/job/wait/policy/approval/session/lifecycle/QoS
+runtime targets, stress, readiness and Linux systemd recovery. Three held-response
+SIGTERM runs exited in 7.017–7.018 seconds; control p95 ratios were 1.255–1.607.
+Logs and artifact hashes are linked from the runtime evidence. Concurrent
+resolution received an additional follow-up finding; event history, identity
+retirement, shared routes and platform/review requirements remain In progress.

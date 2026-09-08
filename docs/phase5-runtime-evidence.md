@@ -711,3 +711,24 @@ reconciliation. Tests cover process crashes, not physical remote-host power loss
 remote job metadata remains atomically published rather than power-loss tested.
 Durable event replay, remaining shared routes, full workload/upgrade/failure
 matrices, macOS launchd and external independent review remain incomplete.
+
+
+## Committed-source verification: a96b359 (2026-09-09)
+
+Implementation: `a96b3599b409b0b4e47e4e31272243ada7f2722a` (`fix: persist mutation
+intents and recover pre-ACK job starts`), pushed to origin/main before verification.
+
+- [Full check, stress and real runtime](evidence/phase5/2026-09-09/committed-check-a96b359.log): `make check remote-mutation remote-jobs remote-wait remote-policy remote-approval remote-session-benchmark remote-lifecycle remote-qos stress-broker smoke-rdevd remote-phase5-runtime` passed from the clean implementation commit.
+- Three pre-ACK crash runs proved job and append once-only behavior, durable fresh-agent job recovery/tombstones, SSH-outage owner preservation, intent rename failure, actual CLI/MCP recovery queries and duplicate protection, terminal rejection cleanup, and hashed audit correlation. Stalled-response SIGTERM took 7.017–7.018 seconds, below the unchanged 12-second process bound.
+- [Full repository race](evidence/phase5/2026-09-09/committed-race-a96b359.log): `go test -race ./... -count=1` passed.
+- [Actual daemon race mutation test](evidence/phase5/2026-09-09/remote-race-a96b359.log): the production daemon and test frontends ran with `-race`; the real remote scenario passed in 76.655 seconds, with shutdown at 8.030 seconds including the race runtime exit delay. Daemon SHA-256: `83065555f8af58aa138ac2502fa9ee44f4c35e231a4efef48c64416c896b81b7`.
+- Three 20-process QoS runs met the unchanged 2x SLO: ratios 1.255–1.607. Across these runs the audit wrote 146350 records, rotated three times, and reported zero drops/errors. Weight reversal, owner SIGKILL isolation, dedicated bulk transport TTL and base-agent preservation passed.
+- Three 20-process shared-session runs, three shared-wait runs, job/policy/approval recovery, retry/cancellation and six lease lifecycle cycles passed. The lease scenario lasted 65.349 seconds, served 60 new-owner requests, and ended with no daemon SSH children.
+- Local smoke, actual Linux daemon readiness/authentication/crash checks and systemd user install/enable/start/reload/SIGKILL recovery/stop/start passed (PID `902839 -> 902916`). Remote normal daemon SHA-256: `6e2e65a45d11e9a4e925067214e4d7a60ec1051b54ec2fd6c8c71cd20fc100d2`.
+
+A subsequent review found a concurrent-resolution edge: multiple status/wait
+callers can read the same ambiguous intent, and callers after the first durable
+transition can receive an unnecessary transition error. A targeted regression
+reproduces it in this commit; the following correction handles that race.
+This does not invalidate the above single-resolver measurements or make the
+unfinished event/resource/platform/review gates Complete.
