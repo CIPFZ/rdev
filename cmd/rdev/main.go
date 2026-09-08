@@ -89,32 +89,11 @@ func main() {
 		os.Exit(2)
 	}
 	if os.Getenv("RDEV_BROKER_SOCKET") != "" {
-		var brokerErr error
-		switch os.Args[1] {
-		case "ping":
-			brokerErr = brokerPing(context.Background(), os.Args[2:])
-		case "exec":
-			brokerErr = brokerExec(context.Background(), os.Args[2:])
-		case "read":
-			brokerErr = brokerRead(context.Background(), os.Args[2:])
-		case "write":
-			brokerErr = brokerWrite(context.Background(), os.Args[2:])
-		case "capability":
-			brokerErr = brokerCapability(context.Background(), os.Args[2:])
-		case "serve":
-			brokerErr = brokerServe(context.Background())
-		case "job":
-			brokerErr = brokerJob(context.Background(), os.Args[2:])
-		case "mutation":
-			brokerErr = brokerMutation(context.Background(), os.Args[2:])
-		}
-		if brokerErr != nil {
-			fmt.Fprintln(os.Stderr, brokerErr)
+		if err := runBrokerCommand(context.Background(), os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if os.Args[1] == "mutation" || os.Args[1] == "serve" || os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm" || os.Args[2] == "events")) {
-			return
-		}
+		return
 	}
 
 	c := client.New(lookupAgent)
@@ -565,7 +544,7 @@ func brokerJob(ctx context.Context, args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(resp.Job)
 	default:
-		return nil
+		return errors.New("unsupported broker job command")
 	}
 }
 
@@ -605,6 +584,7 @@ func usage() {
 
 USAGE
   rdev serve                              run as an MCP server (for Claude Code)
+  rdev broker status                      this principal's shared broker resource usage
   rdev ping    <host>
   rdev capability <host> [-refresh]
   rdev env inspect <host> [-refresh]
@@ -638,6 +618,9 @@ HOST
   "hosts add" defaults to project scope; pass -global for cross-project use.
 
 NOTES
+  With RDEV_BROKER_SOCKET set, commands use the authenticated broker. Commands
+  not yet available in shared mode fail before opening a direct connection.
+
   Everything after -- is passed as a literal argv array; no shell parses it,
   so quotes, $(...), and spaces are safe without escaping.
 

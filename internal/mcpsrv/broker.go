@@ -19,6 +19,29 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, err
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "rdev", Title: "Remote dev environment proxy", Version: Version}, nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_status", Description: "Read this principal's shared broker connections, request bytes, execution quotas, lane counts and wait observers."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.StatusSnapshot, error) {
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "status"})
+		if err != nil {
+			return nil, broker.StatusSnapshot{}, err
+		}
+		status, err := broker.ProjectStatus(resp)
+		return nil, status, err
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_list", Description: "List a remote directory through the shared broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListIn) (*mcp.CallToolResult, proto.ListResult, error) {
+		path := in.Path
+		if path == "" {
+			path = "."
+		}
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: proto.OpList, Host: in.Host, Wire: &proto.Request{Op: proto.OpList, List: &proto.ListParams{Path: path, Limit: in.Limit}}})
+		if err != nil {
+			return nil, proto.ListResult{}, err
+		}
+		if resp.Wire == nil || resp.Wire.List == nil {
+			return nil, proto.ListResult{}, errors.New("broker list returned no result")
+		}
+		return nil, *resp.Wire.List, nil
+	})
+
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_ping", Description: "Verify a remote host through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in struct {
 		Host string `json:"host"`
 	}) (*mcp.CallToolResult, proto.PingResult, error) {

@@ -869,7 +869,7 @@ accounting; it does not mark additional P5 items Complete.
 
 - [Final-code check and regressions](evidence/phase5/2026-09-09/validation-check-7026bdf.log): full check; three real ingress/event/wait/mutation runs each; 100-run broker stress and readiness smoke passed before commit.
 - [Full repository race](evidence/phase5/2026-09-09/validation-race-7026bdf.log): every package passed on the final implementation code before commit.
-- [Actual daemon race](evidence/phase5/2026-09-09/validation-remote-race-7026bdf.log): zero-subscriber history/charge lifecycle passed in 42.103 seconds; ingress pressure passed in 14.973 seconds. Race daemon SHA-256: `cec346c23eb9c6c306206cfce3ac4ed754c4ff3669f3609bb577b3f98d98e193`.
+- [Actual daemon race](evidence/phase5/2026-09-09/validation-remote-race-7026bdf.log): zero-subscriber history/charge lifecycle passed in 42.10 seconds; ingress pressure passed in 14.97 seconds. Race daemon SHA-256: `cec346c23eb9c6c306206cfce3ac4ed754c4ff3669f3609bb577b3f98d98e193`.
 - [Committed check and first QoS attempt, including failure](evidence/phase5/2026-09-09/committed-check-qos-failure-7026bdf.log): committed-artifact full check and three ingress/event runs passed. The third QoS run failed one control p95 ratio at 2.043; the first two passed. A separate full-repository build/test batch overlapped the third run. The failure is retained, not discarded.
 - [Isolated QoS and service regressions](evidence/phase5/2026-09-09/committed-qos-runtime-7026bdf.log): after all other build/test processes completed, the unchanged committed code and unchanged two-times threshold passed three consecutive 20-process QoS runs, ratios 1.297–1.443. They wrote 146462 audit records, rotated three times and reported zero drops/errors. Stress, readiness, real daemon credentials/reload/crash and actual Linux systemd installation/recovery all passed. Systemd PID changed `950298 -> 950368`; remote daemon SHA-256: `d44ca0e01426af2404d1661661e753f90e601d840bdb2830bb2a3bee0e450bba`.
 
@@ -879,3 +879,32 @@ Concurrent unrelated build/test activity is a plausible source of the observed
 Wider host-contention, mixed workload, response-allocation and independent-review
 coverage remain open. Do not overlap unrelated builds/stress with the final
 baseline-versus-bulk measurement; keep failed runs in the evidence record.
+
+
+## Exclusive shared frontend routing and scoped resource projection
+
+The CLI previously checked a subset of broker commands and then fell through to
+`client.New` for other commands. A direct before/after execution reproduced the
+problem: with a nonexistent broker socket, the old `secrets list` exited zero and
+returned a local result. The corrected frontend rejects unsupported shared
+commands before touching the standalone secret store. Unknown shared job
+subcommands now return an error instead of successful empty output.
+
+`rdev broker status` / `rdev_broker_status` project only the calling principal's
+existing scheduler, ingress and wait counters, with the policy digest. Directory
+listing now also uses the broker in both CLI and MCP. The actual-process test
+keeps eight sockets open for project A while B sees only its own connection,
+checks default-denied project/host queries, and retains the same real SSH agent.
+A frontend-only SSH/rsync trap and private project directory verify that unsupported
+sync/secret/host/state/env/job commands neither spawn direct transports nor alter
+the local host registry. The daemon itself still uses real OpenSSH.
+
+The initial corrected real frontend scenario passed in 2.075 seconds. This
+implementing-agent review closes an unintended fallback, not the outstanding
+shared sync/secret/session implementations or independent external review.
+The implementation passed full check and three real frontend/history/mutation
+runs, three retry-cancellation runs, and six lease cycles over 65 seconds.
+Changed-package race passed. Actual daemon and CLI race binaries passed the
+frontend boundary scenario in 11.41 seconds. The runtime harness accepts
+`RDEV_TEST_CLI_BINARY` to verify an explicitly built CLI artifact. Committed
+artifact validation and logs follow below.

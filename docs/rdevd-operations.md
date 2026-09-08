@@ -478,3 +478,27 @@ socket write retention; the broader response-allocation, persistence-stall,
 mixed-workload and host-capacity matrix remains under the Phase5 acceptance gate.
 `make remote-ingress` exercises real sockets and SSH with owner connection/byte
 pressure, anonymous/partial JSON, slow output and a held remote response.
+
+
+## Shared CLI routing and resource status
+
+Setting `RDEV_BROKER_SOCKET` selects the authenticated broker path for the whole
+CLI invocation. `ping`, `exec`, `read`, `ls`, `write`, `capability`, supported `job`
+commands, mutation queries and `serve` use daemon-owned state and transports.
+Unsupported shared commands fail before constructing a standalone client. The
+remaining shared sync, secret, host/session administration and state workflows
+are still incomplete; they no longer silently bypass broker policy. Local help,
+version and static support metadata remain available.
+
+With a `status` grant, `rdev broker status` and MCP `rdev_broker_status` return the
+principal's ingress usage, detached observation bytes, scheduler quotas and lane
+counts, queue timing, bulk payload bytes, wait subscribers and the policy digest.
+Other owners' connection counts and identities are excluded. Pool lifecycle and
+eviction-reason projection remain open acceptance work.
+
+`rdev ls HOST [PATH] [-limit N]` and MCP `rdev_list` require the broker's exact-host
+`list` decision. They return the remote listing, including truncation/cursor and
+operation metadata, through the shared agent. `make remote-frontends` checks
+actual CLI/MCP processes, default-deny and cross-project status, directory
+listing, and absence of SSH/rsync fallback or local registry writes for
+unsupported shared commands.
