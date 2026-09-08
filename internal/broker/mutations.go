@@ -79,7 +79,7 @@ func validateMutation(m MutationIntent) error {
 		return errors.New("invalid mutation principal or identity")
 	}
 	d, ok := proto.LookupOperation(m.Operation)
-	if !ok || d.Class != proto.ClassMutating {
+	if (!ok || d.Class != proto.ClassMutating) && !isSecretMutation(m.Operation) {
 		return errors.New("invalid mutation operation")
 	}
 	if m.Host == "" || len(m.Host) > 512 || strings.ContainsAny(m.Host, "\x00\r\n") || !validDigest(m.RequestDigest) || !validDigest(m.TargetDigest) || !validDigest(m.PolicyDigest) || !validDigest(m.ApprovalID) || m.Updated.IsZero() {

@@ -190,11 +190,13 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			continue
 		}
 		admitDone := true
+		var expandedBytes int64
 		endRequest := func() {
 			if admitDone {
 				admitDone = false
 				service.EndRequest()
 				item.release()
+				lease.Release(expandedBytes)
 			}
 		}
 		requestCtx := connCtx
@@ -226,7 +228,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			response.RequestRef = requestRef
 			return enc.Encode(response)
 		}
-		decision := service.DecideRequest(req.Owner, req.Operation, req.Host)
+		decision := service.DecideBrokerRequest(req)
 		if req.Capability != "" && req.Capability != decision.Capability {
 			decision.Allow = false
 			decision.Reason = "capability mismatch"
@@ -288,6 +290,17 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				}
 			}
 		}
+		if req.Operation == "secret.set" || req.Operation == "secret.delete" {
+			if req.OperationID == "" {
+				req.OperationID, refErr = proto.NewOperationID()
+			}
+			if refErr != nil || proto.ValidateOperationID(req.OperationID) != nil {
+				recordResult("request_rejected")
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "invalid secret mutation operation ID"})
+				endRequest()
+				continue
+			}
+		}
 		if req.Operation == "approval.create" {
 			if req.ApprovalSpec == nil {
 				recordResult("request_rejected")
@@ -318,9 +331,45 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			approvedTarget = plan.TargetDigest
 			approvedPlan = plan
 			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "approval_used", RequestDigest: plan.RequestDigest, TargetDigest: plan.TargetDigest, ApprovalID: plan.ApprovalID})
+			expandedBytes = plan.ExpandedRequestBytes()
+			if err := lease.Reserve(expandedBytes); err != nil {
+				expandedBytes = 0
+				recordResult("quota_rejected")
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				endRequest()
+				continue
+			}
+			broker.ApplyApprovedWire(&req, plan)
 		}
 		if req.Wire != nil {
 			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
+		}
+		if req.Operation == "secret.list" {
+			entries, err := service.SecretList(req)
+			result := "completed"
+			message := ""
+			if err != nil {
+				result = "dispatch_error"
+				message = err.Error()
+			}
+			recordResult(result)
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Secrets: entries})
+			endRequest()
+			continue
+		}
+		if req.Operation == "secret.set" || req.Operation == "secret.delete" {
+			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
+			mutation, err := service.DispatchSecretMutation(requestCtx, req, approvedPlan)
+			result := "completed"
+			message := ""
+			if err != nil {
+				result = "dispatch_error"
+				message = err.Error()
+			}
+			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: result})
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Mutation: mutation})
+			endRequest()
+			continue
 		}
 		if req.Operation == "pool.health" {
 			recordResult("completed")

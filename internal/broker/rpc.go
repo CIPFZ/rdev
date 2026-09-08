@@ -6,6 +6,8 @@ import (
 )
 
 type Request struct {
+	Secret          *SecretParams  `json:"secret,omitempty"`
+	OperationID     string         `json:"operation_id,omitempty"`
 	JobEvents       *JobEventQuery `json:"job_events,omitempty"`
 	MutationID      string         `json:"mutation_id,omitempty"`
 	ID              string         `json:"id"`
@@ -26,6 +28,7 @@ type Request struct {
 	Since           time.Time      `json:"since,omitempty"`
 }
 type Response struct {
+	Secrets         []SecretDescriptor `json:"secrets,omitempty"`
 	RequestRef      string             `json:"request_ref,omitempty"`
 	Pool            *PoolHealth        `json:"pool,omitempty"`
 	Ingress         *IngressSnapshot   `json:"ingress,omitempty"`

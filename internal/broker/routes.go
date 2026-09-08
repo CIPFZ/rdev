@@ -10,7 +10,15 @@ import (
 // changes or transport acquisition. A grant cannot create an absent handler or
 // turn a host-limited administration grant into global authority.
 func ValidateRoute(req Request) error {
+	if req.Secret != nil && req.Operation != "secret.set" && req.Operation != "secret.delete" && req.Operation != "secret.list" {
+		return errors.New("unexpected secret parameters")
+	}
 	switch req.Operation {
+	case "secret.set", "secret.delete", "secret.list":
+		if req.Wire != nil || req.Host == "" {
+			return errors.New("secret operation requires an exact host without wire parameters")
+		}
+		return validateSecretParams(req.Operation, req.Secret)
 	case "status", "pool.health", "audit.health", "audit_query":
 		if req.Wire != nil || req.Host != "" {
 			return errors.New("this broker query requires an unscoped local request")

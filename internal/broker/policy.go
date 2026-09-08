@@ -170,7 +170,7 @@ func CapabilityForOperation(operation string) string {
 		return "job"
 	case "sync.push", "sync.pull", "sync.delete":
 		return "sync"
-	case "secret.set", "secret.delete", "secret.use":
+	case "secret.set", "secret.delete", "secret.list", "secret.use":
 		return "secret"
 	case "fleet.plan", "fleet.execute", "fleet.approve":
 		return "fleet"
@@ -336,4 +336,23 @@ func (p *Policy) ConfigurePersistence(path string) error {
 	}
 	p.path = path
 	return nil
+}
+
+// DecideWireRequest captures execution and secret-use authorization under one
+// policy lock. A concurrent revoke cannot splice together two policy snapshots.
+func (p *Policy) DecideWireRequest(owner, operation, host string, useSecrets bool) Decision {
+	capability := CapabilityForOperation(operation)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	grants := p.grants[owner]
+	allowed := func(op, cap string) bool {
+		return grants[op] || grants[capabilityKey(cap, op)] || host != "" && grants[hostGrantKey(host, cap, op)]
+	}
+	return p.decision(allowed(operation, capability) && (!useSecrets || allowed("secret.use", "secret")), capability, host)
+}
+func (s *Service) DecideBrokerRequest(req Request) Decision {
+	if err := req.Owner.Validate(); err != nil {
+		return Decision{Reason: "invalid owner"}
+	}
+	return s.policy.DecideWireRequest(req.Owner.Key(), req.Operation, req.Host, wireUsesSecrets(req.Wire))
 }

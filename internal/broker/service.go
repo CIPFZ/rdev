@@ -22,6 +22,7 @@ type ProtocolDispatcher interface {
 // clients. Callers must share one Service instead of constructing one Client
 // per frontend process.
 type Service struct {
+	Secrets          *SecretRegistry
 	client           *client.Client
 	policy           *Policy
 	lease            *Lease
@@ -68,6 +69,7 @@ func NewService(lookup client.AgentLookup) *Service {
 	observationCtx, stopObservations := context.WithCancel(context.Background())
 	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[sharedKey]*sharedDispatch), Jobs: NewJobRegistry(), observationCtx: observationCtx, stopObservations: stopObservations}
 	s.SetReady(true)
+	s.Secrets = NewSecretRegistry(s.client.Secrets)
 	s.Mutations = NewMutationRegistry()
 	s.Events = NewJobHistory()
 	s.Ingress = NewIngress()

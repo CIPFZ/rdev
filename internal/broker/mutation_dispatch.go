@@ -13,10 +13,14 @@ import (
 func OperationReference(req Request) string {
 	id := req.MutationID
 	if req.Operation != "mutation.status" {
-		if req.Wire == nil {
+		if isSecretMutation(req.Operation) {
+			id = req.OperationID
+		} else if req.Wire == nil {
 			return ""
 		}
-		id = req.Wire.OperationID
+		if req.Wire != nil {
+			id = req.Wire.OperationID
+		}
 	}
 	if proto.ValidateOperationID(id) != nil {
 		return ""

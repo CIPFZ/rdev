@@ -585,7 +585,7 @@ Every authorized request must match an implemented local handler or a registered
 remote operation with a matching `wire.op` and nonempty host. Policy denial runs
 first; absent handlers and malformed envelopes then fail before approval use,
 state mutation or transport admission. Granting an unimplemented operation does
-not make it available. Shared sync/secret/session implementation remains open.
+not make it available. Shared sync/session and secret file-import implementation remain open.
 
 Local `status`, `pool.health`, `audit.health` and `audit_query` require an empty
 host and no wire envelope, because these queries do not filter their data by
@@ -624,7 +624,9 @@ they drain. Retry attempts accumulate in the same meter. Counters never change
 another project's traffic. The hot transport path uses atomic counters and does
 not acquire the scheduler or audit lock.
 
-Unattributable/malformed frames, bootstrap uploads/handshakes, SSH overhead and
+A parseable frame associated with a known request is counted even if later
+semantic validation rejects it. Undecodable/unattributable frames, bootstrap
+uploads/handshakes, SSH overhead and
 broker-internal startup recovery are outside these authenticated request counters.
 Counters are snapshots of bounded recent owner history; they reset on daemon
 restart or idle-history eviction and are not durable billing records. CRLF input
@@ -694,3 +696,63 @@ agent PID. `make remote-lane-traffic` additionally checks one actual read retry,
 three base/bulk setup attempts and zero borrowed dial/retry counts in the other
 project's CLI/MCP status. The complete phase/cause/host failure matrix remains
 separate acceptance work.
+
+
+## Shared principal-owned credentials
+
+In shared mode, `rdev secret set HOST NAME < value`, `rdev secret list HOST`, and
+`rdev secret delete HOST NAME` use `rdevd`. MCP `rdev_secrets` accepts `action`
+(`set`, `list`, `delete`), `host`, `name`, `value`, `approval_token` and
+`operation_id`. Values are never returned. CLI stdin is bounded at 64 KiB and
+preserves all bytes, including a final newline. Names use ASCII letters, digits,
+period, underscore and hyphen, with a 128-byte limit. Values must be valid UTF-8,
+6–65536 bytes, without NUL. This route does not read arbitrary daemon-local files.
+
+Each active value belongs to an exact authenticated client/project, configured
+host and host/session snapshot. There is no fallback to another project, another
+host, or the daemon's legacy declarative secret Store. `secret.list` returns only
+this principal's names and opaque versions for that host. `secret.set`,
+`secret.delete` and `secret.list` are separately grantable operations in capability
+`secret`; exact-host grants are supported. An execution grant alone cannot use
+credentials: exec/job requests containing `Env: {"TOKEN":"secret:token"}` also
+require `secret.use` for that owner and host in the same policy snapshot. The
+initial scope grants use of that principal's own keys on the selected host; it
+does not delegate another principal's key.
+
+Every set/delete needs an administrator-issued approval whose request file uses
+`secret: {"name":"token","value":"..."}` instead of `wire`. Delete omits the
+value. The approval binds principal, operation, target, submitted value and prior
+version. Reference-bearing exec/job approvals bind the original request and
+random credential versions. These sensitive request digests use a private HMAC
+key so audit metadata does not provide an offline credential-guessing oracle.
+Rotation before token consumption invalidates that approval; after consumption,
+the approved snapshot is frozen through queueing/dispatch. Approval caches retain
+digests only. Expansion is capped at 1 MiB and is additionally charged to that
+frontend's ingress budget until its request ends.
+
+The daemon persists credentials in `SOCKET.secrets` with mode 0600. This file
+contains plaintext values and a private digest key; protect and back it up with
+the rest of the broker's private state. Set/delete use durable mutation intents
+and support `RDEV_OPERATION_ID`, MCP `operation_id` and `mutation.status` just as
+wire mutations do. A repeated ID never silently rotates or reactivates a key.
+Atomic file replacement and directory sync precede acknowledgment. Any uncertain
+write disables secret resolution until restart. A missing credentials file after
+a recorded secret mutation blocks READY, as do malformed/null/duplicate/public/
+symlink snapshots. Restore the matching private state before restarting.
+
+Rotation/delete retire injection authority while retaining prior values solely
+for redaction. This protects a detached job's historical output across daemon
+crashes. Replacement markers contain random version IDs, without other owners'
+secret names. Startup durably retires bindings whose configured target changed;
+returning to the earlier host definition does not reactivate those bindings.
+The archive rejects new versions at 256 versions / 1 MiB per owner and
+4096 versions / 16 MiB globally; serialized state is capped at 20 MiB. It never
+automatically drops old output protection. Safe archive retirement and extended
+retention/storage-failure/upgrade matrices remain acceptance work, along with
+shared secret file imports and explicit declarative-secret principal delegation.
+
+`make remote-secrets` verifies actual CLI/MCP registration, owner/host/use-grant
+negatives, SSH environment hashes and redaction, expanded-byte accounting and
+cancel cleanup, version-bound approvals, detached job output after deletion and
+SIGKILL, mutation identity reuse, real storage obstruction, missing-state startup
+denial, target replacement/return retirement and low-sensitivity metadata.

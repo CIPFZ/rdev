@@ -1358,3 +1358,69 @@ with PID `1106842 -> 1106902`. Earlier final-code validation logs are retained:
 Review here was performed by the implementing agent. Shared secret/session/sync
 routes, mixed workload, wider failure matrices, actual macOS runtime and
 independent review remain open. No additional Complete label is assigned.
+
+
+## Principal-owned shared secret implementation and review
+
+The shared daemon now implements `secret.set`, `secret.list`, `secret.delete`
+and exact-owner/host `secret:` references for exec and job start. CLI and MCP
+frontends use the broker. There is no cross-project/host or legacy declarative
+Store fallback. Execution and explicit `secret.use` authorization share one
+policy snapshot. Local set/delete use mandatory approval and durable mutation
+IDs; request digests bind prior random versions and use a private HMAC key.
+Approved execution freezes its credential snapshot before queueing, and durable
+job identity uses the actual expanded command.
+
+The private 0600 credentials snapshot retains retired values for output
+redaction after deletion, rotation and crash. It is loaded before job recovery;
+missing state after a recorded secret mutation blocks READY. Startup retires
+changed host/session bindings durably, including an away-and-back restart test.
+No raw values or names are added to approval/audit/mutation metadata. Replacement
+markers contain opaque random versions. Credential state itself contains values
+and must be protected/backed up as documented in the operations guide.
+
+Implementing-agent review found and corrected these issues before commit:
+
+- Expanded references could exceed the original ingress charge. Expansion now
+  has a 1 MiB limit and an additional owner ingress reservation. The real test
+  holds a 64 KiB secret-bearing SSH exec, checks its charge, cancels the frontend,
+  checks release and verifies another project continues executing.
+- Retaining expanded requests in approval records would retain credential-bearing
+  payloads. Cached approvals now hold only digest plans.
+- Secret persistence initially held the read lock over I/O. Readers now retain
+  the last committed snapshot during a slow write; a stalled-writer test proves
+  another owner can resolve its key. Uncertain commits disable resolution until
+  restart.
+- Treating a missing credential snapshot as new state could lose protection for
+  historical job output. Existing secret mutation records now require its file.
+- JSON escaping can exceed a raw byte budget. Serialized archive capacity is
+  checked before storage, in addition to 256 versions / 1 MiB per owner and
+  4096 versions / 16 MiB globally. Capacity rejection leaves accepted credentials
+  usable. The control-character boundary test runs under race.
+
+Initial real tests passed environment SHA comparisons, same-name project
+isolation, use/host denial, exact value/version approval negatives, rotation and
+deletion, original-supervisor job output after SIGKILL, duplicate-ID refusal,
+actual rename obstruction/restart recovery, malformed/private-file startup and
+missing-state/target-retirement scenarios. An early runtime assertion searched
+for an unescaped `<` in JSON; correcting it for Go's `\u003c` encoding preserved
+both the positive redaction-marker and negative plaintext assertions. A scratch
+worktree initially lacked ignored embedded agent artifacts; `make agents`
+restored the prerequisite. Neither failure counts as runtime acceptance.
+
+Full batch check, all-package race, and real approval/mutation/job/wait/event
+regressions passed before the final serialized-capacity correction. Final-code
+and committed-source verification follows below. This is implementing-agent
+review; independent review is still pending. Shared file imports, declarative
+principal delegation, archive retirement, wider mixed-load/storage/upgrade cases,
+sync/session routes and macOS runtime remain open. Local mutation outcomes after
+an interrupted multi-file commit can remain ambiguous; they are retained and
+never silently replayed. No additional P5 or overall gate is marked Complete.
+
+
+Final-code targeted race passed, including serialized archive capacity. The
+actual race daemon passed secret/approval/mutation SSH regressions in 18.628
+seconds with SHA-256 `58c6c97b7ed6b22a9d46df98502607a8c8c5bdc4835084f27185e3d9066908f4`.
+This run used `GORACE=atexit_sleep_ms=0` to remove the race runtime's one-second
+exit delay from each short administrator subprocess; race detection remained
+enabled. Committed-source full check, QoS and service verification follows.

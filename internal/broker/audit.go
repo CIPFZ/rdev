@@ -207,7 +207,7 @@ func auditOperation(operation string) string {
 		return operation
 	}
 	switch operation {
-	case "job.events", "status", "doctor", "audit_query", "audit.health", "pool.health", "mutation.status", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.use", "fleet.plan", "fleet.execute", "fleet.approve":
+	case "job.events", "status", "doctor", "audit_query", "audit.health", "pool.health", "mutation.status", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.list", "secret.use", "fleet.plan", "fleet.execute", "fleet.approve":
 		return operation
 	default:
 		return "unknown"

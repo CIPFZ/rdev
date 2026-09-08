@@ -13,6 +13,7 @@ import (
 // ApprovalSpec contains the exact remote request reviewed by the administrator.
 // Client hints such as Risk and Target are deliberately absent.
 type ApprovalSpec struct {
+	Secret    *SecretParams  `json:"secret,omitempty"`
 	Owner     Owner          `json:"owner"`
 	Operation string         `json:"operation"`
 	Host      string         `json:"host"`
@@ -21,6 +22,7 @@ type ApprovalSpec struct {
 }
 
 type ApprovalPlan struct {
+	resolvedWire  *proto.Request
 	ApprovalID    string `json:"-"`
 	Owner         Owner  `json:"owner"`
 	Operation     string `json:"operation"`
@@ -39,7 +41,7 @@ func RequiresApproval(req Request) bool {
 		}
 	}
 	switch req.Operation {
-	case "sync.push", "sync.delete", "secret.delete", "fleet.execute":
+	case "sync.push", "sync.delete", "secret.set", "secret.delete", "fleet.execute":
 		return true
 	}
 	return req.Risk
@@ -51,6 +53,23 @@ func (s *Service) PlanApproval(spec ApprovalSpec, decision Decision) (ApprovalPl
 	}
 	if !decision.Allow {
 		return ApprovalPlan{}, errors.New("approval target is not authorized")
+	}
+	if isSecretMutation(spec.Operation) {
+		if spec.Wire != nil || spec.Host == "" {
+			return ApprovalPlan{}, errors.New("secret approval requires an exact host and parameters")
+		}
+		target, err := s.client.ProtocolTargetIdentity(spec.Host)
+		if err != nil {
+			return ApprovalPlan{}, errors.New("secret host unavailable")
+		}
+		digest, err := s.Secrets.Plan(spec.Owner.Key(), spec.Host, target, spec.Operation, spec.Secret)
+		if err != nil {
+			return ApprovalPlan{}, err
+		}
+		return ApprovalPlan{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, TargetDigest: target, RequestDigest: digest, PolicyDigest: decision.Digest}, nil
+	}
+	if spec.Secret != nil {
+		return ApprovalPlan{}, errors.New("unexpected secret approval parameters")
 	}
 	if spec.Wire == nil || spec.Wire.Op != spec.Operation || spec.Host == "" {
 		return ApprovalPlan{}, errors.New("approval requires an exact remote wire request")
@@ -79,12 +98,21 @@ func (s *Service) PlanApproval(spec ApprovalSpec, decision Decision) (ApprovalPl
 	if err != nil {
 		return ApprovalPlan{}, err
 	}
+	if wireUsesSecrets(spec.Wire) {
+		bound := *spec.Wire
+		bound.ClientID, bound.ProjectID = spec.Owner.ClientID, spec.Owner.ProjectID
+		resolved, digest, err := s.Secrets.Resolve(spec.Owner.Key(), spec.Host, target, &bound)
+		if err != nil {
+			return ApprovalPlan{}, err
+		}
+		return ApprovalPlan{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, TargetDigest: target, RequestDigest: digest, PolicyDigest: decision.Digest, resolvedWire: resolved}, nil
+	}
 	digest := sha256.Sum256(payload)
 	return ApprovalPlan{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, TargetDigest: target, RequestDigest: hex.EncodeToString(digest[:]), PolicyDigest: decision.Digest}, nil
 }
 
 func (s *Service) IssueApproval(spec ApprovalSpec) (Approval, error) {
-	decision := s.DecideRequest(spec.Owner, spec.Operation, spec.Host)
+	decision := s.DecideBrokerRequest(Request{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, Wire: spec.Wire})
 	plan, err := s.PlanApproval(spec, decision)
 	if err != nil {
 		return Approval{}, err
@@ -98,7 +126,11 @@ func (s *Service) IssueApproval(spec ApprovalSpec) (Approval, error) {
 	if err != nil {
 		return Approval{}, err
 	}
-	approval.Plan = &plan
+	// Retained approvals contain digests only. Expanded credentials belong
+	// solely to the request that eventually consumes the token.
+	storedPlan := plan
+	storedPlan.resolvedWire = nil
+	approval.Plan = &storedPlan
 	s.approvalMu.Lock()
 	defer s.approvalMu.Unlock()
 	now := time.Now()
@@ -115,7 +147,7 @@ func (s *Service) IssueApproval(spec ApprovalSpec) (Approval, error) {
 }
 
 func (s *Service) AuthorizeApproval(req Request, decision Decision) (ApprovalPlan, error) {
-	plan, err := s.PlanApproval(ApprovalSpec{Owner: req.Owner, Operation: req.Operation, Host: req.Host, Wire: req.Wire}, decision)
+	plan, err := s.PlanApproval(ApprovalSpec{Owner: req.Owner, Operation: req.Operation, Host: req.Host, Wire: req.Wire, Secret: req.Secret}, decision)
 	if err != nil {
 		return ApprovalPlan{}, err
 	}
@@ -135,4 +167,20 @@ func (s *Service) AuthorizeApproval(req Request, decision Decision) (ApprovalPla
 func ApprovalReference(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// ApplyApprovedWire freezes the validated secret snapshot before admission.
+// Later rotation never changes the already approved command or its job digest.
+func ApplyApprovedWire(req *Request, plan ApprovalPlan) {
+	if plan.resolvedWire != nil {
+		req.Wire = plan.resolvedWire
+	}
+}
+
+func (p ApprovalPlan) ExpandedRequestBytes() int64 {
+	if p.resolvedWire == nil {
+		return 0
+	}
+	data, _ := json.Marshal(p.resolvedWire)
+	return int64(len(data))
 }

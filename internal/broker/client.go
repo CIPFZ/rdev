@@ -72,6 +72,26 @@ func (c *Client) DoContext(ctx context.Context, req Request) (result Response, c
 	if req.Approval == "" {
 		req.Approval = os.Getenv("RDEV_APPROVAL_TOKEN")
 	}
+	if isSecretMutation(req.Operation) {
+		if req.OperationID == "" {
+			req.OperationID = os.Getenv("RDEV_OPERATION_ID")
+		}
+		if req.OperationID == "" {
+			var err error
+			req.OperationID, err = proto.NewOperationID()
+			if err != nil {
+				return Response{}, err
+			}
+		}
+		if proto.ValidateOperationID(req.OperationID) != nil {
+			return Response{}, fmt.Errorf("invalid mutation operation ID")
+		}
+		defer func() {
+			if callErr != nil {
+				callErr = fmt.Errorf("mutation %s: %w", req.OperationID, callErr)
+			}
+		}()
+	}
 	if IsWireMutation(req) {
 		wire := *req.Wire
 		if wire.OperationID == "" {

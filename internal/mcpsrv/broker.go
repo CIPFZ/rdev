@@ -19,6 +19,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, err
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "rdev", Title: "Remote dev environment proxy", Version: Version}, nil)
+	registerBrokerSecrets(s, socket, owner)
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_pool", Description: "Read global shared connection capacity, active leases and eviction reasons. Requires a separate pool.health grant."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.PoolHealth, error) {
 		r, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "pool.health"})
 		if err != nil {
@@ -277,4 +278,29 @@ func callBroker(ctx context.Context, socket string, owner broker.Owner, req brok
 		}
 	}
 	return resp, nil
+}
+
+func registerBrokerSecrets(s *mcp.Server, socket string, owner broker.Owner) {
+	type secretInput struct {
+		Action        string `json:"action" jsonschema:"set, delete or list"`
+		Host          string `json:"host"`
+		Name          string `json:"name,omitempty"`
+		Value         string `json:"value,omitempty"`
+		ApprovalToken string `json:"approval_token,omitempty"`
+		OperationID   string `json:"operation_id,omitempty"`
+	}
+	type secretOutput struct {
+		Secrets  []broker.SecretDescriptor `json:"secrets,omitempty"`
+		Mutation *broker.MutationIntent    `json:"mutation,omitempty"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_secrets", Description: "Manage this principal's host-scoped credentials in rdevd. Values are never returned. Set/delete require exact approval; exec/job secret references require secret.use."}, func(ctx context.Context, _ *mcp.CallToolRequest, in secretInput) (*mcp.CallToolResult, secretOutput, error) {
+		if in.Action != "set" && in.Action != "delete" && in.Action != "list" {
+			return nil, secretOutput{}, errors.New("unknown secret action")
+		}
+		r, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Host: in.Host, Operation: "secret." + in.Action, Secret: &broker.SecretParams{Name: in.Name, Value: in.Value}, Approval: in.ApprovalToken, OperationID: in.OperationID})
+		if err != nil {
+			return nil, secretOutput{}, err
+		}
+		return nil, secretOutput{Secrets: r.Secrets, Mutation: r.Mutation}, nil
+	})
 }

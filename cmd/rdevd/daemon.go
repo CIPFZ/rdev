@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -140,6 +141,9 @@ func runDaemon(args []string) error {
 	}
 	if err := service.Mutations.ConfigurePersistence(*socket + ".mutations"); err != nil {
 		return fmt.Errorf("mutation registry load failed: %w", err)
+	}
+	if err := service.ConfigureSecrets(*socket + ".secrets"); err != nil {
+		return errors.New("secret registry load failed")
 	}
 	if err := service.Events.ConfigurePersistence(*socket + ".events"); err != nil {
 		return fmt.Errorf("job event history load failed: %w", err)

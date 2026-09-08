@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 
 	"github.com/CIPFZ/rdev/internal/broker"
@@ -18,6 +19,8 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		return errors.New("broker command required")
 	}
 	switch args[0] {
+	case "secret":
+		return brokerSecret(ctx, args[1:])
 	case "ping":
 		return brokerPing(ctx, args[1:])
 	case "exec":
@@ -116,4 +119,53 @@ func brokerList(ctx context.Context, args []string) error {
 		return errors.New("broker list returned no result")
 	}
 	return json.NewEncoder(os.Stdout).Encode(r.List)
+}
+
+// Secret set reads bounded stdin, keeping values out of argv and stdout.
+func brokerSecret(ctx context.Context, args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: rdev secret list HOST | set HOST NAME < value | delete HOST NAME")
+	}
+	req := broker.Request{Operation: "secret." + args[0], Host: args[1], Secret: &broker.SecretParams{}}
+	switch args[0] {
+	case "list":
+		if len(args) != 2 {
+			return errors.New("usage: rdev secret list HOST")
+		}
+	case "set", "delete":
+		if len(args) != 3 {
+			return errors.New("usage: rdev secret set|delete HOST NAME")
+		}
+		req.Secret.Name = args[2]
+		if args[0] == "set" {
+			b, err := io.ReadAll(io.LimitReader(os.Stdin, 65537))
+			if err != nil || len(b) > 65536 {
+				return errors.New("secret input unreadable or too large")
+			}
+			req.Secret.Value = string(b)
+		}
+	default:
+		return errors.New("unknown secret action")
+	}
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	resp, err := c.DoContext(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return errors.New(resp.Error)
+	}
+	if args[0] == "list" {
+		entries := resp.Secrets
+		if entries == nil {
+			entries = []broker.SecretDescriptor{}
+		}
+		return json.NewEncoder(os.Stdout).Encode(entries)
+	}
+	return json.NewEncoder(os.Stdout).Encode(resp.Mutation)
 }
