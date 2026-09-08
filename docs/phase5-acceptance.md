@@ -128,3 +128,9 @@ initiator/follower SIGKILL, owner isolation, shared terminal operation ID/tail,
 SIGHUP and observation shutdown preserving the remote supervisor. Live wait
 semantics now have runtime evidence; durable event replay, pre-ACK mutation
 recovery and broader Phase5 gates remain In progress.
+
+
+Replay digest follow-up adds the previously omitted state dry_run and capability
+refresh controls to remote operation identity. `make remote-replay-digest` has
+three real SSH substitution negatives with no state manifest creation. Stable
+IDs across broker recovery and durable mutation intents remain unfinished.

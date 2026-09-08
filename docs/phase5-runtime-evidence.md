@@ -607,3 +607,21 @@ preserve TERM output`).
 Durable job event history, bounded replay retention, pre-ACK mutation intents,
 all mutation shutdown windows and the remaining mixed workload/platform/review
 gates remain incomplete. Passing live fan-out does not close those requirements.
+
+
+## Replay digest semantic-control correction
+
+The mutation-intent audit found that `CanonicalRequestDigest` omitted the
+request's `State` and `Capability` fields. A reused operation ID could therefore
+select a cached answer with different dry_run or refresh semantics. Both fields
+now participate in the digest; targeted negative tests cover migrate/repair
+preview-versus-apply and capability refresh.
+
+`make remote-replay-digest` deploys the actual agent through the broker, then
+starts another actual agent in a separate test state directory over OpenSSH.
+It sends stable operation IDs directly to the remote cache and asserts
+`request.operation_id_conflict` for state_migrate/state_repair dry_run changes
+and capability refresh substitution. No manifest may be created. All three
+working-tree runs passed. This direct-agent test intentionally avoids the local
+Client's currently regenerated operation IDs, so it proves the remote digest
+boundary without claiming durable broker mutation-intent recovery.

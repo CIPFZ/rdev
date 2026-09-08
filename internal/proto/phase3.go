@@ -709,21 +709,24 @@ func CanonicalRequestDigest(request *Request) (string, error) {
 		return "", err
 	}
 	canonical := struct {
-		Op                string         `json:"op"`
-		DeadlineUnixMilli int64          `json:"deadline_unix_milli,omitempty"`
-		StreamWindowBytes int64          `json:"stream_window_bytes,omitempty"`
-		Hello             *HelloParams   `json:"hello,omitempty"`
-		Cancel            *CancelParams  `json:"cancel,omitempty"`
-		Exec              *ExecParams    `json:"exec,omitempty"`
-		Read              *ReadParams    `json:"read,omitempty"`
-		Cat               *WriteParams   `json:"write,omitempty"`
-		Job               *JobParams     `json:"job,omitempty"`
-		List              *ListParams    `json:"list,omitempty"`
-		Storage           *StorageParams `json:"storage,omitempty"`
+		Op                string            `json:"op"`
+		DeadlineUnixMilli int64             `json:"deadline_unix_milli,omitempty"`
+		StreamWindowBytes int64             `json:"stream_window_bytes,omitempty"`
+		Hello             *HelloParams      `json:"hello,omitempty"`
+		Cancel            *CancelParams     `json:"cancel,omitempty"`
+		Exec              *ExecParams       `json:"exec,omitempty"`
+		Read              *ReadParams       `json:"read,omitempty"`
+		Cat               *WriteParams      `json:"write,omitempty"`
+		Job               *JobParams        `json:"job,omitempty"`
+		List              *ListParams       `json:"list,omitempty"`
+		Storage           *StorageParams    `json:"storage,omitempty"`
+		State             *StateParams      `json:"state,omitempty"`
+		Capability        *CapabilityParams `json:"capability,omitempty"`
 	}{
 		Op: request.Op, DeadlineUnixMilli: request.DeadlineUnixMilli, StreamWindowBytes: request.StreamWindowBytes,
 		Hello: request.Hello, Cancel: request.Cancel, Exec: request.Exec,
 		Read: request.Read, Cat: request.Cat, Job: request.Job, List: request.List, Storage: request.Storage,
+		State: request.State, Capability: request.Capability,
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {

@@ -308,3 +308,28 @@ func TestCanonicalRequestDigestIgnoresTransportIdentityButBindsSemantics(t *test
 		t.Fatal("unknown operation was digested instead of failing closed")
 	}
 }
+
+func TestCanonicalRequestDigestBindsStateDryRunAndCapabilityRefresh(t *testing.T) {
+	for _, op := range []string{OpStateMigrate, OpStateRepair, OpCapabilityProbe} {
+		a := &Request{Op: op}
+		b := &Request{Op: op}
+		if op == OpCapabilityProbe {
+			a.Capability = &CapabilityParams{}
+			b.Capability = &CapabilityParams{Refresh: true}
+		} else {
+			a.State = &StateParams{DryRun: true}
+			b.State = &StateParams{DryRun: false}
+		}
+		first, err := CanonicalRequestDigest(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := CanonicalRequestDigest(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == second {
+			t.Fatalf("%s semantic controls missing from replay digest", op)
+		}
+	}
+}
