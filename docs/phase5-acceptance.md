@@ -12,7 +12,7 @@ runtime path is exercised.
 | P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch; real CLI job/file/capability process tests through Unix broker; broker-backed `rdev serve` MCP ping/exec/read/write/capability and full job start/list/status/logs/stop/wait/rm tools with registration test; pipelined request test; `make stress-broker` passed 20-client wire test 100 times, with an additional 1000-run stress pass; Linux amd64 binary remote smoke passed; `make remote-session-benchmark` ran 3 x 500 real SSH requests from 20 independent client processes, with one SSH child, one remote PID and 20 distinct remote principal IDs | In progress | Real 20-process / one-agent benchmark now passes; shared CLI now rejects unsupported routes and directory listing uses the broker; full sync/secret/session routing and independent review remain open |
 | P5-04 | Owner validation, handshake-declared and connection-level owner binding, wire client/project binding, persisted job owner, required daemon authentication by default, 0600 key provisioning, expiring HMAC token bound to owner identity, live SIGHUP revocation, and real daemon credential lifecycle tests | In progress | Credential lifecycle and distinct remote client/project identities now have process evidence; complete owner/secret/host permissions remain open |
 | P5-05 | Per-connection context cancellation, broker frontend `DoContext` cancellation that closes only the local socket, shared client pool, disconnect integration test, transport cancellation/late-frame tests, full race test, and `make remote-lifecycle` real daemon/OpenSSH retry cancellation | In progress | Real SSH retry barrier, frontend context cancellation, SIGKILL and other-owner exec preservation now pass; independent review and shared job lifecycle integration remain |
-| P5-06 | Atomic fair admission with separate global/host/owner execution and queue limits, reserved control capacity, cancellable queued work and owner-only status snapshots; real 20-process remote bulk overload and owner SIGKILL tests | In progress | Remote file-I/O owner pressure now has runtime evidence; frontend ingress budgets now implemented with targeted real pressure coverage; broader exec/job/sync pressure, response allocations, active-host saturation and warm-pool capacity remain |
+| P5-06 | Atomic fair admission with separate global/host/owner execution and queue limits, reserved control capacity, cancellable queued work and owner-only status snapshots; real 20-process remote bulk overload and owner SIGKILL tests | In progress | Remote file-I/O owner pressure now has runtime evidence; frontend ingress budgets now implemented with targeted real pressure coverage; warm pool now has an initial real 100-alias capacity/LRU/control/exec/reload test; broader exec/job/sync pressure, response allocations and active-host saturation remain |
 | P5-07 | Eligible-owner weighted scheduling, removal of empty/canceled queues, live weight changes for existing backlog; real continuously queued SSH file reads with 3:1 weights reversed to 1:3 by SIGHUP | In progress | Remote weighted file-I/O evidence passes; mixed long exec/job wait/status/sync and independent review remain |
 | P5-08 | Reserved control handlers/queues, dedicated on-demand bulk transport, actual payload byte pacing, and real baseline-versus-bulk control p95 assertions in `make remote-qos` | In progress | Committed three-run real 20-process SLO passed (ratios 1.27–1.49); wider payload/job/sync/streaming and independent review remain |
 | P5-09 | Bounded owner-scoped wait coalescing with independently canceled subscribers and observation leases; real 20-process wait test covers initiator/follower SIGKILL, reconnect, SIGHUP, shared terminal operation ID/tail and prompt SIGTERM observation cancellation; private bounded event history persists state changes in the observation worker, including zero-subscriber completion, and exposes job.events plus CLI/MCP cursor replay | In progress | Owner-scoped durable metadata history and CLI/MCP cursor replay now have initial real zero-subscriber/crash/removal/storage-failure evidence; full push streaming, extended retention pressure and independent review remain |
@@ -48,7 +48,7 @@ prove their runtime invariants. No Phase5-wide Complete claim is made.
 | No starvation under long exec/job wait/status/sync | In-memory queue/lane tests | Real mixed remote I/O and fair admission required |
 | Bulk transport closes after idle TTL | Real dedicated bulk/base SSH processes during remote I/O, active bulk preservation, one-second idle TTL plus five-second sweep, same base agent retained | Runtime passed on Linux; independent review and broader host/payload matrix remain |
 | Crash/restart never duplicates mutation | Private persist-before-dispatch intent registry; real pre-ACK remote job and append SIGKILL, stable-ID conflict/replay refusal, fresh-agent job tombstones and original-owner recovery | Wire job/write crash windows now have runtime evidence; remaining shared routes, retirement/upgrade matrix and independent review remain |
-| status/doctor exposes pool, quotas, queue, lane bytes and eviction reasons | Authenticated owner-only scheduler snapshot, queue wait and file payload byte counters; separately granted audit sink health | CLI/MCP now project owner scheduler/ingress/wait usage; pool lifecycle/reasons and complete lane-byte evidence remain |
+| status/doctor exposes pool, quotas, queue, lane bytes and eviction reasons | Authenticated owner-only scheduler snapshot, queue wait and file payload byte counters; separately granted audit sink health | CLI/MCP now project owner scheduler/ingress/wait usage; separately authorized CLI/MCP warm capacity/lease/closing/eviction snapshots now have initial runtime evidence; complete lane bytes, dial/failure reasons and independent review remain |
 | Unauthorized host/secret/job/Fleet use denied | Actual daemon authentication and default-deny process tests | Exact-host/project boundaries and capability-substitution negatives now pass; granted-owner job status/logs/wait/stop/rm and scoped pagination negatives now pass; complete secret/Fleet resource isolation remains |
 | Destructive approval binds exact target snapshot and digest | Real SSH mandatory write approval, owner/host/parameter substitution, expiry/replay/policy-change/restart negatives and audit correlation | Wire runtime passed; remaining shared mutation routes and independent review still open |
 | Reload/upgrade/crash preserve detached background jobs | Actual daemon reload/SIGKILL/service restart lifecycle | Real acknowledged and pre-ACK detached jobs survive SIGKILL/SSH outage; live waits survive reload and cancel on shutdown; complete upgrade/drain failure matrix remains |
@@ -292,3 +292,42 @@ subsequent clean restarts. Full repository race and actual daemon race continuit
 also passed. The runtime evidence record links all logs and the artifact digest.
 Full retention/storage-failure/upgrade coverage and independent review remain;
 Phase5 and the Multi Agent Gate remain In progress.
+
+
+## Warm pool admission and lifecycle follow-up
+
+The broker now reserves bounded host slots before allocating scheduler workers.
+Cold requests retain owner quotas and fair queue positions; canceled requests
+release demand without touching another owner's active transport. Idle LRU,
+capacity reload, warm TTL and final-client cleanup preserve active host leases,
+including independently running shared observations. Detached SSH cleanup remains
+charged to the host; bulk cleanup no longer blocks the daemon signal/reload loop.
+Global pool health has separate CLI/MCP authorization and host-scoped health
+requests cannot expose global data.
+
+The initial 100-alias actual daemon/OpenSSH run found a control-worker admission
+defect in the first implementation; moving reservation into scheduler eligibility
+fixed that reproduced failure. The revised scenario passed capacity/control/exec,
+reload and TTL behavior, with repeated frontend and race tests. Full batch and
+committed-artifact logs, including zero-subscriber wait coverage, follow in the
+runtime evidence record. This is implementing-agent review, not independent
+external review. Full mixed sync/exec/job load, multi-machine recovery, remaining
+shared secret/session routes and macOS runtime still prevent Complete status.
+
+
+Concurrent warm-pool/mutation tests exposed a failure-injection wrapper defect:
+stdout EOF was incorrectly treated as permission to terminate OpenSSH before its
+exit. The wrapper now waits for the real result with bounded cleanup, and a
+pipe/process regression preserves both exit 0 and exit 7. Native OpenSSH passed
+three paired full-master and probe-to-install saturation scenarios without
+changed transport retry behavior. Corrected overlap and committed evidence follow
+in the runtime record; Complete status remains withheld.
+
+
+The final warm-pool production code passed full check/race and a 97.02-second
+actual daemon/CLI race suite covering pool, detached observation, frontend
+permissions and native mux saturation. Ten mutation crash/recovery tests passed
+concurrently after the EOF wrapper correction. The runtime record separates this
+pre-commit validation from the subsequent committed-artifact gate and preserves
+the failed-wrapper diagnosis. Full mixed workload, remaining shared routes,
+platform and independent review work are still open.

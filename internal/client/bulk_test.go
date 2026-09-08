@@ -141,3 +141,40 @@ func TestBulkUsesInitializedSecretsAndExactApprovedTarget(t *testing.T) {
 		t.Fatal("changed approved target dialed before rejection")
 	}
 }
+
+func TestHostPoolDetachCannotCloseReplacementOrAnotherHost(t *testing.T) {
+	c := newTestClient()
+	defer c.Close()
+	var conns []*fakeRemoteConn
+	c.dial = func(_ context.Context, h transport.Host, _ AgentLookup) (remoteConnection, error) {
+		conn := &fakeRemoteConn{host: h}
+		conns = append(conns, conn)
+		return conn, nil
+	}
+	_, _, release, err := c.leasedBulkConn(t.Context(), "u@a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	_, _, other, err := c.leasedConnForTarget(t.Context(), "u@b", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other()
+	cleanup := c.DetachHostConnections("u@a")
+	_, _, fresh, err := c.leasedBulkConn(t.Context(), "u@a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh()
+	cleanup()
+	if len(conns) != 5 || !conns[0].closed || !conns[1].closed || conns[2].closed || conns[3].closed || conns[4].closed {
+		t.Fatal("detached cleanup crossed host/generation boundary")
+	}
+	if c.ConnectionSecurity("u@a").State != observe.SecurityReady {
+		t.Fatal("old cleanup replaced fresh security state")
+	}
+	if base, bulk := c.PoolTransportCounts(); base != 2 || bulk != 1 {
+		t.Fatal("pool counts include detached objects")
+	}
+}

@@ -2255,6 +2255,33 @@ func (c *Client) disconnectWithStatus(hostName string, status ConnectionSecurity
 	return c.detachAndCloseConnection(hostName, conn, status)
 }
 
+// DetachHostConnections removes only the currently published host generations.
+// The caller must prevent new host leases until detachment is complete. Cleanup
+// never looks up the alias again, so it cannot close a later replacement.
+func (c *Client) DetachHostConnections(host string) func() {
+	c.mu.Lock()
+	base, hasBase := c.conns[host]
+	bulk := c.bulkConns[host]
+	delete(c.conns, host)
+	delete(c.bulkConns, host)
+	c.mu.Unlock()
+	return func() {
+		if bulk != nil {
+			_ = bulk.pooled.conn.Close()
+		}
+		if hasBase {
+			c.closeDetachedConnection(host, base, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: base.generation})
+		}
+	}
+}
+
+// PoolTransportCounts reports retained transport objects without host identities.
+func (c *Client) PoolTransportCounts() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.conns), len(c.bulkConns)
+}
+
 // Close tears down all pooled connections.
 func (c *Client) Close() {
 	c.DetachConnections()()

@@ -8,6 +8,8 @@ import (
 )
 
 type Config struct {
+	MaxWarmHosts int            `json:"max_warm_hosts,omitempty"`
+	WarmIdleTTL  time.Duration  `json:"warm_idle_ttl,omitempty"`
 	BulkIdleTTL  time.Duration  `json:"bulk_idle_ttl,omitempty"`
 	QoS          QoSConfig      `json:"qos,omitempty"`
 	MaxHosts     int            `json:"max_hosts"`
@@ -15,7 +17,26 @@ type Config struct {
 	OwnerWeights map[string]int `json:"owner_weights,omitempty"`
 }
 
+func (c Config) warmLimit() int {
+	if c.MaxWarmHosts == 0 {
+		return 16
+	}
+	return c.MaxWarmHosts
+}
+func (c Config) warmTTL() time.Duration {
+	if c.WarmIdleTTL == 0 {
+		return 5 * time.Minute
+	}
+	return c.WarmIdleTTL
+}
+
 func (c Config) Validate() error {
+	if c.MaxWarmHosts < 0 || c.MaxWarmHosts > 1024 {
+		return errors.New("max_warm_hosts must be from 1 to 1024, or zero for default")
+	}
+	if c.WarmIdleTTL < 0 {
+		return errors.New("warm_idle_ttl must be nonnegative")
+	}
 	if c.MaxHosts < 1 {
 		return errors.New("max_hosts must be positive")
 	}

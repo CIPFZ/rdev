@@ -80,6 +80,7 @@ type SchedulerSnapshot struct {
 }
 
 type scheduledItem struct {
+	releaseHost func()
 	ctx         context.Context
 	cancel      context.CancelFunc
 	owner, host string
@@ -100,9 +101,10 @@ type ownerStats struct {
 
 // Scheduler selects only eligible work and reserves quota atomically with
 // dequeue. No worker is occupied waiting for someone else's quota or lane.
-// Every state change schedules directly under mu: there are no wake tokens to
-// lose or to deliver to an ineligible waiter.
+// Quota changes schedule directly under mu; asynchronous pool cleanup signals
+// a bounded notification that rechecks the same queues under mu.
 type Scheduler struct {
+	pool       *HostPool
 	bulkReady  time.Time
 	bulkTimer  *time.Timer
 	mu         sync.Mutex
@@ -127,6 +129,25 @@ var laneLimits = map[Lane]int{LaneControl: 2, LaneExec: 8, LaneBulk: 1}
 func NewScheduler(c QoSConfig, maxHosts int) *Scheduler {
 	return &Scheduler{limits: c.effective(), maxHosts: maxHosts, weights: make(map[string]int), queues: map[Lane]*FairQueue{LaneControl: NewFairQueue(), LaneExec: NewFairQueue(), LaneBulk: NewFairQueue()}, lanes: make(map[Lane]schedulerCount), owners: make(map[string]schedulerCount), hosts: make(map[string]schedulerCount), ownerLanes: make(map[string]map[Lane]WorkCount), running: make(map[*scheduledItem]bool), stats: make(map[string]ownerStats), done: make(chan struct{})}
 }
+
+// SetHostPool is startup-only. Notifications are level-triggered: the queued
+// work is rechecked under the scheduler lock, and a pending wake is sufficient.
+func (s *Scheduler) SetHostPool(p *HostPool) {
+	s.pool = p
+	go func() {
+		for {
+			select {
+			case <-p.wake:
+				s.mu.Lock()
+				s.scheduleLocked()
+				s.mu.Unlock()
+			case <-s.done:
+				return
+			}
+		}
+	}()
+}
+
 func (s *Scheduler) Configure(c QoSConfig, maxHosts int, weights map[string]int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -239,6 +260,9 @@ func adjustCount(c schedulerCount, item *scheduledItem, active, queued int) sche
 	return c
 }
 func (s *Scheduler) changeLocked(item *scheduledItem, active, queued int) {
+	if s.pool != nil && queued != 0 {
+		s.pool.Demand(item.host, queued)
+	}
 	s.total = adjustCount(s.total, item, active, queued)
 	s.lanes[item.lane] = adjustCount(s.lanes[item.lane], item, active, queued)
 	s.owners[item.owner] = adjustCount(s.owners[item.owner], item, active, queued)
@@ -277,10 +301,20 @@ func (s *Scheduler) eligibleLocked(item *scheduledItem) bool {
 		}
 	}
 	if item.lane == LaneControl {
-		// A single owner cannot monopolize both reserved control workers.
-		return s.ownerLanes[item.owner][LaneControl].Active < 1
+		if s.ownerLanes[item.owner][LaneControl].Active >= 1 {
+			return false
+		}
+	} else if !(s.total.nonControlActive < s.limits.MaxActive-2 && host.nonControlActive < s.limits.PerHost-2 && owner.nonControlActive < s.limits.PerOwner-1) {
+		return false
 	}
-	return s.total.nonControlActive < s.limits.MaxActive-2 && host.nonControlActive < s.limits.PerHost-2 && owner.nonControlActive < s.limits.PerOwner-1
+	if s.pool != nil {
+		release, ok := s.pool.TryAcquire(item.host, item.lane)
+		if !ok {
+			return false
+		}
+		item.releaseHost = release
+	}
+	return true
 }
 func (s *Scheduler) scheduleLocked() {
 	if s.closed {
@@ -330,9 +364,16 @@ func (s *Scheduler) run(item *scheduledItem) {
 	var resp *proto.Response
 	err := item.ctx.Err()
 	if err == nil {
-		resp, err = item.fn(item.ctx)
+		ctx := item.ctx
+		if s.pool != nil {
+			ctx = context.WithValue(ctx, hostPoolLeaseKey{}, hostPoolBinding{pool: s.pool, host: item.host})
+		}
+		resp, err = item.fn(ctx)
 	}
 	item.cancel()
+	if item.releaseHost != nil {
+		item.releaseHost()
+	}
 	s.mu.Lock()
 	if item.lane == LaneBulk && resp != nil {
 		var payload uint64

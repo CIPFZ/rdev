@@ -23,3 +23,14 @@ func ProjectStatus(r Response) (StatusSnapshot, error) {
 	}
 	return StatusSnapshot{PolicyDigest: r.PolicyDigest, Ingress: *r.Ingress, Scheduler: *r.Scheduler, SharedWaits: *r.SharedWaits}, nil
 }
+
+// ProjectPoolHealth projects only an explicitly authorized administrative reply.
+func ProjectPoolHealth(r Response) (PoolHealth, error) {
+	if !r.OK {
+		return PoolHealth{}, errors.New("broker pool health denied")
+	}
+	if r.Pool == nil {
+		return PoolHealth{}, errors.New("broker returned no pool health")
+	}
+	return *r.Pool, nil
+}

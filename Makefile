@@ -17,7 +17,7 @@ COMMIT      := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
 STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-approval remote-qos remote-ingress remote-frontends remote-audit-continuity remote-audit-soak remote-audit-upgrade stress-broker
+.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-approval remote-qos remote-ingress remote-frontends remote-warm-pool remote-mux-capacity remote-audit-continuity remote-audit-soak remote-audit-upgrade stress-broker
 
 all: agents build
 
@@ -143,6 +143,12 @@ remote-audit-soak: agents
 
 remote-audit-continuity: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerAuditContinuity$$' -count=3 -timeout=3m -v
+
+remote-mux-capacity: agents
+	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerSaturatedControlMaster$$' -count=3 -timeout=5m -v
+
+remote-warm-pool: agents
+	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerWarmPool$$' -count=1 -timeout=15m -v
 
 remote-frontends: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerFrontendBoundary$$' -count=3 -timeout=3m -v

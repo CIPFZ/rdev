@@ -40,8 +40,11 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		}
 		return brokerServe(ctx)
 	case "broker":
+		if len(args) == 3 && args[1] == "status" && args[2] == "--pool" {
+			return brokerPoolStatus(ctx)
+		}
 		if len(args) != 2 || args[1] != "status" {
-			return errors.New("usage: rdev broker status")
+			return errors.New("usage: rdev broker status [--pool]")
 		}
 		return brokerStatus(ctx)
 	case "support":
@@ -55,6 +58,24 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 	default:
 		return errors.New("command is not available in shared broker mode")
 	}
+}
+
+func brokerPoolStatus(ctx context.Context) error {
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	r, err := c.DoContext(ctx, broker.Request{Operation: "pool.health"})
+	if err != nil {
+		return err
+	}
+	health, err := broker.ProjectPoolHealth(r)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(health)
 }
 
 func brokerStatus(ctx context.Context) error {

@@ -19,6 +19,14 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, err
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "rdev", Title: "Remote dev environment proxy", Version: Version}, nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_pool", Description: "Read global shared connection capacity, active leases and eviction reasons. Requires a separate pool.health grant."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.PoolHealth, error) {
+		r, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "pool.health"})
+		if err != nil {
+			return nil, broker.PoolHealth{}, err
+		}
+		health, err := broker.ProjectPoolHealth(r)
+		return nil, health, err
+	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_status", Description: "Read this principal's shared broker connections, request bytes, execution quotas, lane counts and wait observers."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.StatusSnapshot, error) {
 		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "status"})
 		if err != nil {

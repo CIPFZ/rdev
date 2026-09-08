@@ -995,3 +995,90 @@ stall/power-loss/upgrade cases, remaining route correlation and independent
 external review remain open; P5-14 and Phase5 remain In progress. Continuity marks
 possible loss rather than identifying an exact missing-event count, and segment
 seals do not provide tamper-proof protection against the same OS user.
+
+
+## Bounded warm host admission and administrative pool health
+
+The new host-slot ledger caps setup, active, idle and closing logical hosts at
+`max_warm_hosts` (default 16). Scheduler eligibility reserves a host before a lane
+worker; cold capacity waits remain in the bounded weighted owner queue. Warm
+control remains usable for active work, and overlapping warm control cannot
+indefinitely prevent a previously eligible cold host from reaching an idle slot.
+Active exec and shared wait retain leases through transport retry and redaction.
+
+Review caught two integration defects before commit. The first version waited
+for a host inside an occupied scheduler worker: the real small-capacity test
+then blocked another same-owner warm control request. Reservation now occurs
+before dequeue, and the exact scenario has both scheduler regression and real SSH
+coverage. Review also identified detached bulk close as a separate capacity and
+signal-loop problem: it now retains the host reservation, permits at most one
+bulk closer per host, and runs outside the daemon worker. Blocked-close tests
+verify bounded shutdown and retained capacity. An earlier harness failure used
+an expired handshake deadline; each subsequent request now has its own deadline.
+No SLO threshold or workload requirement was reduced to fix those failures.
+
+Private global health is exposed through a separate `pool.health` grant by CLI
+`broker status --pool` and MCP `rdev_broker_pool`. Ordinary owner status omits it.
+An exact-host health grant cannot expose the global pool or audit sink. Snapshots
+contain fixed counts/reasons/durations without owner/host names or payloads.
+
+The initial corrected real run visited 100 logical aliases on one remote Linux
+endpoint: zero cold SSH, peak retained SSH 16, final remote agent count 16 and 84
+LRU retirements. It preserved remote exec through live shrink to one slot and
+five-second sweeps, kept another project's warm control on the same agent while
+cold work queued, released canceled waiters, then admitted cold work after exec
+completion. Warm TTL and final-client grace both returned SSH to zero. Three
+actual CLI/MCP runs passed global-health grant/default-deny and owner isolation.
+Subsequent final-code/committed runs extend this with zero-subscriber shared wait
+and broader regressions; their logs will be recorded below.
+
+This is implementing-agent review. The logical-alias test does not establish a
+100-machine dial/failure/backoff matrix, continuous mixed sync/job fairness,
+all transport failure reason metrics or independent external review. Active
+leases can temporarily exceed a newly lowered capacity until they finish; a
+stalled closer deliberately retains its slot rather than exceeding capacity.
+
+
+The broader regression exposed a fault in the existing SSH failure-injection
+wrapper. It terminated OpenSSH immediately after stdout EOF, before observing the
+actual exit status. Native fallback from a saturated ControlMaster lengthened
+that interval, so a successful probe or installation could become exit 255 in
+the test. Bounded diagnostics reproduced both windows. Ten isolated mutation runs
+passed; overlap reliably exposed the faulty wrapper. These failed runs remain
+evidence rather than being relabeled as passes.
+
+The wrapper now waits for normal process exit after EOF, preserving both success
+and real nonzero statuses. Broken-client teardown and timed-out child cleanup
+remain bounded. A deterministic real pipe/child test closes stdout 200 ms before
+exit and verifies both exit 0 and exit 7. Initial changes based on attributing the
+failure to transport setup were withdrawn after identifying the wrapper defect;
+production SSH setup/retry behavior is unchanged by this batch.
+
+`make remote-mux-capacity` uses a privately owned ControlMaster at the actual
+server's limit (10), without changing sshd. It covers an already full master and
+a successful probe followed by filling the last slot just before installation.
+Three paired runs of unchanged native OpenSSH passed: one shared base plus one
+bulk SSH, distinct project principals, one approved append, and all ten preexisting
+sessions/master still alive. Temporary fixture-cleanup and deadline errors were
+fixed and rerun. Final corrected overlap and committed results follow below.
+
+
+Final production code passed full `make check` and repository race. With the
+corrected wrapper and unchanged production SSH implementation, ten actual
+mutation crash/recovery runs passed while the daemon/CLI race workload ran in
+parallel. The actual race frontend, two mux-saturation scenarios and 100-alias
+warm pool/zero-subscriber wait test all passed (97.02 seconds combined, 63.60
+seconds for the warm pool scenario). Race daemon SHA-256:
+`869cfadee2b970ee1b861f3de6e697035b123b520191b1fad09736196457dede`;
+race CLI SHA-256:
+`601af5a9d021818399984b529f8cf93577106aafe80a456a947eb86a648cfc82`.
+The before/after pipe proof showed predecessor `31a3500` turning both actual
+exit 0 and exit 7 into 241, while the corrected wrapper preserved each exit.
+Remaining lifecycle/history and committed-artifact logs are recorded after
+completion; no independent external review or Phase5-wide completion is claimed.
+
+
+The final corrected overlap gate also passed three real SSH retry/cancellation
+runs, six final-client lease cycles over 65.94 seconds and three real durable
+history runs. This completes the selected pre-commit regressions; committed
+artifact validation and archived logs follow below.

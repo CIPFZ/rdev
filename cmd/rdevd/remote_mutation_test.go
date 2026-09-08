@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +30,7 @@ if os.path.exists(unavailable):sys.exit(255)
 args=[os.environ['RDEV_TEST_REAL_SSH']]
 if os.environ.get('RDEV_TEST_SSH_CONFIG'):args+=['-F',os.environ['RDEV_TEST_SSH_CONFIG']]
 p=subprocess.Popen(args+sys.argv[1:],stdin=sys.stdin.buffer,stdout=subprocess.PIPE,stderr=sys.stderr.buffer)
+client_closed=False
 try:
  while True:
   line=p.stdout.readline()
@@ -43,11 +46,16 @@ try:
     while os.path.exists(gate):time.sleep(.01)
   except (ValueError,FileNotFoundError,KeyError):pass
   sys.stdout.buffer.write(line);sys.stdout.buffer.flush()
-except BrokenPipeError:pass
+except BrokenPipeError:client_closed=True
 finally:
- if p.poll() is None:p.terminate()
+ # stdout EOF can precede a successful ssh process exit. Killing at EOF
+ # creates a false transport failure, especially after native mux fallback.
+ if client_closed and p.poll() is None:p.terminate()
  try:p.wait(timeout=5)
- except subprocess.TimeoutExpired:p.kill();p.wait()
+ except subprocess.TimeoutExpired:
+  p.terminate()
+  try:p.wait(timeout=2)
+  except subprocess.TimeoutExpired:p.kill();p.wait()
 sys.exit(p.returncode)
 `
 
@@ -114,8 +122,17 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	awaitHeld := func(id string) {
-		awaitRuntime(t, 10*time.Second, "remote mutation final held before broker ACK", func() bool {
+	awaitHeld := func(id string, processes ...*lifecycleProcess) {
+		awaitRuntime(t, 10*time.Second, "remote mutation "+id+" final held before broker ACK", func() bool {
+			for _, process := range processes {
+				log, _ := os.ReadFile(process.logPath)
+				if strings.Contains(string(log), "remote request failed:") {
+					if len(log) > 8192 {
+						log = log[:8192]
+					}
+					t.Fatalf("mutation %s failed before remote response barrier: %s", id, log)
+				}
+			}
 			data, err := os.ReadFile(gate + ".entered")
 			var got map[string]any
 			return err == nil && json.Unmarshal(data, &got) == nil && got["operation_id"] == id
@@ -134,7 +151,7 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 	start := &proto.Request{Op: proto.OpJobStart, OperationID: jobOp, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"sh", "-c", `printf once >> "$1"; exec sleep 300`, "mutation-proof", namespace + "/start-proof"}}}}
 	hold(jobOp)
 	front := startLifecycleProcess(t, d, a, start, false)
-	awaitHeld(jobOp)
+	awaitHeld(jobOp, front)
 	jobID, _ := proto.JobIDForOperation(proto.PrincipalID(a.ClientID, a.ProjectID), jobOp)
 	if r := query(a, jobOp); !r.OK || r.Mutation == nil || r.Mutation.State != "dispatched" || r.Mutation.JobID != jobID {
 		t.Fatal("pre-ACK durable intent missing")
@@ -172,7 +189,7 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 		observers = append(observers, observer)
 		pids[observer.cmd.Process.Pid] = true
 	}
-	awaitHeld(recoverOp)
+	awaitHeld(recoverOp, observers...)
 	if len(pids) != 20 {
 		t.Fatal("recovery clients were not independent processes")
 	}
@@ -212,7 +229,7 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 	write := &proto.Request{Op: proto.OpWriteFile, OperationID: writeOp, Cat: &proto.WriteParams{Path: namespace + "/append-proof", Content: "once", Append: true}}
 	hold(writeOp)
 	front = startLifecycleProcess(t, d, a, write, false)
-	awaitHeld(writeOp)
+	awaitHeld(writeOp, front)
 	crash(front)
 	d.start()
 	connect()
@@ -285,7 +302,7 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 	shutdownWrite := &proto.Request{Op: proto.OpWriteFile, OperationID: "op_runtime_shutdown_append", Cat: &proto.WriteParams{Path: namespace + "/shutdown-proof", Content: "once", Append: true}}
 	hold(shutdownWrite.OperationID)
 	front = startLifecycleProcess(t, d, a, shutdownWrite, false)
-	awaitHeld(shutdownWrite.OperationID)
+	awaitHeld(shutdownWrite.OperationID, front)
 	shutdownAt := time.Now()
 	d.stop(syscall.SIGTERM)
 	shutdownElapsed := time.Since(shutdownAt)
@@ -372,7 +389,12 @@ func verifyMutationFrontends(t *testing.T, d *runtimeDaemon, owner, other broker
 		cmd.Env = append(cmd.Env, "RDEV_OPERATION_ID="+cliWrite.OperationID, "RDEV_APPROVAL_TOKEN="+d.approve(owner, cliWrite))
 		out, err := cmd.CombinedOutput()
 		if attempt == 0 && err != nil || attempt == 1 && (err == nil || !strings.Contains(string(out), cliWrite.OperationID)) {
-			t.Fatalf("CLI stable-ID attempt %d: %v", attempt, err)
+			// Only this test's synthetic write output is included; never emit cmd.Env,
+			// which carries the principal and approval credentials.
+			if len(out) > 4096 {
+				out = out[:4096]
+			}
+			t.Fatalf("CLI stable-ID attempt %d: %v; output: %s", attempt, err, out)
 		}
 	}
 	for _, principal := range []broker.Owner{owner, other} {
@@ -442,5 +464,52 @@ finally:
 `, base64.StdEncoding.EncodeToString(data), map[bool]string{true: "True", false: "False"}[wantFound], id)
 	if out, err := sshRun(script); err != nil {
 		t.Fatalf("remote durable replay: %v %s", err, out)
+	}
+}
+
+// Pipe EOF and process exit are separate events. The injection wrapper must
+// preserve the real child's outcome instead of manufacturing a transport fault.
+func TestMutationWrapperWaitsForProcessAfterStdoutEOF(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("Python required by the SSH injection wrapper")
+	}
+	for _, code := range []int{0, 7} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			dir := t.TempDir()
+			wrapper := filepath.Join(dir, "wrapper")
+			child := filepath.Join(dir, "ssh-child")
+			if err := os.WriteFile(wrapper, []byte(mutationSSHWrapper), 0700); err != nil {
+				t.Fatal(err)
+			}
+			script := `#!/usr/bin/env python3
+import os,sys,time
+os.write(1,b'probe-output\n')
+os.close(1)
+time.sleep(.2)
+sys.exit(int(os.environ['RDEV_WRAPPER_EXIT']))
+`
+			if err := os.WriteFile(child, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, wrapper)
+			cmd.Env = append(os.Environ(), "RDEV_MUTATION_GATE="+filepath.Join(dir, "unused-gate"), "RDEV_TEST_REAL_SSH="+child, "RDEV_TEST_SSH_CONFIG=", "RDEV_WRAPPER_EXIT="+fmt.Sprint(code))
+			out, err := cmd.CombinedOutput()
+			if string(out) != "probe-output\n" {
+				t.Fatalf("wrapper altered stdout: %q", out)
+			}
+			got := 0
+			if err != nil {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatal(err)
+				}
+				got = exit.ExitCode()
+			}
+			if got != code {
+				t.Fatalf("stdout EOF replaced real exit code: got %d, want %d", got, code)
+			}
+		})
 	}
 }

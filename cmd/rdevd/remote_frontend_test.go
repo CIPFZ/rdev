@@ -28,6 +28,9 @@ func TestRemoteBrokerFrontendBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := p.Grant(a.Key(), "pool.health"); err != nil {
+		t.Fatal(err)
+	}
 	if err := p.Save(d.socket + ".policy"); err != nil {
 		t.Fatal(err)
 	}
@@ -165,11 +168,39 @@ func TestRemoteBrokerFrontendBoundary(t *testing.T) {
 		}
 		session.Close()
 	}
+	for _, owner := range []broker.Owner{a, b, denied} {
+		out, err := command(owner, "broker", "status", "--pool").Output()
+		var pool broker.PoolHealth
+		if owner == a {
+			if err != nil || json.Unmarshal(out, &pool) != nil || pool.Limit != 16 || pool.BaseTransports != 1 {
+				t.Fatal("CLI administrative pool projection incomplete")
+			}
+		} else if err == nil || len(out) != 0 {
+			t.Fatal("CLI pool projection bypassed separate grant")
+		}
+		mc := mcp.NewClient(&mcp.Implementation{Name: "pool-proof", Version: "1"}, nil)
+		session, err := mc.Connect(t.Context(), &mcp.CommandTransport{Command: command(owner, "serve")}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "rdev_broker_pool", Arguments: map[string]any{}})
+		if err != nil || result == nil || result.IsError != (owner != a) {
+			t.Fatal("MCP pool separate authorization failed")
+		}
+		if owner == a {
+			data, _ := json.Marshal(result.StructuredContent)
+			if json.Unmarshal(data, &pool) != nil || pool.Limit != 16 || pool.BaseTransports != 1 {
+				t.Fatal("MCP pool projection incomplete")
+			}
+		}
+		session.Close()
+	}
 	if after := agentPID(); after != before {
 		t.Fatalf("frontend routes replaced shared remote agent: %d -> %d", before, after)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("MCP broker mode spawned a direct transport")
 	}
+	t.Log("actual CLI/MCP global pool health separately granted; two other projects denied; base count/capacity projected")
 	t.Logf("actual CLI/MCP broker status: owner A has 8 held sockets, B sees only itself, default-denied project gets no result; remote ls uses policy and shared agent PID %d; unsupported sync/secret/host/state/env/job commands neither spawn SSH/rsync nor mutate local registry; ungranted host and principal denied", before)
 }

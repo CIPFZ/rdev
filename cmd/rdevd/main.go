@@ -307,6 +307,17 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		if req.Wire != nil {
 			service.Audit.Append(broker.AuditEvent{OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
 		}
+		if (req.Operation == "pool.health" || req.Operation == "audit.health") && (req.Host != "" || req.Wire != nil) {
+			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "global health requires an unscoped administrative request"})
+			endRequest()
+			continue
+		}
+		if req.Operation == "pool.health" {
+			health := service.PoolHealth()
+			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Pool: &health})
+			endRequest()
+			continue
+		}
 		if req.Operation == "audit.health" {
 			health := service.Audit.SinkStatus()
 			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, AuditHealth: &health})

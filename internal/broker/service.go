@@ -26,6 +26,7 @@ type Service struct {
 	policy           *Policy
 	lease            *Lease
 	closed           atomic.Bool
+	Pool             *HostPool
 	Ingress          *Ingress
 	Scheduler        *Scheduler
 	Watches          *WatchHub
@@ -70,6 +71,8 @@ func NewService(lookup client.AgentLookup) *Service {
 	s.Mutations = NewMutationRegistry()
 	s.Events = NewJobHistory()
 	s.Ingress = NewIngress()
+	s.Pool = NewHostPool(config.Get().warmLimit(), s.client.DetachHostConnections)
+	s.Scheduler.SetHostPool(s.Pool)
 	return s
 }
 
@@ -82,6 +85,11 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 	if s.closed.Load() {
 		return nil, errors.New("broker service closed")
 	}
+	release, err := s.Pool.dispatchLease(ctx, host, LaneForOperation(req.Op))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	s.dispatchMu.RLock()
 	override := s.dispatchOverride
 	s.dispatchMu.RUnlock()
@@ -101,6 +109,11 @@ func (s *Service) DispatchApproved(ctx context.Context, host string, req *proto.
 	if err != nil || current != target {
 		return nil, errors.New("approved target changed before dispatch")
 	}
+	release, err := s.Pool.dispatchLease(ctx, host, LaneForOperation(req.Op))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	s.dispatchMu.RLock()
 	override := s.dispatchOverride
 	s.dispatchMu.RUnlock()
@@ -263,6 +276,7 @@ func (s *Service) ReloadConfig(c Config) error {
 	}
 	s.Scheduler.Configure(c.QoS, c.MaxHosts, c.OwnerWeights)
 	s.lease.SetGrace(c.IdleTTL)
+	s.Pool.Configure(c.warmLimit())
 	return nil
 }
 func (s *Service) AttachClient() bool {
@@ -275,7 +289,19 @@ func (s *Service) AttachClient() bool {
 func (s *Service) DetachClient()               { s.lease.Detach() }
 func (s *Service) Reapable(now time.Time) bool { return s.lease.Reapable(now) }
 func (s *Service) ReapIdle(now time.Time) bool {
-	return s.lease.Reap(now, s.client.DetachConnections)
+	return s.lease.Reap(now, func() func() {
+		s.Pool.Reap(now, 0, "last_client")
+		return func() {}
+	})
+}
+
+func (s *Service) ReapWarmIdle(now time.Time) int {
+	return s.Pool.Reap(now, s.config.Get().warmTTL(), "idle_ttl")
+}
+func (s *Service) PoolHealth() PoolHealth {
+	h := s.Pool.Snapshot()
+	h.BaseTransports, h.BulkTransports = s.client.PoolTransportCounts()
+	return h
 }
 
 func (s *Service) ReapBulkIdle(now time.Time) int {
@@ -283,7 +309,7 @@ func (s *Service) ReapBulkIdle(now time.Time) int {
 	if ttl == 0 {
 		ttl = 30 * time.Second
 	}
-	return s.client.ReapBulkIdle(now, ttl)
+	return s.Pool.ReapBulk(now, ttl, s.client.DetachIdleBulk)
 }
 
 func (s *Service) Decide(owner Owner, operation string) Decision {
@@ -407,17 +433,8 @@ func (s *Service) Close(ctx context.Context) error {
 	_ = s.Drain(graceCtx)
 	cancel()
 	schedulerErr := s.Scheduler.Close(ctx)
-	transportDone := make(chan struct{})
-	go func() {
-		s.client.Close()
-		close(transportDone)
-	}()
-	select {
-	case <-transportDone:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	poolErr := s.Pool.Close(ctx)
 	// Scheduler completion precedes the caller's durable mutation transition.
 	// Wait for EndRequest too, so shutdown does not race that final commit.
-	return errors.Join(schedulerErr, s.Drain(ctx))
+	return errors.Join(schedulerErr, poolErr, s.Drain(ctx))
 }

@@ -73,7 +73,7 @@ regular file, contain one JSON object, and contain only recognized fields. An
 explicit `-config` path must exist. Duration fields are nanoseconds:
 
 ```json
-{"max_hosts":128,"idle_ttl":300000000000,"bulk_idle_ttl":30000000000,"qos":{"max_active":12,"per_host":11,"per_owner":4,"max_queued":256,"per_owner_queued":32,"bulk_bytes_per_second":8388608},"owner_weights":{"agent-a\u0000project-a":2}}
+{"max_hosts":128,"max_warm_hosts":16,"warm_idle_ttl":300000000000,"idle_ttl":300000000000,"bulk_idle_ttl":30000000000,"qos":{"max_active":12,"per_host":11,"per_owner":4,"max_queued":256,"per_owner_queued":32,"bulk_bytes_per_second":8388608},"owner_weights":{"agent-a\u0000project-a":2}}
 ```
 
 SIGHUP parses and validates config and key before applying them. Invalid input
@@ -82,8 +82,22 @@ SIGHUP retries reload. Deleting a previously loaded config is a reload failure.
 `qos` controls execution and queue capacity separately from host count. Zero or
 omitted QoS fields use the values above. `max_hosts` currently bounds distinct
 hosts with active broker work; it no longer changes the per-host handler limit.
-Warm-pool capacity/LRU and fairness when a small active-host bound is saturated
-still need connection-manager integration, and are not covered by that setting.
+`max_warm_hosts` separately limits reserved host slots (default 16, range 1–1024).
+Setup and detached cleanup still occupy slots. `warm_idle_ttl` defaults to five
+minutes and reaps idle hosts even while frontend sockets remain connected. The
+existing `idle_ttl` controls final-client grace. Both use the five-second sweep;
+in-flight work and detached shared observations retain their host leases.
+
+Cold-host requests stay in the weighted scheduler queue until a slot is available;
+they do not occupy lane workers. Idle entries are retired by LRU. Eligible cold
+waiters stop new warm exec/bulk admission while active work finishes. Existing
+work retains one control request so job stop remains possible; overlapping hot
+control requests cannot keep an otherwise idle host busy indefinitely. A lower
+live capacity drains idle entries first; existing active entries may temporarily
+exceed the new limit until their leases end. No new cold slot is allocated above
+the limit. This bounds retained logical hosts, not independent remote machines or
+concurrent bootstrap dials; the broader multi-host recovery/backoff matrix remains
+open.
 
 Admission is weighted by the authenticated `(client_id, project_id)` pair.
 Weights count dispatches, so a weight of three receives three turns per turn of
@@ -520,7 +534,7 @@ With a `status` grant, `rdev broker status` and MCP `rdev_broker_status` return 
 principal's ingress usage, detached observation bytes, scheduler quotas and lane
 counts, queue timing, bulk payload bytes, wait subscribers and the policy digest.
 Other owners' connection counts and identities are excluded. Pool lifecycle and
-eviction-reason projection remain open acceptance work.
+complete lane-byte and transport-failure reason projection remain open acceptance work.
 
 `rdev ls HOST [PATH] [-limit N]` and MCP `rdev_list` require the broker's exact-host
 `list` decision. They return the remote listing, including truncation/cursor and
@@ -528,3 +542,39 @@ operation metadata, through the shared agent. `make remote-frontends` checks
 actual CLI/MCP processes, default-deny and cross-project status, directory
 listing, and absence of SSH/rsync fallback or local registry writes for
 unsupported shared commands.
+
+
+## Administrative warm pool health
+
+`rdev broker status --pool` and MCP `rdev_broker_pool` require a separate
+`pool.health` grant. They return global reserved/active/closing host counts,
+active host leases, pending host requests, current retained base/bulk transport
+objects, detached bulk cleanup count and fixed eviction-reason counters with last
+idle/lifetime/drain durations. Counts are snapshots; a detached transport is no
+longer in the retained-object count but its host slot stays reserved through
+cleanup. `queued` includes scheduler-queued host work, not only capacity waits.
+
+Ordinary `status` remains owner-scoped and never includes global pool data. Neither
+pool projection contains host names, owner names, commands, paths, secret values
+or output. Global `pool.health` and `audit.health` reject host-scoped/wire request
+envelopes; an exact-host health grant cannot expose global information.
+
+Warm reasons currently include `capacity_lru`, `capacity_reload`, `idle_ttl`,
+`last_client` and `shutdown`. Full connection failure/probe/dial reasons and
+complete lane byte accounting remain open. A blocked detached bulk close keeps
+its host slot reserved, with at most one such closer per host; it runs outside
+the daemon signal/reload loop. Shutdown waits within its existing deadline.
+
+`make remote-warm-pool` uses the actual daemon and real SSH against 100 configured
+logical aliases on one Linux endpoint. It checks zero cold SSH sessions, the
+16-host retained cap, LRU, active exec and detached observation preservation,
+canceled cold waiters, warm control, live shrink/rejected reload, TTL and final
+client cleanup. It does not substitute for a 100-machine failure/recovery matrix.
+
+
+`make remote-mux-capacity` validates native OpenSSH behavior with a private master
+at the real server's session limit. It covers an already full master and filling
+the final slot after probe but before installation. It checks retained base/bulk
+sessions, project identity, one approved append and preservation of preexisting
+sessions. Production SSH setup and retry behavior remain unchanged by the warm
+pool implementation.

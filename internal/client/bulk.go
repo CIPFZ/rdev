@@ -87,3 +87,16 @@ func (c *Client) ReapBulkIdle(now time.Time, ttl time.Duration) int {
 	}
 	return len(retired)
 }
+
+// DetachIdleBulk removes one idle bulk generation and returns its cleanup.
+// Broker pool accounting keeps this host reserved until cleanup completes.
+func (c *Client) DetachIdleBulk(host string, now time.Time, ttl time.Duration) func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.bulkConns[host]
+	if entry == nil || entry.active != 0 || entry.idleSince.IsZero() || now.Sub(entry.idleSince) < ttl {
+		return nil
+	}
+	delete(c.bulkConns, host)
+	return func() { _ = entry.pooled.conn.Close() }
+}
