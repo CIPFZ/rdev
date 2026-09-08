@@ -166,6 +166,9 @@ type WriteParams struct {
 
 // JobParams covers the job lifecycle ops.
 type JobParams struct {
+	// FilterIDs limits job_list to exactly IDs before counting/limiting. With
+	// this flag, an empty set returns no records. Requires job_filter_ids.
+	FilterIDs bool `json:"filter_ids,omitempty"`
 	// ID identifies an existing job for status, logs, and stop.
 	ID string `json:"id,omitempty"`
 	// IDs waits on several jobs at once in job_wait. Without it, waiting on N

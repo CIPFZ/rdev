@@ -134,6 +134,7 @@ func RequireOperation(name string) (OperationDescriptor, error) {
 type Feature string
 
 const (
+	FeatureJobFilterIDs  Feature = "job_filter_ids"
 	FeatureOperationID   Feature = "operation_id"
 	FeatureDeduplication Feature = "deduplication"
 	FeatureErrorEnvelope Feature = "error_envelope"
@@ -145,6 +146,7 @@ const (
 )
 
 var supportedFeatures = [...]Feature{
+	FeatureJobFilterIDs,
 	FeatureOperationID,
 	FeatureDeduplication,
 	FeatureErrorEnvelope,

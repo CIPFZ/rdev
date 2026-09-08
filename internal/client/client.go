@@ -747,6 +747,14 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			}
 		}
 
+		if built.Request.Op == proto.OpJobList && built.Request.Job != nil && built.Request.Job.FilterIDs {
+			negotiated, ok := pooled.conn.(negotiatedConnection)
+			if !ok || negotiated.NegotiatedVersion() < 3 || !negotiated.SupportsFeature(proto.FeatureJobFilterIDs) {
+				release()
+				return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+			}
+		}
+
 		built.Request.OperationID = operationID
 		built.Request.ClientID = c.callerID
 		if built.CallerID != "" {

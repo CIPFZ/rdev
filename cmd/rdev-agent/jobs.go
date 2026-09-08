@@ -363,6 +363,22 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		limit = defaultJobListLimit
 	}
 
+	var selectedIDs map[string]bool
+	if p.FilterIDs {
+		if len(p.IDs) > 8192 {
+			return nil, limitExceededError("job ID filter exceeds hard limit")
+		}
+		selectedIDs = make(map[string]bool, len(p.IDs))
+		for _, id := range p.IDs {
+			if err := validateJobID(id); err != nil {
+				return nil, err
+			}
+			selectedIDs[id] = true
+		}
+		if len(selectedIDs) == 0 {
+			return &proto.JobResult{}, nil
+		}
+	}
 	dir, err := os.Open(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -377,7 +393,7 @@ func jobList(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	for {
 		entries, readErr := dir.ReadDir(256)
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			if !entry.IsDir() || (selectedIDs != nil && !selectedIDs[entry.Name()]) {
 				continue
 			}
 			total++

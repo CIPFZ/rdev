@@ -492,3 +492,48 @@ above. In particular, the complete mixed job/sync workload, warm-host capacity,
 ingress bounds, long audit recovery, durable job mutation/observations, shared
 secret/Fleet routing and permissions, launchd runtime and independent external
 review are not inferred from these passing tests.
+
+
+## Detached job recovery and scoped pagination follow-up
+
+A fresh review of startup recovery found that a failed SSH probe deleted durable
+job ownership. The registry also changed memory before persistence and held its
+reader lock across disk I/O. A remote delete followed by a local rename failure
+could therefore hide the owner's job while leaving a stale disk snapshot.
+
+The registry now serializes private bounded versioned snapshot updates, persists
+before publishing, keeps readers independent of filesystem latency, and latches
+a fail-closed state after uncertain post-rename durability errors. Shutdown
+cannot overwrite that possibly committed snapshot. Strict legacy-array migration
+rejects null, unknown/future schema, duplicate fields/references and invalid owner
+keys. Startup remote errors or absent files never remove ownership; only an
+explicit owned removal result does. A remote Missing result lets the same owner
+finish an interrupted deletion without granting access to unknown jobs.
+
+Review also found that remote pagination occurred before broker owner filtering.
+Another project's newer jobs could hide the caller's older job with Limit=1.
+The broker now captures an immutable owner ID filter before admission, including
+a list with omitted parameters; the agent applies it before pagination/totals.
+This uses the negotiated `job_filter_ids` feature and fails before sending to an
+older agent. Returned IDs must remain inside the requested scope, and removal
+results cannot change the exact approved target. Completion audit follows durable
+ownership publication. Targeted negatives cover these boundaries and late sync
+uncertainty, failed snapshot publication, private-file validation and recovery.
+
+`make remote-jobs RDEV_SSH_CONFIG=/path/to/ssh/config` repeats a real OpenSSH test
+three times. Two principals share a client ID and differ by project. A separate
+frontend starts a detached job, both projects test Limit=1 lists, and the fully
+granted other project is denied status/logs/wait/stop/rm. The daemon is SIGKILLed
+while jobs run; its SSH executable refuses connections on restart; both records
+must survive. Restoring SSH and SIGHUP preserve the original supervisor PIDs.
+The test then forces an actual local rename failure after remote deletion,
+repairs the path, completes the owner's Missing cleanup, and checks both that
+removal and the other project's ownership across further SIGKILLs. Each remote
+command writes a proof file exactly once. Cleanup is restricted to this test's
+remote namespace and verified supervisor/child process groups.
+
+The first working-tree runtime passed. Committed-source results follow after
+review and complete validation. This does **not** close the pre-ACK job-start
+crash window: durable mutation intents, stable operation IDs, job event history,
+upgrade and bounded shutdown still need implementation/runtime evidence.
+P5-09/P5-10/P5-16 and the overall gate remain In progress.

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/broker"
@@ -208,28 +209,14 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			}
 			req.Wire.ClientID = req.Owner.ClientID
 			req.Wire.ProjectID = req.Owner.ProjectID
-			if req.Wire.Job != nil {
-				if err := service.Jobs.ValidateRequest(req.Host, req.Owner.Key(), req.Wire); err != nil {
+			if req.Wire.Job != nil || strings.HasPrefix(req.Wire.Op, "job_") {
+				bound, err := service.Jobs.BindRequest(req.Host, req.Owner.Key(), req.Wire)
+				if err != nil {
 					_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
 					endRequest()
 					continue
 				}
-				ids := append([]string{}, req.Wire.Job.IDs...)
-				if req.Wire.Job.ID != "" {
-					ids = append(ids, req.Wire.Job.ID)
-				}
-				ownerMismatch := false
-				for _, id := range ids {
-					if ref, ok := service.Jobs.Get(id); ok && ref.Owner != req.Owner.Key() {
-						ownerMismatch = true
-						break
-					}
-				}
-				if ownerMismatch {
-					_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "job owner mismatch"})
-					endRequest()
-					continue
-				}
+				req.Wire = bound
 			}
 		}
 		if req.Operation == "approval.create" {
@@ -331,14 +318,19 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				endRequest()
 				continue
 			}
-			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			if err := service.Jobs.RecordResponse(req.Host, req.Owner.Key(), req.Wire, wireResp); err != nil {
 				// Remote mutation completed but durable ownership state did not.
 				// Return an ambiguous outcome and never replay the mutation.
-				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "mutation completed but broker state was not persisted; query remote status"})
+				failure := "remote job response could not be validated"
+				if broker.RequiresApproval(req) {
+					failure = "mutation completed but broker state was not persisted; query remote status"
+				}
+				service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Result: "state_persist_failed"})
+				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: failure})
 				endRequest()
 				continue
 			}
+			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Wire: wireResp})
 			endRequest()
 			continue

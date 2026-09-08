@@ -285,3 +285,25 @@ owner/host/parameter substitution, expiry, one-use, policy change, restart and
 owner-scoped audit privacy. The session benchmark and lifecycle tests now issue
 explicit administrator approvals for each mutation during setup; they retain
 separate executor principals and their real shared-transport assertions.
+
+
+## Detached job ownership recovery
+
+The private `.jobs` snapshot beside the socket has schema 1, a 4 MiB bound and
+a maximum of 8192 records. Valid historical arrays migrate on startup. Malformed,
+future-version, duplicate or non-private snapshots cause startup to fail while
+preserving the file. Back up the file before offline repair.
+
+A failed remote startup probe does not discard ownership. Restore connectivity
+and use the original client/project to status, stop or remove its job. If remote
+removal succeeded but the broker reports a persistence failure, repair the local
+storage and obtain a new approval for the exact same job removal. The owned
+Missing result completes durable cleanup. An uncertain directory-sync failure
+requires restarting the broker to load the authoritative snapshot; unrelated
+control requests remain available. Never blindly repeat a failed job start: the
+pre-acknowledgement crash window still needs durable mutation intent recovery.
+
+Shared job listing requires an agent advertising `job_filter_ids`; an older
+agent receives no scoped request and the client reports unsupported_feature.
+Upgrade the agent artifact to regain scoped listing. Filtering precedes the
+remote limit and totals, so another project's newer jobs cannot hide owned jobs.

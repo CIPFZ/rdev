@@ -261,22 +261,23 @@ func (s *Service) PolicyDecisionForCapability(owner Owner, capability, operation
 	return s.policy.DecideCapability(owner.Key(), capability, operation)
 }
 
-// RecoverJobs revalidates persisted detached jobs against their remote hosts
-// after broker restart. Missing jobs are removed; live records remain owned by
-// their original principal.
+// RecoverJobs probes persisted ownership without interpreting transport errors
+// or missing remote files as permission to destroy ownership. Even unavailable
+// records remain manageable after a later reconnect; only explicit owned job_rm
+// outcomes remove them. The context bounds startup probing, not the job itself.
 func (s *Service) RecoverJobs(ctx context.Context) {
 	for _, ref := range s.Jobs.Snapshot() {
-		clientID, projectID, ok := strings.Cut(ref.Owner, "\x00")
-		if !ok {
-			s.Jobs.Remove(ref.ID)
-			continue
+		if ctx.Err() != nil {
+			break
 		}
+		clientID, projectID, _ := strings.Cut(ref.Owner, "\x00")
 		req := &proto.Request{Op: proto.OpJobStatus, ClientID: clientID, ProjectID: projectID, Job: &proto.JobParams{ID: ref.ID}}
-		resp, err := s.client.DoProtocol(ctx, ref.Host, req)
-		if err != nil || resp == nil || resp.Job == nil || resp.Job.Info == nil {
-			s.Jobs.Remove(ref.ID)
-			s.Audit.Append(AuditEvent{At: time.Now(), Owner: ref.Owner, Operation: proto.OpJobStatus, Result: "recovery_missing"})
+		resp, err := s.Dispatch(ctx, ref.Host, req)
+		result := "recovery_unreachable"
+		if err == nil && resp != nil && resp.OK && resp.Job != nil && resp.Job.Info != nil && resp.Job.Info.ID == ref.ID {
+			result = "recovery_found"
 		}
+		s.Audit.Append(AuditEvent{Owner: ref.Owner, Operation: proto.OpJobStatus, Result: result})
 	}
 }
 
