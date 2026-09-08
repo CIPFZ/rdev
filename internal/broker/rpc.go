@@ -26,6 +26,7 @@ type Request struct {
 	Since           time.Time      `json:"since,omitempty"`
 }
 type Response struct {
+	RequestRef      string             `json:"request_ref,omitempty"`
 	Pool            *PoolHealth        `json:"pool,omitempty"`
 	Ingress         *IngressSnapshot   `json:"ingress,omitempty"`
 	History         *JobEventPage      `json:"history,omitempty"`

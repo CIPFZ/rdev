@@ -11,10 +11,17 @@ import (
 )
 
 func OperationReference(req Request) string {
-	if req.Wire == nil || proto.ValidateOperationID(req.Wire.OperationID) != nil {
+	id := req.MutationID
+	if req.Operation != "mutation.status" {
+		if req.Wire == nil {
+			return ""
+		}
+		id = req.Wire.OperationID
+	}
+	if proto.ValidateOperationID(id) != nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(req.Wire.OperationID))
+	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:])
 }
 

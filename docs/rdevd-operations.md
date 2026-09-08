@@ -636,3 +636,33 @@ separate transparent SSH recorder that saves only sizes, fixed lanes and protoco
 principal hashes. It covers text/binary reads, streamed exec, a deliberately lost
 read terminal and retry, frontend SIGKILL, automatic cancellation and late frames,
 plus same-client/different-project and default-denied status queries.
+
+
+## Correlating broker request outcomes
+
+After successful owner binding, broker responses include a server-generated
+`request_ref`. Audit events for that request use the same opaque reference for
+its policy decision, approval use, admission and outcome. A client may reuse its
+own request ID without conflating traces. The reference does not contain or hash
+client request text, payloads, secret names or output. Existing clients may ignore
+this additive response field; older audit entries can lack it.
+
+Local pool/audit health, mutation outcome and audit queries now record their
+results, as do authorized requests rejected before dispatch for invalid wire
+ownership, mutation identity, job scope/removal or approval specifications.
+`mutation.status` uses the same hashed operation reference as its original wire
+mutation. Policy snapshot, approval, request and target digests remain associated
+with the individual request chain. Queries continue to filter by exact principal
+and project. Identity/ingress failures rejected before owner binding are outside
+this authenticated request trace.
+
+`audit_query` records its own query before its durability barrier. Its response
+can therefore contain that event. Audit health polling also generates an event,
+so accepted/written/pending counts are live snapshots. Request acknowledgment does
+not synchronously fsync audit: a crash can still lose the asynchronous tail, and
+persistent `audit_incomplete` remains the signal for that uncertainty.
+
+`make remote-audit-routes` verifies distinct references despite reused caller IDs,
+local success and rejection outcomes, real approved append/admission/query
+correlation, project isolation, and payload/token exclusion. It flushes through
+owner audit queries before SIGKILL, then verifies recovery of those flushed traces.

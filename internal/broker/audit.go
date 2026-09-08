@@ -11,6 +11,7 @@ import (
 )
 
 type AuditEvent struct {
+	RequestRef    string    `json:"request_ref,omitempty"`
 	OperationRef  string    `json:"operation_ref,omitempty"`
 	RequestDigest string    `json:"request_digest,omitempty"`
 	TargetDigest  string    `json:"target_digest,omitempty"`
@@ -149,7 +150,7 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
 	e.Schema = 1
-	for _, field := range []*string{&e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID, &e.OperationRef} {
+	for _, field := range []*string{&e.RequestRef, &e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID, &e.OperationRef} {
 		if digest, err := hex.DecodeString(*field); err != nil || len(digest) != sha256.Size {
 			*field = ""
 		}
@@ -184,6 +185,17 @@ func (a *AuditLog) Append(e AuditEvent) {
 	a.mu.Unlock()
 }
 
+// NewRequestReference identifies one broker decision/approval/result chain even
+// when a client reuses its request ID. It never hashes caller-supplied text.
+func NewRequestReference() (string, error) {
+	id, err := proto.NewOperationID()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // AuditOwnerID is an opaque correlation identity, not a credential.
 func AuditOwnerID(owner string) string {
 	sum := sha256.Sum256([]byte(owner))
@@ -204,7 +216,7 @@ func auditOperation(operation string) string {
 
 func auditCode(code string) string {
 	switch code {
-	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_issued", "approval_used", "approval_invalid", "accepted", "completed", "dispatch_error", "route_rejected", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "recovery_found", "state_persist_failed":
+	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_issued", "approval_used", "approval_invalid", "accepted", "completed", "dispatch_error", "request_rejected", "route_rejected", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "recovery_found", "state_persist_failed":
 		return code
 	default:
 		return "unknown"

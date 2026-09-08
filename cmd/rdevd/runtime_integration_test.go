@@ -313,11 +313,11 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 			}
 			w.Close()
 		}
-		check := func() {
+		check := func(queries int) {
 			for _, owner := range owners {
 				w := d.dial(owner, d.token(owner, "1h"), true)
 				response := w.call(t, owner, "audit_query")
-				if !response.OK || len(response.Audit) != 2 {
+				if !response.OK || len(response.Audit) != 2+queries {
 					t.Fatalf("audit history missing or broadened: ok=%v count=%d", response.OK, len(response.Audit))
 				}
 				if !response.AuditIncomplete {
@@ -331,10 +331,10 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 				w.Close()
 			}
 		}
-		check()
+		check(1)
 		d.stop(syscall.SIGTERM)
 		d.start()
-		check()
+		check(2)
 		data, err := os.ReadFile(d.socket + ".audit")
 		if err != nil {
 			t.Fatal(err)

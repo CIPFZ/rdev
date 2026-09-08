@@ -68,9 +68,9 @@ func TestAuditLogRecoversAfterRotation(t *testing.T) {
 
 func TestAuditLogSanitizesFields(t *testing.T) {
 	a := NewAuditLog(4)
-	a.Append(AuditEvent{At: time.Now(), Owner: "owner\nsecret", Result: "secret=top-secret token=abc"})
+	a.Append(AuditEvent{At: time.Now(), Owner: "owner\nsecret", RequestRef: "untrusted-trace-secret", Result: "secret=top-secret token=abc"})
 	events := a.Query(time.Time{})
-	if len(events) != 1 || events[0].Result != "unknown" || events[0].Owner != AuditOwnerID("owner\nsecret") {
+	if len(events) != 1 || events[0].RequestRef != "" || events[0].Result != "unknown" || events[0].Owner != AuditOwnerID("owner\nsecret") {
 		t.Fatalf("audit fields were not bounded/sanitized: %+v", events)
 	}
 }

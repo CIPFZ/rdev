@@ -1238,3 +1238,45 @@ exclude bootstrap/ciphertext/unattributable frames and reset with bounded owner
 history; they are not durable billing totals. Dial/failure reasons, full shared
 secret/sync/session routes, mixed workload, macOS and independent external review
 remain open. Phase5 and the Multi Agent Gate remain In progress.
+
+
+## Audit outcomes for local routes and per-request correlation
+
+An implementing-agent audit found missing result events for local health,
+mutation-outcome and audit queries, plus several allowed requests rejected before
+remote dispatch. Reused client request IDs also lacked an independent identifier
+for distinguishing decision/approval/result chains. Broker responses and events
+now share a server-generated random `request_ref`, filtered to a fixed-length hex
+value at the sink. No caller text is used to derive it. Mutation outcome queries
+retain the original mutation's hashed operation reference while getting their own
+request reference. Existing policy/approval/target digests remain unchanged.
+
+`TestRemoteBrokerAuditRoutes` reuses one canary caller ID across status, health,
+query, grant, approval, invalid wire/job/identity and real approved append calls.
+It requires a distinct response reference for each call and exact event chains
+under that reference, verifies original-append/query operation linkage and
+approval digests, and checks same-client/different-project isolation. Owner queries
+flush the traces before SIGKILL; after restart, all those flushed references and
+results remain available without raw caller IDs, content or approval tokens.
+This tests durable recovery after a barrier, not zero audit-tail loss on crash.
+
+The initial local regression exposed its old assumption that audit_query itself
+was not audited (two expected events became three). It now asserts the exact
+additional query count before/after restart and still checks every event's schema,
+owner and timestamp. No privacy or durability condition was removed. The corrected
+full check and three real audit-route, continuity, predecessor-upgrade, mutation
+and scoped-route regressions passed. Full race and committed-artifact load/service
+evidence follow after completion.
+
+Random per-request references are additive; old entries and pre-owner-binding
+ingress/identity failures may lack them. Historical async crash gaps remain
+explicit. Complete shared routes, extended retention/storage-failure/upgrade
+coverage, independent external review and overall Phase5 completion remain open.
+
+
+The final audit-route implementation passed full repository race and a real
+race-daemon route/correlation run (6.59 seconds). Its daemon SHA-256 was
+`edbfd5fdb46a0a68cb48982d57e10c7eb99e2f2529e681a46d0b23c7f9040ff4`.
+Full check, three correlation scenarios and continuity/predecessor/mutation/scoped
+route regressions all passed. Committed-artifact load and service verification
+will be recorded separately; no independent external review is implied.
