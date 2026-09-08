@@ -12,6 +12,9 @@ type Owner struct {
 }
 
 func (o Owner) Validate() error {
+	if strings.ContainsAny(o.ClientID+o.ProjectID, "\x00\r\n") {
+		return errors.New("owner identity contains a prohibited control character")
+	}
 	if strings.TrimSpace(o.ClientID) == "" {
 		return errors.New("client_id required")
 	}

@@ -3,6 +3,7 @@ package mcpsrv
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/client"
@@ -21,17 +22,9 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_ping", Description: "Verify a remote host through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in struct {
 		Host string `json:"host"`
 	}) (*mcp.CallToolResult, proto.PingResult, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "ping", Host: in.Host, Wire: &proto.Request{Op: proto.OpPing}})
 		if err != nil {
 			return nil, proto.PingResult{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "ping", Host: in.Host, Wire: &proto.Request{Op: proto.OpPing}})
-		if err != nil {
-			return nil, proto.PingResult{}, err
-		}
-		if !resp.OK {
-			return nil, proto.PingResult{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Ping == nil {
 			return nil, proto.PingResult{}, errors.New("broker ping returned no result")
@@ -39,39 +32,26 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, *resp.Wire.Ping, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_exec", Description: "Run a command through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in ExecIn) (*mcp.CallToolResult, ExecOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
-		if err != nil {
-			return nil, ExecOut{}, err
+		if len(in.Argv) == 0 {
+			return nil, ExecOut{}, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 		}
-		defer c.Close()
 		login := true
 		if in.LoginShell != nil {
 			login = *in.LoginShell
 		}
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "exec", Host: in.Host, Wire: &proto.Request{Op: proto.OpExec, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Exec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login, Stdin: in.Stdin, TimeoutSec: in.TimeoutSec, MaxOutputBytes: in.MaxOutputBytes}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "exec", Host: in.Host, Wire: &proto.Request{Op: proto.OpExec, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Exec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login, Stdin: in.Stdin, TimeoutSec: in.TimeoutSec, MaxOutputBytes: in.MaxOutputBytes}}})
 		if err != nil {
 			return nil, ExecOut{}, err
-		}
-		if !resp.OK {
-			return nil, ExecOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Exec == nil {
 			return nil, ExecOut{}, errors.New("broker exec returned no result")
 		}
-		return nil, toExecOut(&client.ExecResult{ExecResult: resp.Wire.Exec}), nil
+		return nil, toExecOut(&client.ExecResult{ExecResult: resp.Wire.Exec, Cwd: in.Cwd}), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_read", Description: "Read a remote file through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in ReadIn) (*mcp.CallToolResult, ReadOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "read_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpReadFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Read: &proto.ReadParams{Path: in.Path, Offset: in.Offset, Limit: in.Limit}}})
 		if err != nil {
 			return nil, ReadOut{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "read_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpReadFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Read: &proto.ReadParams{Path: in.Path, Offset: in.Offset, Limit: in.Limit}}})
-		if err != nil {
-			return nil, ReadOut{}, err
-		}
-		if !resp.OK {
-			return nil, ReadOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Read == nil {
 			return nil, ReadOut{}, errors.New("broker read returned no result")
@@ -80,17 +60,9 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, ReadOut{Content: r.Content, Base64: r.ContentB64, Size: r.Size, EOF: r.EOF, Truncation: r.Truncation, OperationID: r.OperationID, Terminal: r.Terminal, ExecutionState: r.Execution}, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_write", Description: "Write a remote file through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in WriteIn) (*mcp.CallToolResult, WriteOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "write_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpWriteFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Cat: &proto.WriteParams{Path: in.Path, Content: in.Content, Mode: in.Mode, Append: in.Append}}})
 		if err != nil {
 			return nil, WriteOut{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "write_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpWriteFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Cat: &proto.WriteParams{Path: in.Path, Content: in.Content, Mode: in.Mode, Append: in.Append}}})
-		if err != nil {
-			return nil, WriteOut{}, err
-		}
-		if !resp.OK {
-			return nil, WriteOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Cat == nil {
 			return nil, WriteOut{}, errors.New("broker write returned no result")
@@ -102,17 +74,9 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		Host    string `json:"host"`
 		Refresh bool   `json:"refresh,omitempty"`
 	}) (*mcp.CallToolResult, proto.CapabilityResult, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "capability_probe", Host: in.Host, Wire: &proto.Request{Op: proto.OpCapabilityProbe, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Capability: &proto.CapabilityParams{Refresh: in.Refresh}}})
 		if err != nil {
 			return nil, proto.CapabilityResult{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "capability_probe", Host: in.Host, Wire: &proto.Request{Op: proto.OpCapabilityProbe, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Capability: &proto.CapabilityParams{Refresh: in.Refresh}}})
-		if err != nil {
-			return nil, proto.CapabilityResult{}, err
-		}
-		if !resp.OK {
-			return nil, proto.CapabilityResult{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Capability == nil {
 			return nil, proto.CapabilityResult{}, errors.New("broker capability returned no result")
@@ -120,21 +84,16 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, *resp.Wire.Capability, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_start", Description: "Start a supervised background job through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStartIn) (*mcp.CallToolResult, JobOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
-		if err != nil {
-			return nil, JobOut{}, err
+		if len(in.Argv) == 0 {
+			return nil, JobOut{}, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 		}
-		defer c.Close()
 		login := true
 		if in.LoginShell != nil {
 			login = *in.LoginShell
 		}
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_start", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Label: in.Label, Spec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login}}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_start", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Label: in.Label, Spec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login}}}})
 		if err != nil {
 			return nil, JobOut{}, err
-		}
-		if !resp.OK {
-			return nil, JobOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
 			return nil, JobOut{}, errors.New("broker job start returned no result")
@@ -142,17 +101,9 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, toJobOut(resp.Wire.Job.Info), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_list", Description: "List supervised background jobs through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobListIn) (*mcp.CallToolResult, JobListOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_list", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobList, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Limit: in.Limit}}})
 		if err != nil {
 			return nil, JobListOut{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_list", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobList, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Limit: in.Limit}}})
-		if err != nil {
-			return nil, JobListOut{}, err
-		}
-		if !resp.OK {
-			return nil, JobListOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Job == nil {
 			return nil, JobListOut{}, errors.New("broker job list returned no result")
@@ -166,17 +117,9 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, out, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_status", Description: "Read a supervised background job status through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobRefIn) (*mcp.CallToolResult, JobOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_status", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStatus, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID}}})
 		if err != nil {
 			return nil, JobOut{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_status", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStatus, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID}}})
-		if err != nil {
-			return nil, JobOut{}, err
-		}
-		if !resp.OK {
-			return nil, JobOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
 			return nil, JobOut{}, errors.New("broker job status returned no result")
@@ -184,36 +127,20 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, toJobOut(resp.Wire.Job.Info), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_logs", Description: "Read supervised job output through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobLogsIn) (*mcp.CallToolResult, JobLogsOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_logs", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobLogs, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Stream: in.Stream, TailLines: in.TailLines, Grep: in.Grep, SinceOffset: in.SinceOffset}}})
 		if err != nil {
 			return nil, JobLogsOut{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_logs", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobLogs, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Stream: in.Stream, TailLines: in.TailLines, Grep: in.Grep, SinceOffset: in.SinceOffset}}})
-		if err != nil {
-			return nil, JobLogsOut{}, err
-		}
-		if !resp.OK {
-			return nil, JobLogsOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Job == nil {
 			return nil, JobLogsOut{}, errors.New("broker job logs returned no result")
 		}
 		j := resp.Wire.Job
-		return nil, JobLogsOut{Logs: j.Logs, NextOffset: j.NextOffset, LogSize: j.LogSize, Matched: j.Matched, Truncation: j.LogsTruncation, OperationID: j.OperationID, Terminal: j.Terminal, ExecutionState: j.Execution, Ledger: j.LogLedger}, nil
+		return nil, toJobLogsOut(j), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_stop", Description: "Stop a supervised job through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStopIn) (*mcp.CallToolResult, JobOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_stop", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStop, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Signal: in.Signal, GraceSec: in.GraceSec}}})
 		if err != nil {
 			return nil, JobOut{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_stop", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStop, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Signal: in.Signal, GraceSec: in.GraceSec}}})
-		if err != nil {
-			return nil, JobOut{}, err
-		}
-		if !resp.OK {
-			return nil, JobOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
 			return nil, JobOut{}, errors.New("broker job stop returned no result")
@@ -221,38 +148,28 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, toJobOut(resp.Wire.Job.Info), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_rm", Description: "Remove supervised job records through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobRmIn) (*mcp.CallToolResult, JobRmOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		if in.ID == "" && in.OlderThanSec <= 0 && in.KeepLast <= 0 {
+			return nil, JobRmOut{}, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+		}
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_rm", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobRm, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, OlderThanSec: in.OlderThanSec, KeepLast: in.KeepLast}}})
 		if err != nil {
 			return nil, JobRmOut{}, err
-		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_rm", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobRm, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, OlderThanSec: in.OlderThanSec, KeepLast: in.KeepLast}}})
-		if err != nil {
-			return nil, JobRmOut{}, err
-		}
-		if !resp.OK {
-			return nil, JobRmOut{}, errors.New(resp.Error)
 		}
 		if resp.Wire == nil || resp.Wire.Job == nil {
 			return nil, JobRmOut{}, errors.New("broker job rm returned no result")
 		}
 		j := resp.Wire.Job
-		return nil, JobRmOut{Removed: j.Removed, RemovedCount: len(j.Removed), Skipped: j.Skipped, FreedBytes: j.FreedBytes}, nil
+		return nil, JobRmOut{Removed: j.Removed, RemovedCount: len(j.Removed), Skipped: j.Skipped, Missing: j.Missing, FreedBytes: j.FreedBytes}, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_wait", Description: "Wait for supervised jobs through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobWaitIn) (*mcp.CallToolResult, JobWaitOut, error) {
-		c, err := broker.DialClient(ctx, socket, owner)
+		if in.ID == "" && len(in.IDs) == 0 {
+			return nil, JobWaitOut{}, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+		}
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_wait", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobWait, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, IDs: in.IDs, WaitAny: in.WaitAny, WaitTimeoutSec: in.TimeoutSec, TailOnExit: in.TailOnExit}}})
 		if err != nil {
 			return nil, JobWaitOut{}, err
 		}
-		defer c.Close()
-		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_wait", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobWait, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, IDs: in.IDs, WaitAny: in.WaitAny, WaitTimeoutSec: in.TimeoutSec, TailOnExit: in.TailOnExit}}})
-		if err != nil {
-			return nil, JobWaitOut{}, err
-		}
-		if !resp.OK {
-			return nil, JobWaitOut{}, errors.New(resp.Error)
-		}
-		if resp.Wire == nil || resp.Wire.Job == nil {
+		if resp.Wire == nil || resp.Wire.Job == nil || (resp.Wire.Job.Info == nil && len(resp.Wire.Job.Waited) == 0) {
 			return nil, JobWaitOut{}, errors.New("broker job wait returned no result")
 		}
 		j := resp.Wire.Job
@@ -266,4 +183,40 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, out, nil
 	})
 	return s, nil
+}
+
+// callBroker enforces both local and remote failure envelopes before a handler
+// projects typed output. Secrets and session state are resolved only by rdevd.
+func callBroker(ctx context.Context, socket string, owner broker.Owner, req broker.Request) (broker.Response, error) {
+	if req.Wire != nil {
+		req.Wire.ClientID = owner.ClientID
+		req.Wire.ProjectID = owner.ProjectID
+	}
+	c, err := broker.DialClient(ctx, socket, owner)
+	if err != nil {
+		return broker.Response{}, err
+	}
+	defer c.Close()
+	resp, err := c.DoContext(ctx, req)
+	if err != nil {
+		return broker.Response{}, err
+	}
+	if !resp.OK {
+		if resp.Error != "" {
+			return broker.Response{}, errors.New(resp.Error)
+		}
+		return broker.Response{}, fmt.Errorf("broker %s failed", req.Operation)
+	}
+	if resp.Wire != nil {
+		if resp.Wire.Error != nil {
+			return broker.Response{}, resp.Wire.Error
+		}
+		if resp.Wire.Err != "" {
+			return broker.Response{}, errors.New(resp.Wire.Err)
+		}
+		if !resp.Wire.OK {
+			return broker.Response{}, fmt.Errorf("remote %s failed", req.Operation)
+		}
+	}
+	return resp, nil
 }

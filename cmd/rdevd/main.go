@@ -22,6 +22,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "principal-token" {
+		if err := principalTokenCommand(os.Args[2:], os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	defaultSocket := filepath.Join(os.TempDir(), "rdev", "rdevd.sock")
 	if home, err := os.UserHomeDir(); err == nil {
 		defaultSocket = filepath.Join(home, ".cache", "rdev", "rdevd.sock")
@@ -80,7 +86,9 @@ func main() {
 		log.Printf("rdevd: warning: host registry not loaded: %v", err)
 	}
 	jobsPath := *socket + ".jobs"
-	_ = service.Jobs.Load(jobsPath)
+	if err := service.Jobs.ConfigurePersistence(jobsPath); err != nil {
+		log.Fatalf("rdevd: job registry load failed: %v", err)
+	}
 	defer service.Jobs.Save(jobsPath)
 	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
 	service.RecoverJobs(recoveryCtx)
@@ -170,7 +178,8 @@ func serveConn(conn net.Conn, service *broker.Service) {
 	}
 	var hello proto.BrokerHello
 	reader := bufio.NewReader(conn)
-	if err := json.NewDecoder(reader).Decode(&hello); err != nil {
+	dec := json.NewDecoder(reader)
+	if err := dec.Decode(&hello); err != nil {
 		return
 	}
 	local := proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}
@@ -179,30 +188,43 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		resp.Error = err.Error()
 		_ = json.NewEncoder(conn).Encode(resp)
 		return
-	} else {
-		resp.OK = true
 	}
-	_ = json.NewEncoder(conn).Encode(resp)
+	var boundOwner broker.Owner
+	var principalDeadline time.Time
+	secret := os.Getenv("RDEV_PRINCIPAL_SECRET")
+	if secret != "" || hello.ClientID != "" || hello.ProjectID != "" {
+		boundOwner = broker.Owner{ClientID: hello.ClientID, ProjectID: hello.ProjectID}
+		if err := boundOwner.Validate(); err != nil {
+			resp.Error = err.Error()
+			_ = json.NewEncoder(conn).Encode(resp)
+			return
+		}
+	}
+	if secret != "" {
+		var err error
+		principalDeadline, err = broker.PrincipalTokenExpiry(secret, boundOwner, hello.PrincipalToken)
+		if err != nil {
+			resp.Error = err.Error()
+			_ = json.NewEncoder(conn).Encode(resp)
+			return
+		}
+		// Expiration applies to established sessions, including idle clients and
+		// outstanding calls. The decoder deadline cancels the connection context.
+		_ = conn.SetDeadline(principalDeadline)
+	}
+	resp.OK = true
+	if err := json.NewEncoder(conn).Encode(resp); err != nil {
+		return
+	}
 	if !service.AttachClient() {
 		return
 	}
 	defer service.DetachClient()
-	dec := json.NewDecoder(reader)
 	enc := json.NewEncoder(conn)
 	connCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	requests := make(chan broker.Request, 16)
 	decodeErr := make(chan error, 1)
-	var boundOwner broker.Owner
-	if hello.ClientID != "" && hello.ProjectID != "" {
-		boundOwner = broker.Owner{ClientID: hello.ClientID, ProjectID: hello.ProjectID}
-		if err := boundOwner.Validate(); err != nil {
-			return
-		}
-		if secret := os.Getenv("RDEV_PRINCIPAL_SECRET"); secret != "" && !broker.ValidatePrincipalToken(secret, boundOwner, hello.PrincipalToken) {
-			return
-		}
-	}
 	go func() {
 		for {
 			var req broker.Request
@@ -225,6 +247,9 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		case <-decodeErr:
 			return
 		case <-connCtx.Done():
+			return
+		}
+		if !principalDeadline.IsZero() && !time.Now().Before(principalDeadline) {
 			return
 		}
 		if !service.BeginRequest() {
@@ -278,6 +303,11 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			req.Wire.ClientID = req.Owner.ClientID
 			req.Wire.ProjectID = req.Owner.ProjectID
 			if req.Wire.Job != nil {
+				if err := service.Jobs.ValidateRequest(req.Host, req.Owner.Key(), req.Wire); err != nil {
+					_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+					endRequest()
+					continue
+				}
 				ids := append([]string{}, req.Wire.Job.IDs...)
 				if req.Wire.Job.ID != "" {
 					ids = append(ids, req.Wire.Job.ID)
@@ -376,16 +406,12 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			service.Lanes.Release(lane)
 			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
 			service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
-			if req.Wire.Op == proto.OpJobStart && wireResp.Job != nil && wireResp.Job.Info != nil {
-				service.Jobs.Put(broker.JobRef{ID: wireResp.Job.Info.ID, Owner: req.Owner.Key(), Host: req.Host})
-			}
-			if req.Wire.Op == proto.OpJobRm && req.Wire.Job != nil {
-				if req.Wire.Job.ID != "" {
-					service.Jobs.Remove(req.Wire.Job.ID)
-				}
-				for _, id := range req.Wire.Job.IDs {
-					service.Jobs.Remove(id)
-				}
+			if err := service.Jobs.RecordResponse(req.Host, req.Owner.Key(), req.Wire, wireResp); err != nil {
+				// Remote mutation completed but durable ownership state did not.
+				// Return an ambiguous outcome and never replay the mutation.
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: "mutation completed but broker state was not persisted; query remote status"})
+				endRequest()
+				continue
 			}
 			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Wire: wireResp})
 			endRequest()

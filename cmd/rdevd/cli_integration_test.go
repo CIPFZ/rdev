@@ -183,6 +183,11 @@ func runCLIBrokerDaemon(t *testing.T) {
 	if err := service.Grant(allowed, "ping"); err != nil {
 		t.Fatal(err)
 	}
+	for _, id := range []string{"job-1"} {
+		if err := service.Jobs.Put(broker.JobRef{ID: id, Owner: allowed.Key(), Host: "remote-that-is-not-an-ssh-host"}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, operation := range []string{"exec", "read_file", "write_file", "capability_probe", "job_list", "job_status", "job_start", "job_logs", "job_stop", "job_wait", "job_rm"} {
 		if err := service.Grant(allowed, operation); err != nil {
 			t.Fatal(err)
