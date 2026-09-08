@@ -322,7 +322,17 @@ type AgentBinary struct {
 //
 // lookup resolves an agent build for the remote platform. It is called only
 // when an upload is required, so a warm connection costs one ssh round trip.
-func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*AgentBinary, error)) (*Conn, error) {
+func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*AgentBinary, error)) (result *Conn, dialErr error) {
+	activity := observe.ConnectionActivityFromContext(ctx)
+	started := time.Now()
+	stage := observe.DialValidation
+	activity.BeginDial()
+	defer func() {
+		if ctx.Err() != nil && dialErr != nil {
+			stage = observe.DialCanceled
+		}
+		activity.EndDial(stage, dialErr == nil, time.Since(started))
+	}()
 	if err := ValidateHost(host); err != nil {
 		return nil, fmt.Errorf("invalid host %q: %w", host.Name, err)
 	}
@@ -336,6 +346,7 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	}
 	c.ensureLifecycle()
 
+	stage = observe.DialControlPath
 	ctl, err := controlPath(host)
 	if err != nil {
 		return nil, err
@@ -347,6 +358,7 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	// ordered, so this is the bulk of warm-connect latency. It also opens the
 	// ControlMaster as a side effect, which is what the separate connect step was
 	// for.
+	stage = observe.DialProbe
 	probe, err := c.probeRemote(ctx)
 	if err != nil {
 		return nil, err
@@ -356,19 +368,23 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	c.stateDir = probe.home + "/" + remoteDir
 	c.agentPath = probe.home + "/" + remoteDir + "/rdev-agent"
 
+	stage = observe.DialLookup
 	bin, err := lookup(probe.goos, probe.goarch)
 	if err != nil {
 		return nil, fmt.Errorf("no agent build for %s/%s: %w", probe.goos, probe.goarch, err)
 	}
 
+	stage = observe.DialInstall
 	if err := c.ensureAgent(ctx, bin, probe.agentSHA); err != nil {
 		return nil, fmt.Errorf("bootstrap agent: %w", err)
 	}
+	stage = observe.DialAgentStart
 	if err := c.startAgent(ctx); err != nil {
 		return nil, fmt.Errorf("start agent: %w", err)
 	}
 
 	// Handshake: confirms the binary runs and speaks a format we can use.
+	stage = observe.DialHandshake
 	resp, err := c.Do(ctx, &proto.Request{
 		Op: proto.OpPing,
 		Hello: &proto.HelloParams{
@@ -384,6 +400,7 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		c.Close()
 		return nil, errors.New("agent handshake returned no identity")
 	}
+	stage = observe.DialNegotiation
 	remoteMin := resp.Ping.MinVersion
 	if remoteMin == 0 {
 		remoteMin = resp.Ping.Version

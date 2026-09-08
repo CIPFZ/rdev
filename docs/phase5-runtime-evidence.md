@@ -1299,3 +1299,37 @@ routes. It does not remove async crash-tail uncertainty or cover pre-owner-bindi
 identity/ingress errors with the same trace. Extended retention/storage-failure,
 remaining shared routes, mixed load, macOS and independent external review remain
 open. Phase5 and the Multi Agent Gate are still In progress.
+
+
+## Owner connection setup and retry diagnostics
+
+The broker now projects actual base/bulk dial attempts, successes, in-flight work,
+total/max durations and application retry attempts under owner status. Transport
+setup records one of nine fixed failure stages without inspecting error strings.
+The context-bound meter is owned by the initiating principal, reuses bounded
+scheduler history, and adds no shared scheduler/audit lock to the dial path.
+Warm users of another principal's existing connection do not inherit its counts.
+
+Implementing-agent review checked nil-meter standalone compatibility, named-error
+return accounting, cancellation precedence, per-host singleflight ownership,
+base/bulk retries, fixed label cardinality and atomic snapshots. The new real
+runtime test reports four attempts: two successful SSH setups, one probe failure
+and one canceled held handshake, with zero in flight after cleanup. Another
+project retains the original remote agent and zero dial/failure counts. Additional
+actual daemon tests attribute missing local binaries to agent_lookup and an
+owned remote rdev-agent directory obstruction to agent_install. No existing user
+agent directory or SSH configuration is modified.
+
+The real byte-ledger test additionally verifies three successful base/bulk setups
+and one lost-terminal read retry for alpha, with zero new setup/retry counts for
+beta in both CLI and MCP. Full check, three diagnostic scenarios, three byte-ledger
+runs, three cancellation regressions and six lease cycles passed. Full repository
+race and a real race-daemon diagnostics/byte-ledger suite passed (26.67 seconds).
+Race daemon SHA-256:
+`01033599d96fbba243f47576baabd861840473ceaf39d90131258511913f0b4c`.
+Committed-artifact load/service evidence follows after completion.
+
+The fixed stage is not a detailed network/OS cause. Full control-path/start/
+negotiation failure, multi-machine backoff, mixed shared workloads and independent
+external review remain open. Counters are transient recent history, not persistent
+billing totals. No Phase5-wide or additional P5 Complete claim is made.

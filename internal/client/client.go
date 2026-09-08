@@ -683,6 +683,9 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 	var descriptor proto.OperationDescriptor
 	var operationName string
 	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			observe.ConnectionActivityFromContext(ctx).Retry()
+		}
 		redactionSnapshot := c.Secrets.Snapshot()
 		leaseConn := c.leasedConnForTarget
 		if bulk {

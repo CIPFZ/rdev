@@ -232,6 +232,12 @@ func TestRemoteBrokerLaneTraffic(t *testing.T) {
 	})
 	for _, owner := range []broker.Owner{a, b} {
 		got := status(owner)
+		if owner == a && (got.Connection.DialStarted != 3 || got.Connection.DialSucceeded != 3 || got.Connection.RetryAttempts != 1 || got.Connection.DialInFlight != 0) {
+			t.Fatalf("retry/dial diagnostic: %+v", got.Connection)
+		}
+		if owner == b && (got.Connection.DialStarted != 0 || got.Connection.RetryAttempts != 0) {
+			t.Fatal("shared project inherited dial/retry history")
+		}
 		if got.Traffic[broker.LaneControl].SentBytes == 0 || got.Traffic[broker.LaneBulk].ReceivedBytes == 0 {
 			t.Fatal("real lanes not measured")
 		}
@@ -253,6 +259,9 @@ func TestRemoteBrokerLaneTraffic(t *testing.T) {
 		t.Fatal("MCP traffic status decode")
 	}
 	for lane, value := range status(b).Traffic {
+		if mcpStatus.Scheduler.Connection.DialStarted != 0 || mcpStatus.Scheduler.Connection.RetryAttempts != 0 {
+			t.Fatal("MCP diagnostic owner isolation failed")
+		}
 		if mcpStatus.Scheduler.Traffic[lane] != value {
 			t.Fatal("MCP/CLI counters differ")
 		}

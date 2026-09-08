@@ -67,6 +67,7 @@ type schedulerCount struct {
 }
 
 type SchedulerSnapshot struct {
+	Connection       observe.ConnectionSnapshot       `json:"connection"`
 	Traffic          map[Lane]observe.TrafficSnapshot `json:"traffic"`
 	BulkPayloadBytes uint64                           `json:"bulk_payload_bytes"`
 	Limits           QoSConfig                        `json:"limits"`
@@ -82,6 +83,7 @@ type SchedulerSnapshot struct {
 }
 
 type scheduledItem struct {
+	connection  *observe.ConnectionActivity
 	traffic     *observe.Traffic
 	releaseHost func()
 	ctx         context.Context
@@ -97,6 +99,7 @@ type dispatchResult struct {
 	err  error
 }
 type ownerStats struct {
+	connection                  *observe.ConnectionActivity
 	traffic                     map[Lane]*observe.Traffic
 	bulkBytes                   uint64
 	started, rejected, canceled uint64
@@ -188,6 +191,7 @@ func (s *Scheduler) Snapshot(owner string) SchedulerSnapshot {
 		out.Lanes[lane] = c
 	}
 	st := s.stats[owner]
+	out.Connection = st.connection.Snapshot()
 	out.Traffic = make(map[Lane]observe.TrafficSnapshot, len(schedulerLanes))
 	for _, lane := range schedulerLanes {
 		out.Traffic[lane] = st.traffic[lane].Snapshot()
@@ -359,6 +363,10 @@ func (s *Scheduler) scheduleLocked() {
 			s.running[item] = true
 			wait := time.Since(item.enqueued).Nanoseconds()
 			st := s.statLocked(item.owner)
+			if st.connection == nil {
+				st.connection = &observe.ConnectionActivity{}
+			}
+			item.connection = st.connection
 			if st.traffic == nil {
 				st.traffic = make(map[Lane]*observe.Traffic)
 			}
@@ -379,7 +387,7 @@ func (s *Scheduler) run(item *scheduledItem) {
 	var resp *proto.Response
 	err := item.ctx.Err()
 	if err == nil {
-		ctx := observe.WithTraffic(item.ctx, item.traffic)
+		ctx := observe.WithConnectionActivity(observe.WithTraffic(item.ctx, item.traffic), item.connection)
 		if s.pool != nil {
 			ctx = context.WithValue(ctx, hostPoolLeaseKey{}, hostPoolBinding{pool: s.pool, host: item.host})
 		}

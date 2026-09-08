@@ -534,7 +534,7 @@ With a `status` grant, `rdev broker status` and MCP `rdev_broker_status` return 
 principal's ingress usage, detached observation bytes, scheduler quotas and lane
 counts, queue timing, bulk payload bytes, wait subscribers and the policy digest.
 Other owners' connection counts and identities are excluded. Pool lifecycle and
-transport-failure reason projection remains open acceptance work.
+connection setup/retry diagnostics are described below.
 
 `rdev ls HOST [PATH] [-limit N]` and MCP `rdev_list` require the broker's exact-host
 `list` decision. They return the remote listing, including truncation/cursor and
@@ -560,7 +560,7 @@ or output. Global `pool.health` and `audit.health` reject host-scoped/wire reque
 envelopes; an exact-host health grant cannot expose global information.
 
 Warm reasons currently include `capacity_lru`, `capacity_reload`, `idle_ttl`,
-`last_client` and `shutdown`. Full connection failure/probe/dial reasons remain open. A blocked detached bulk close keeps
+`last_client` and `shutdown`. Per-owner connection setup/retry diagnostics are described below; wider failure matrices remain open. A blocked detached bulk close keeps
 its host slot reserved, with at most one such closer per host; it runs outside
 the daemon signal/reload loop. Shutdown waits within its existing deadline.
 
@@ -666,3 +666,31 @@ persistent `audit_incomplete` remains the signal for that uncertainty.
 local success and rejection outcomes, real approved append/admission/query
 correlation, project isolation, and payload/token exclusion. It flushes through
 owner audit queries before SIGKILL, then verifies recovery of those flushed traces.
+
+
+## Connection setup and retry diagnostics
+
+Owner status includes `scheduler.connection`: dial attempts/successes/currently
+in-flight count, total/max dial duration in nanoseconds, application retry
+attempts, and a fixed `dial_failures` map. CLI and MCP share this projection.
+Stages are `validation`, `control_path`, `probe`, `agent_lookup`, `agent_install`,
+`agent_start`, `handshake`, `negotiation` and `canceled`. Cancellation takes
+precedence over the stage where teardown occurred. Durations include cleanup
+before a dial returns. Stages identify where setup failed, not the underlying
+network/OS cause, and never use error strings as labels.
+
+The principal that actually initiates a base/bulk dial owns its counts. A second
+project reusing that connection has zero new dials. An application retry is
+counted when the client enters its next attempt, even if that attempt then fails
+before writing an application frame. Bootstrap SSH subprocesses are phases of a
+single dial, not separate attempts. These counters share the scheduler's bounded
+recent-owner history and reset on restart/history eviction; concurrent snapshots
+can observe individual counters at slightly different instants.
+
+`make remote-connection-diagnostics` verifies actual SSH success, injected probe
+failure, missing local agent artifacts, a real remote installation obstruction,
+held-handshake cancellation and recovery while another project keeps its shared
+agent PID. `make remote-lane-traffic` additionally checks one actual read retry,
+three base/bulk setup attempts and zero borrowed dial/retry counts in the other
+project's CLI/MCP status. The complete phase/cause/host failure matrix remains
+separate acceptance work.
