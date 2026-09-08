@@ -263,6 +263,13 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				service.EndRequest()
 			}
 		}
+		// Detached job observation must outlive the local frontend connection:
+		// a watcher closing its socket cannot cancel the shared remote wait used
+		// by other watchers (or leave the job without an observer).
+		requestCtx := connCtx
+		if req.Wire != nil && req.Wire.Op == proto.OpJobWait {
+			requestCtx = context.Background()
+		}
 		if boundOwner != (broker.Owner{}) && req.Owner != boundOwner {
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: "owner cannot change on an authenticated connection"})
 			endRequest()
@@ -364,7 +371,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		quotaHost := req.Host
-		if err := service.Quota.AcquireHostContext(connCtx, quotaHost, req.Owner.Key()); err != nil {
+		if err := service.Quota.AcquireHostContext(requestCtx, quotaHost, req.Owner.Key()); err != nil {
 			service.Audit.Append(broker.AuditEvent{Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 			endRequest()
@@ -377,7 +384,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		case "sync.push", "sync.pull", "write", "write_file":
 			lane = broker.LaneBulk
 		}
-		if err := service.Lanes.AcquireContext(connCtx, lane); err != nil {
+		if err := service.Lanes.AcquireContext(requestCtx, lane); err != nil {
 			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 			endRequest()
@@ -385,13 +392,13 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		if req.Wire != nil {
 			dispatch := func() (*proto.Response, error) {
-				return service.DispatchFair(connCtx, req.Owner.Key(), lane, func() (*proto.Response, error) { return service.Dispatch(connCtx, req.Host, req.Wire) })
+				return service.DispatchFair(requestCtx, req.Owner.Key(), lane, func() (*proto.Response, error) { return service.Dispatch(requestCtx, req.Host, req.Wire) })
 			}
 			var wireResp *proto.Response
 			var err error
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
 				jobKey, _ := json.Marshal(req.Wire.Job)
-				wireResp, err = service.DispatchShared(connCtx, req.Host+":"+string(jobKey), dispatch)
+				wireResp, err = service.DispatchShared(requestCtx, req.Host+":"+string(jobKey), dispatch)
 			} else {
 				wireResp, err = dispatch()
 			}
