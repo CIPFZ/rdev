@@ -118,3 +118,13 @@ daemon. Private versioned snapshots, scoped pagination and acknowledged-job
 SIGKILL/SSH-outage/reload/deletion-failure recovery now have runtime evidence.
 Pre-ACK job-start mutation intents, event history, upgrade and bounded shutdown
 remain incomplete; evidence and remaining risks are linked above.
+
+
+Shared-wait/TERM implementation `bd03436` passed committed-source `make check
+remote-wait remote-jobs remote-lifecycle stress-broker smoke-rdevd
+remote-phase5-runtime`, full repository race and two actual daemon race runs.
+Three normal and two race runs each verified 20 independent subscribers,
+initiator/follower SIGKILL, owner isolation, shared terminal operation ID/tail,
+SIGHUP and observation shutdown preserving the remote supervisor. Live wait
+semantics now have runtime evidence; durable event replay, pre-ACK mutation
+recovery and broader Phase5 gates remain In progress.

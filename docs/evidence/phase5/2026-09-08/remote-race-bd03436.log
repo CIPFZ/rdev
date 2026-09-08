@@ -1,0 +1,8 @@
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=1.016700214s; detached PID=852509 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (44.25s)
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=1.01622266s; detached PID=854175 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (44.18s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	89.446s

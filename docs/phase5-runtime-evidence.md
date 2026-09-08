@@ -590,3 +590,20 @@ This proves live wait coalescing, reconnect, cancellation and observation drain;
 it does not prove durable event replay after daemon crash, a full streaming API,
 bounded retention of WatchHub history or all mutation shutdown windows. These
 remain explicit P5-09/P5-16 gaps. Committed-source validation follows below.
+
+
+## Committed-source verification: bd03436
+
+Implementation commit: `bd03436` (`fix: detach shared job subscribers and
+preserve TERM output`).
+
+- [Complete check, stress and real lifecycle](evidence/phase5/2026-09-08/committed-check-bd03436.log): `make check remote-wait remote-jobs remote-lifecycle stress-broker smoke-rdevd remote-phase5-runtime` passed from the clean commit.
+- Three real 20-process wait runs passed, including identical terminal tail/operation IDs for 15 surviving subscribers, owner isolation and zero-subscriber reconnect. Normal daemon SIGTERM drain measured 10.618–14.585 ms; the detached job supervisor survived each restart.
+- Three detached-job recovery runs, three actual retry/cancellation runs and six remote lease cycles passed. Lease cycles took 65.361 seconds, retained the active agent, serviced 60 new-owner requests and ended with zero daemon SSH children. Broker stress passed 100 runs.
+- [Full repository race](evidence/phase5/2026-09-08/committed-race-bd03436.log): `go test -race ./... -count=1` passed, including the process TERM/output/ledger regression.
+- [Real daemon race wait](evidence/phase5/2026-09-08/remote-race-bd03436.log): two additional 20-process runs passed with the actual daemon and frontends instrumented by `-race` (89.446 seconds total). Drain measured 1.016–1.017 seconds including the race runtime's exit delay. Daemon SHA-256: `722def9da6f53652e900bb4cf7d612ea735cec5bbcbcce8d2494190bb1743279`.
+- Linux remote readiness/authentication/crash tests and real systemd user install/enable/start/reload/SIGKILL recovery/stop/start passed (PID `855303 -> 855364`). Remote normal daemon SHA-256: `ad14e6c430edc421f0a7833cb3401a62c8c869da6680a712f4f990731e84a36b`.
+
+Durable job event history, bounded replay retention, pre-ACK mutation intents,
+all mutation shutdown windows and the remaining mixed workload/platform/review
+gates remain incomplete. Passing live fan-out does not close those requirements.
