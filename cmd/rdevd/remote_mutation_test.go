@@ -306,8 +306,10 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 	verifyMutationFrontends(t, d, a, b, namespace, jobOp)
 	for _, owner := range []broker.Owner{a, b} {
 		audit := policyRuntimeRequest(t, wires[owner], broker.Request{Owner: owner, Operation: "audit_query"})
-		if !audit.OK || audit.AuditIncomplete {
-			t.Fatal("mutation audit unavailable")
+		// Earlier SIGKILL windows make the former asynchronous tail uncertain.
+		// Retained completed-operation correlation must still be exact below.
+		if !audit.OK || !audit.AuditIncomplete {
+			t.Fatal("mutation audit unavailable or crash-tail uncertainty hidden")
 		}
 		found := false
 		ref := broker.OperationReference(broker.Request{Wire: &proto.Request{OperationID: "op_runtime_mcp_append"}})

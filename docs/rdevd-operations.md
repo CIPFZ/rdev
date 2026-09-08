@@ -110,18 +110,44 @@ Audit events enter a bounded 1024-entry asynchronous queue. A writer flushes at
 25 ms or 64 events, maintaining the current segment and one rotated segment,
 each bounded by 8 MiB. `audit_query` performs a one-second durability barrier,
 then returns the calling owner's in-memory history and an incomplete marker if
-flush/recovery failed. The administrator-only `audit.health` operation requires
+flush/recovery failed or a durable continuity gap is known. The administrator-only `audit.health` operation requires
 its own policy grant and exposes pending, accepted/written, dropped, rotation,
 recovery and error counters. Ordinary owners cannot query those global counts.
 Writes continue after a recoverable sink failure, while historical errors remain
 visible. Closed/overloaded sinks count dropped events instead of blocking RPCs.
 
-Audit shutdown drains the bounded queue with a five-second caller deadline.
-SIGKILL can lose records still in memory (normally the last 25 ms; longer under
-sink failure). An invalid/torn on-disk record is reported as a recovery omission;
-an incomplete active-file tail is truncated before appending. Detecting an
-unclean shutdown's lost in-memory tail, a long-duration rotation/restart soak,
-and durable end-to-end operation correlation remain open Phase5 requirements.
+Audit shutdown uses the remaining time in the daemon's shared ten-second drain
+budget. Policy/job updates are already durable before acknowledgment and are not
+saved redundantly after drain. A standalone `AuditLog.Close` still has its own
+five-second default. SIGKILL can lose records still in memory (normally the last
+25 ms; longer under sink failure). A fixed private `.audit.continuity` marker is
+published before audit admission or torn-tail repair, and sealed only after the
+writer has flushed and closed both segments. Its schema-1 JSON is bounded to
+1 KiB and contains only active/incomplete state, an unclean-recovery count and
+SHA-256 digests of the sealed segments. It contains no principal names or payloads.
+
+A marker left active, an older writer changing sealed segments, migration from
+segments without a marker, or detected corruption makes completeness explicitly
+unknown. This flag survives later successful flushes, normal exits and restarts.
+`audit.health.incomplete` describes that historical uncertainty independently of
+current I/O health; `unclean_recoveries` counts reopened active markers, not the
+number of lost events. Ordinary owner queries expose only `audit_incomplete`,
+not global recovery counts. A clean seal is not an archive guarantee: query
+history and the two retained files still have their documented retention bounds.
+
+Do not delete the marker to hide a gap. It does not reconstruct missing events or
+claim protection from edits by the same OS user. A marker/segment publication
+failure leaves conservative recovery evidence; malformed, duplicate, null and
+public markers are rejected before readiness. `make remote-audit-continuity`
+exercises real crash, close-failure and project-isolation paths.
+`make remote-audit-upgrade` builds predecessor `08ff4fb` from Git and runs an actual
+downgrade/write/re-upgrade sequence; `RDEV_PREDECESSOR_COMMIT` selects another
+predecessor for a wider matrix. `make remote-audit-soak` defaults to ten active
+minutes with twenty independent producers and alternating SIGKILL/SIGTERM epochs.
+`RDEV_AUDIT_SOAK_SECONDS` can select 120–3600 seconds in whole minutes. The soak
+requires rotation in every minute, bounds private segment sizes, checks owner
+queries and explicit gaps, and records RSS/FD and completed-call measurements.
+Full storage-stall/power-loss, retention query and upgrade matrices remain open.
 
 ## Services and repeatable validation
 

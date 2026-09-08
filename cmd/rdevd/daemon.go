@@ -96,31 +96,17 @@ func runDaemon(args []string) error {
 	service := broker.NewService(agentLookup(*agentDir))
 	service.SetReady(false)
 	policyPath, jobsPath := *socket+".policy", *socket+".jobs"
-	policyLoaded, jobsLoaded := false, false
 	defer func() {
 		service.SetReady(false)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := service.Close(shutdownCtx); err != nil {
-			log.Printf("rdevd: shutdown: %v", err)
+		closeErr := service.Close(shutdownCtx)
+		if closeErr != nil {
+			log.Printf("rdevd: shutdown: %v", closeErr)
 		}
-		if err := func() error {
-			if policyLoaded {
-				return service.SavePolicy(policyPath)
-			}
-			return nil
-		}(); err != nil {
-			log.Printf("rdevd: policy save failed: %v", err)
-		}
-		if err := func() error {
-			if jobsLoaded {
-				return service.Jobs.Save(jobsPath)
-			}
-			return nil
-		}(); err != nil {
-			log.Printf("rdevd: job save failed: %v", err)
-		}
-		if err := service.Audit.Close(); err != nil {
+		// Policy and job mutations are already persisted before acknowledgment.
+		// Do not start redundant unbounded storage writes after the drain deadline.
+		if err := service.Audit.CloseContext(shutdownCtx, closeErr == nil); err != nil {
 			log.Printf("rdevd: audit close failed: %v", err)
 		}
 	}()
@@ -135,7 +121,6 @@ func runDaemon(args []string) error {
 	if err := service.ConfigurePolicy(policyPath); err != nil {
 		return fmt.Errorf("policy load failed: %w", err)
 	}
-	policyLoaded = true
 	if err := service.Audit.ConfigureFile(*socket+".audit", 8<<20); err != nil {
 		return fmt.Errorf("audit initialization failed: %w", err)
 	}
@@ -153,7 +138,6 @@ func runDaemon(args []string) error {
 	if err := service.Jobs.ConfigurePersistence(jobsPath); err != nil {
 		return fmt.Errorf("job registry load failed: %w", err)
 	}
-	jobsLoaded = true
 	if err := service.Mutations.ConfigurePersistence(*socket + ".mutations"); err != nil {
 		return fmt.Errorf("mutation registry load failed: %w", err)
 	}

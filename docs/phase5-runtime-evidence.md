@@ -924,3 +924,48 @@ unavailable through this frontend. Full pool lifecycle/eviction projection and
 independent external review remain open. The preceding ingress QoS failure and
 isolated reruns remain part of the evidence; no wider contention guarantee is
 inferred from this frontend correction.
+
+
+## Audit crash continuity, predecessor detection and bounded close
+
+The audit writer now persists a small private open marker before admitting
+requests or repairing a torn tail. Clean shutdown stores segment SHA-256 seals;
+reopening an active marker or detecting an older writer's changes makes the
+historical incomplete flag persistent. Recovery counts are separately authorized
+health data; owner queries retain exact principal filtering and expose only a
+boolean uncertainty signal. No event, principal name, command or output is stored
+in the continuity marker.
+
+The daemon gives audit close the remaining time in its ten-second shutdown
+budget and removes redundant policy/job saves, since those updates already
+persist before acknowledgment. A failed broker drain remains incomplete even if
+the audit queue itself eventually finishes. Existing mutation crash tests now
+require, rather than incorrectly prohibit, `audit_incomplete` after SIGKILL; their
+operation-reference and cross-owner assertions are unchanged.
+
+Implementing-agent review found that a clean flag alone could miss a predecessor
+writer that ignores the marker. The seal check and actual predecessor integration
+cover that path. Review also moved marker publication before tail repair so a
+subsequent initialization failure cannot erase the only evidence of the gap.
+Tests caught a null optional seal conflicting with the shared strict state parser;
+open markers now omit the absent seal, preserving the parser's null rejection.
+
+Initial actual daemon/OpenSSH continuity, repeated predecessor downgrade/upgrade,
+strict/private marker loading, late close-publication failure and targeted race
+checks passed. The long-runtime harness uses twenty actual producer processes,
+continuous status/remote ping, audit rotation and alternating crash/graceful epochs.
+It requires zero reported sink drops/errors, bounded private files, exact-owner
+queries and persistent gap state, and records RSS/FD high water marks. Full batch
+and committed-artifact evidence follow below. This is implementing-agent review;
+independent external review and the broader shutdown/retention/upgrade matrix
+remain open.
+
+Pre-commit final production code passed `make check remote-audit-continuity
+remote-audit-upgrade remote-mutation remote-events remote-jobs smoke-rdevd`, full
+repository race, and an actual daemon race continuity test (8.88 seconds). A
+120-second development soak passed with 20 processes per epoch: 120553 completed
+calls, 132016 records written before stop checkpoints, four rotations, one
+SIGKILL recovery, zero reported sink drops/errors, peak observed RSS 38468 KiB and
+33 daemon FDs. Three actual downgrade/upgrade runs used predecessor
+`08ff4fb91478205af93e9fdf0752e88b47c33e72`. The required longer committed-artifact
+soak and broader regression logs will be recorded after they finish.

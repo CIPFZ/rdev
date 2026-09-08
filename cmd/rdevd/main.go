@@ -345,7 +345,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			flushCtx, flushCancel := context.WithTimeout(requestCtx, time.Second)
 			flushErr := service.Audit.Flush(flushCtx)
 			flushCancel()
-			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key()), AuditIncomplete: flushErr != nil || service.Audit.HasLegacyRecords() || service.Audit.SinkStatus().State == "degraded"})
+			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key()), AuditIncomplete: flushErr != nil || service.Audit.HasLegacyRecords() || service.Audit.SinkStatus().Incomplete || service.Audit.SinkStatus().State == "degraded"})
 			endRequest()
 			continue
 		}

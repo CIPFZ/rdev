@@ -16,21 +16,25 @@ const auditFlushInterval = 25 * time.Millisecond
 const maxAuditSegment = 64 << 20
 
 type AuditSinkStatus struct {
-	Rotations uint64 `json:"rotations"`
-	State     string `json:"state"`
-	Accepted  uint64 `json:"accepted"`
-	Written   uint64 `json:"written"`
-	Dropped   uint64 `json:"dropped"`
-	Errors    uint64 `json:"errors"`
-	Recovered uint64 `json:"recovered"`
-	Pending   int    `json:"pending"`
-	LastError string `json:"last_error,omitempty"`
+	Incomplete        bool   `json:"incomplete"`
+	UncleanRecoveries uint64 `json:"unclean_recoveries"`
+	Rotations         uint64 `json:"rotations"`
+	State             string `json:"state"`
+	Accepted          uint64 `json:"accepted"`
+	Written           uint64 `json:"written"`
+	Dropped           uint64 `json:"dropped"`
+	Errors            uint64 `json:"errors"`
+	Recovered         uint64 `json:"recovered"`
+	Pending           int    `json:"pending"`
+	LastError         string `json:"last_error,omitempty"`
 }
 type auditWrite struct {
 	event AuditEvent
 	ack   chan error
 }
 type auditSink struct {
+	continuity                                      auditContinuity // immutable during writer lifetime
+	requireIncomplete                               atomic.Bool
 	rotations                                       atomic.Uint64
 	pending                                         atomic.Int64
 	path                                            string
@@ -45,7 +49,7 @@ type auditSink struct {
 }
 
 func (s *auditSink) status() AuditSinkStatus {
-	st := AuditSinkStatus{Rotations: s.rotations.Load(), State: "ok", Accepted: s.accepted.Load(), Written: s.written.Load(), Dropped: s.dropped.Load(), Errors: s.failures.Load(), Recovered: s.recovered.Load(), Pending: int(s.pending.Load())}
+	st := AuditSinkStatus{Incomplete: s.continuity.Incomplete || s.requireIncomplete.Load() || s.dropped.Load() > 0 || s.failures.Load() > 0 || s.recovered.Load() > 0, UncleanRecoveries: s.continuity.UncleanRecoveries, Rotations: s.rotations.Load(), State: "ok", Accepted: s.accepted.Load(), Written: s.written.Load(), Dropped: s.dropped.Load(), Errors: s.failures.Load(), Recovered: s.recovered.Load(), Pending: int(s.pending.Load())}
 	if code, ok := s.lastError.Load().(string); ok {
 		st.LastError = code
 	}
@@ -136,14 +140,35 @@ func newAuditSink(path string, maxBytes int64, history int) (*auditSink, []Audit
 	if path == "" || maxBytes < 1024 || maxBytes > maxAuditSegment {
 		return nil, nil, errors.New("audit segment budget must be between 1024 and 67108864 bytes")
 	}
+	continuity, known, err := readAuditContinuity(path + ".continuity")
+	if err != nil {
+		return nil, nil, err
+	}
+	if continuity.Active {
+		if continuity.UncleanRecoveries == 1<<63-1 {
+			return nil, nil, errors.New("audit continuity recovery counter exhausted")
+		}
+		continuity.UncleanRecoveries++
+		continuity.Incomplete = true
+	}
 	s := &auditSink{path: path, maxBytes: maxBytes, syncFile: func(f *os.File) error { return f.Sync() }, queue: make(chan auditWrite, auditQueueCapacity), done: make(chan struct{})}
 	rotated, err := readAuditSegment(path+".1", maxBytes)
 	if err != nil {
 		return nil, nil, err
 	}
-	prior, err := s.open()
+	prior, err := readAuditSegment(path, maxBytes)
 	if err != nil {
 		return nil, nil, err
+	}
+	// A predecessor daemon does not understand the continuity marker. Detect
+	// segment changes after the last seal instead of trusting its clean flag.
+	if known && !continuity.Active && *continuity.Seal != *sealAuditBytes(prior, rotated) {
+		continuity.Incomplete = true
+	}
+	existing := len(prior) > 0 || len(rotated) > 0
+	torn := len(prior) > 0 && prior[len(prior)-1] != '\n'
+	if torn {
+		prior = prior[:bytes.LastIndexByte(prior, '\n')+1]
 	}
 	events, invalid := recoverAuditEvents(rotated, history)
 	next, invalidNext := recoverAuditEvents(prior, history)
@@ -152,6 +177,20 @@ func newAuditSink(path string, maxBytes int64, history int) (*auditSink, []Audit
 		events = events[len(events)-history:]
 	}
 	s.recovered.Add(invalid + invalidNext)
+	if (!known && existing) || torn || s.recovered.Load() > 0 {
+		continuity.Incomplete = true
+	}
+	continuity.Active = true
+	continuity.Seal = nil
+	// Publish uncertainty before repairing the audit tail. Even a subsequent
+	// startup/storage failure must not erase the only evidence of that gap.
+	if err := saveAuditContinuity(path+".continuity", continuity); err != nil {
+		return nil, nil, err
+	}
+	if _, err := s.open(); err != nil {
+		return nil, nil, err
+	}
+	s.continuity = continuity
 	return s, events, nil
 }
 func (s *auditSink) rotate() error {
@@ -247,6 +286,18 @@ func (s *auditSink) run() {
 						s.failure("close_failed")
 					}
 					s.file = nil
+				}
+				continuity := s.continuity
+				seal, err := readAuditSeal(s.path, s.maxBytes)
+				if err != nil {
+					s.failure("continuity_seal_failed")
+					return
+				}
+				continuity.Active = false
+				continuity.Seal = seal
+				continuity.Incomplete = s.status().Incomplete
+				if err := saveAuditContinuity(s.path+".continuity", continuity); err != nil {
+					s.failure("continuity_commit_failed")
 				}
 				return
 			}

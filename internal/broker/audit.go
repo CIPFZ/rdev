@@ -41,7 +41,19 @@ func NewAuditLog(max int) *AuditLog {
 func (a *AuditLog) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	return a.CloseContext(ctx, true)
+}
+
+// complete is false if broker work failed to drain; the marker must retain that
+// uncertainty even if the audit queue itself finishes before this deadline.
+func (a *AuditLog) CloseContext(ctx context.Context, complete bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.mu.Lock()
+	if !complete && a.sink != nil {
+		a.sink.requireIncomplete.Store(true)
+	}
 	if !a.closed {
 		a.closed = true
 		if a.sink != nil {
