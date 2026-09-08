@@ -135,3 +135,16 @@ is claimed while the independent-agent authorization question is pending.
 P5-14 remains In progress: this corrects owner isolation and low-sensitivity
 fields but does not prove long-running rotation/recovery, audit sink failure
 behavior, or end-to-end request/policy/approval correlation.
+
+
+## Committed-source verification: 455ff16
+
+Implementation commit: `455ff163dc15cd4db932a567271f45b2ac720f59`
+(`fix: preserve exact principal identity in broker audit queries`).
+
+- [Repository and remote process verification](evidence/phase5/2026-09-08/committed-check-455ff16.log): `make check remote-phase5-runtime` passed against the clean commit, including the final legacy-omission negative on the real remote daemon. Remote daemon SHA-256: `1822a66e59fed386d729259c39507bc0833f2a465208656444ead7e60bd9bb23`.
+- [Broker race verification](evidence/phase5/2026-09-08/broker-race-455ff16.log): `go test -race ./cmd/rdevd ./internal/broker -count=1` passed.
+- The systemd runtime test again passed actual installation and recovery (PID `743246 -> 743306`).
+
+P5-14 and the overall Phase5 gate remain In progress for the outstanding
+requirements above. This evidence does not claim sustained audit rotation.

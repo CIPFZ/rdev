@@ -59,3 +59,9 @@ Batch commit `020230b43e0ac6e74322728e72b7c7c02fee206e` passed committed-source
 `make remote-phase5-runtime` (daemon credentials/crash tests and real systemd
 user service recovery). Logs and artifact SHA-256 are linked from the runtime
 evidence record. Phase5 and the Multi Agent Gate remain **In progress**.
+
+
+Audit follow-up `455ff163dc15cd4db932a567271f45b2ac720f59` passed `make check`,
+broker race and the real remote daemon suite. It proves exact owner-query
+isolation and explicit legacy omissions across restart, not the outstanding
+long-duration rotation/recovery portion of P5-14.
