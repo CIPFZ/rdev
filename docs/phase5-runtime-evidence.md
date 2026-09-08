@@ -969,3 +969,29 @@ SIGKILL recovery, zero reported sink drops/errors, peak observed RSS 38468 KiB a
 33 daemon FDs. Three actual downgrade/upgrade runs used predecessor
 `08ff4fb91478205af93e9fdf0752e88b47c33e72`. The required longer committed-artifact
 soak and broader regression logs will be recorded after they finish.
+
+## Committed audit continuity verification: 41cddb4
+
+Implementation `41cddb4a5f859855b43b4746d684be9a4cc5a71d` was pushed to
+`origin/main`. The following committed-source command exited successfully:
+
+```sh
+make GO=/data/tmp/rdev-toolchain/go/bin/go \
+  RDEV_REMOTE_SSH=service-deploy \
+  RDEV_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config \
+  check remote-audit-continuity remote-audit-upgrade remote-mutation \
+  remote-events remote-qos stress-broker smoke-rdevd \
+  remote-phase5-runtime remote-audit-soak
+```
+
+- [Committed regression and soak log](evidence/phase5/2026-09-09/committed-audit-41cddb4.log): full check, three continuity and predecessor runs, mutation/history regressions, three real QoS runs, 100-run stress, readiness and Linux service recovery passed. Remote daemon SHA-256: `96946429b53eaaac33d364d9af12144633be3aba3cfbe0eced0a73aad6408e49`. Systemd user install/enable/start/reload/SIGKILL recovery/stop/start passed, PID `984908 -> 984988`.
+- The 600-active-second soak completed in 607.818 workload seconds (608.39-second test): 20 independent producers per epoch, 603079 completed calls, 660505 written records observed before stop checkpoints, 21 rotations and five SIGKILL recoveries across ten alternating SIGKILL/SIGTERM epochs. Private file bounds, exact-project queries, persistent possible crash-tail loss and zero reported sink drops/errors passed. Peak observed daemon RSS was 41432 KiB and FD count 34. Counts are checkpoint observations, not a claim that every event survived SIGKILL.
+- Three real QoS regressions passed unchanged 2-times p95 thresholds at 1.234–1.448 times baseline. They wrote 146422 records with three rotations and zero sink drops/errors. These passes do not erase the earlier `7026bdf` loaded-run failure or establish the wider contention matrix.
+- [Final-code pre-commit check and integration](evidence/phase5/2026-09-09/validation-check-41cddb4.log), [full repository race](evidence/phase5/2026-09-09/validation-race-41cddb4.log), [actual daemon race continuity](evidence/phase5/2026-09-09/validation-remote-race-41cddb4.log) and [120-second development soak](evidence/phase5/2026-09-09/audit-soak-development-41cddb4.log) distinguish development checks from the committed artifact run.
+
+The ten-minute runtime gate closes the initial sustained rotation/crash-recovery
+evidence gap for this audit implementation. Full retention/cursor coverage, storage
+stall/power-loss/upgrade cases, remaining route correlation and independent
+external review remain open; P5-14 and Phase5 remain In progress. Continuity marks
+possible loss rather than identifying an exact missing-event count, and segment
+seals do not provide tamper-proof protection against the same OS user.

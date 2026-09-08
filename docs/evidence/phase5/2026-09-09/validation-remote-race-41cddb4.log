@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerAuditContinuity
+    remote_audit_continuity_test.go:129: actual daemon/OpenSSH audit continuity: clean exit/restart remains complete; SIGKILL leaves durable open marker and explicit possible-tail-loss flag; later clean restart preserves gap; real marker publication failure recovered as another unclean run; exact-project audit history and separately authorized health; no payload/owner names in private bounded marker
+--- PASS: TestRemoteBrokerAuditContinuity (8.88s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	9.900s
