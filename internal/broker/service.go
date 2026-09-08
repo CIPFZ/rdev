@@ -34,7 +34,9 @@ type Service struct {
 	approvalByToken  map[string]Approval
 	readiness        Readiness
 	sharedMu         sync.Mutex
-	shared           map[string]*sharedDispatch
+	shared           map[sharedKey]*sharedDispatch
+	observationCtx   context.Context
+	stopObservations context.CancelFunc
 	Jobs             *JobRegistry
 	Principals       PrincipalAuthority
 	dispatchMu       sync.RWMutex
@@ -42,14 +44,25 @@ type Service struct {
 }
 
 type sharedDispatch struct {
-	done chan struct{}
-	resp *proto.Response
-	err  error
+	done        chan struct{}
+	resp        *proto.Response
+	err         error
+	subscribers int
 }
+
+type sharedKey struct{ owner, request string }
+type SharedWaitStatus struct {
+	Observers   int `json:"observers"`
+	Subscribers int `json:"subscribers"`
+}
+
+const maxSharedSubscribers = 512
+const maxOwnerSubscribers = 128
 
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry()}
+	observationCtx, stopObservations := context.WithCancel(context.Background())
+	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[sharedKey]*sharedDispatch), Jobs: NewJobRegistry(), observationCtx: observationCtx, stopObservations: stopObservations}
 	s.SetReady(true)
 	return s
 }
@@ -114,29 +127,77 @@ func (s *Service) SubscribeJob(key string) (<-chan any, func()) {
 
 // DispatchShared coalesces concurrent observations of the same detached job
 // set. Only the first caller performs remote work; followers receive its result.
-func (s *Service) DispatchShared(ctx context.Context, key string, fn func() (*proto.Response, error)) (*proto.Response, error) {
+func (s *Service) DispatchShared(ctx context.Context, owner, request string, fn func(context.Context) (*proto.Response, error)) (*proto.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := sharedKey{owner, request}
 	s.sharedMu.Lock()
-	if current := s.shared[key]; current != nil {
+	if s.closed.Load() {
 		s.sharedMu.Unlock()
-		select {
-		case <-current.done:
-			return current.resp, current.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		return nil, ErrClosed
+	}
+	ownerObservers, ownerSubscribers, totalSubscribers := 0, 0, 0
+	for k, current := range s.shared {
+		totalSubscribers += current.subscribers
+		if k.owner == owner {
+			ownerObservers++
+			ownerSubscribers += current.subscribers
 		}
 	}
-	current := &sharedDispatch{done: make(chan struct{})}
-	s.shared[key] = current
-	s.sharedMu.Unlock()
-	current.resp, current.err = fn()
-	if current.err == nil && current.resp != nil {
-		s.Watches.Publish(key, current.resp)
+	if totalSubscribers >= maxSharedSubscribers || ownerSubscribers >= maxOwnerSubscribers {
+		s.sharedMu.Unlock()
+		return nil, ErrQueueFull
 	}
-	s.sharedMu.Lock()
-	delete(s.shared, key)
-	close(current.done)
+	current := s.shared[key]
+	if current == nil {
+		limits := s.config.Get().QoS.effective()
+		if len(s.shared) >= limits.MaxActive+limits.MaxQueued || ownerObservers >= limits.PerOwner+limits.PerOwnerQueued {
+			s.sharedMu.Unlock()
+			return nil, ErrQueueFull
+		}
+		// The observer has its own lease and drain accounting. Losing every
+		// frontend must neither release its active transport nor strand shutdown.
+		if !s.BeginRequest() {
+			s.sharedMu.Unlock()
+			return nil, ErrClosed
+		}
+		current = &sharedDispatch{done: make(chan struct{})}
+		s.shared[key] = current
+		go func() {
+			defer s.EndRequest()
+			current.resp, current.err = fn(s.observationCtx)
+			if current.err == nil && current.resp != nil {
+				s.Watches.Publish(owner+"\x00"+request, current.resp)
+			}
+			s.sharedMu.Lock()
+			delete(s.shared, key)
+			close(current.done)
+			s.sharedMu.Unlock()
+		}()
+	}
+	current.subscribers++
 	s.sharedMu.Unlock()
-	return current.resp, current.err
+	defer func() { s.sharedMu.Lock(); current.subscribers--; s.sharedMu.Unlock() }()
+	select {
+	case <-current.done:
+		return current.resp, current.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Service) SharedWaitStatus(owner string) SharedWaitStatus {
+	s.sharedMu.Lock()
+	defer s.sharedMu.Unlock()
+	var result SharedWaitStatus
+	for key, current := range s.shared {
+		if key.owner == owner {
+			result.Observers++
+			result.Subscribers += current.subscribers
+		}
+	}
+	return result
 }
 func (s *Service) BeginRequest() bool {
 	if s.config == nil || !s.config.BeginRequest() {
@@ -301,6 +362,7 @@ func (s *Service) Close(ctx context.Context) error {
 	if s.closed.Swap(true) {
 		return ErrClosed
 	}
+	s.stopObservations()
 	_ = s.Drain(ctx)
 	err := s.Scheduler.Close(ctx)
 	s.client.Close()

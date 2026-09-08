@@ -24,6 +24,7 @@ type Request struct {
 	Since           time.Time      `json:"since,omitempty"`
 }
 type Response struct {
+	SharedWaits     *SharedWaitStatus  `json:"shared_waits,omitempty"`
 	AuditHealth     *AuditSinkStatus   `json:"audit_health,omitempty"`
 	Scheduler       *SchedulerSnapshot `json:"scheduler,omitempty"`
 	ID              string             `json:"id"`

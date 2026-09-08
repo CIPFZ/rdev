@@ -160,13 +160,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				service.EndRequest()
 			}
 		}
-		// Detached job observation must outlive the local frontend connection:
-		// a watcher closing its socket cannot cancel the shared remote wait used
-		// by other watchers (or leave the job without an observer).
 		requestCtx := connCtx
-		if req.Wire != nil && req.Wire.Op == proto.OpJobWait {
-			requestCtx = context.Background()
-		}
 		if boundOwner != (broker.Owner{}) && req.Owner != boundOwner {
 			_ = enc.Encode(broker.Response{ID: req.ID, Error: "owner cannot change on an authenticated connection"})
 			endRequest()
@@ -292,8 +286,8 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		lane := broker.LaneForOperation(req.Operation)
 		if req.Wire != nil {
-			dispatch := func() (*proto.Response, error) {
-				return service.DispatchScheduled(requestCtx, req.Host, req.Owner.Key(), lane, func(dispatchCtx context.Context) (*proto.Response, error) {
+			dispatch := func(ctx context.Context) (*proto.Response, error) {
+				return service.DispatchScheduled(ctx, req.Host, req.Owner.Key(), lane, func(dispatchCtx context.Context) (*proto.Response, error) {
 					if approvedTarget != "" {
 						return service.DispatchApproved(dispatchCtx, req.Host, req.Wire, approvedTarget)
 					}
@@ -303,10 +297,10 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			var wireResp *proto.Response
 			var err error
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
-				jobKey, _ := json.Marshal([]any{req.Owner, req.Host, req.Wire.Job})
-				wireResp, err = service.DispatchShared(requestCtx, string(jobKey), dispatch)
+				jobKey, _ := json.Marshal([]any{req.Owner, req.Host, req.Wire.Job, req.Wire.DeadlineUnixMilli})
+				wireResp, err = service.DispatchShared(requestCtx, req.Owner.Key(), string(jobKey), dispatch)
 			} else {
-				wireResp, err = dispatch()
+				wireResp, err = dispatch(requestCtx)
 			}
 			if err != nil {
 				result := "dispatch_error"
@@ -336,12 +330,15 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		var scheduler *broker.SchedulerSnapshot
+		var sharedWaits *broker.SharedWaitStatus
 		if req.Operation == "status" {
 			snapshot := service.Scheduler.Snapshot(req.Owner.Key())
 			scheduler = &snapshot
+			waits := service.SharedWaitStatus(req.Owner.Key())
+			sharedWaits = &waits
 		}
 		service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
-		_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Scheduler: scheduler})
+		_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Scheduler: scheduler, SharedWaits: sharedWaits})
 		endRequest()
 	}
 }

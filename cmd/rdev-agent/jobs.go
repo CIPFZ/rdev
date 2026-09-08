@@ -62,6 +62,7 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 // jobMeta is the on-disk record. It is the single source of truth: a fresh
 // agent process reconstructs everything by reading these files.
 type jobMeta struct {
+	SignalRelay   bool     `json:"signal_relay,omitempty"`
 	SchemaVersion int      `json:"schema_version"`
 	ID            string   `json:"id"`
 	Label         string   `json:"label,omitempty"`

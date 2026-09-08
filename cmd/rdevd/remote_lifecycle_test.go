@@ -95,7 +95,7 @@ type lifecycleProcess struct {
 
 func startLifecycleProcess(t *testing.T, d *runtimeDaemon, owner broker.Owner, request *proto.Request, hold bool) *lifecycleProcess {
 	t.Helper()
-	path := filepath.Join(d.dir, owner.ClientID+".result")
+	path := filepath.Join(t.TempDir(), owner.ClientID+".result")
 	logPath := path + ".log"
 	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {

@@ -189,6 +189,7 @@ func startJobTransaction(p *proto.JobParams, id, dir string, effective proto.Res
 	}
 
 	meta := &jobMeta{
+		SignalRelay:        true,
 		SchemaVersion:      statepkg.CurrentSchemaVersion,
 		ID:                 id,
 		Label:              p.Label,
@@ -289,12 +290,11 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		}
 	}
 
-	// Signal the supervisor group and the separately isolated child group. The
-	// latter is essential when a child spawns descendants: killing only the
-	// direct child would orphan those descendants after a timeout/stop.
+	// Modern supervisors relay TERM and then flush logs and terminal status.
+	// KILL and legacy supervisors still require signaling both isolated groups.
 	groupErr := syscall.Kill(-meta.PID, sig)
 	childGroupErr := error(nil)
-	if childPID > 0 {
+	if childPID > 0 && (sig == syscall.SIGKILL || !meta.SignalRelay || groupErr != nil) {
 		childGroupErr = syscall.Kill(-childPID, sig)
 	}
 	if groupErr != nil {

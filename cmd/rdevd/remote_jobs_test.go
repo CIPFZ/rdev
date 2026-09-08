@@ -40,30 +40,8 @@ func TestRemoteBrokerJobRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.env = append(d.env, "RDEV_JOB_SSH_GATE="+gate)
-	// Cleanup only this test namespace's supervisor and actual child process
-	// groups. Parent checks prevent a stale/reused child PID from being signaled.
-	t.Cleanup(func() {
-		_ = os.Remove(gate)
-		if out, err := sshRun(`import os,sys,signal,json
-root=os.path.expanduser('~/'+sys.argv[1]);binary=root+'/rdev-agent'
-for entry in os.listdir('/proc'):
- if not entry.isdigit(): continue
- try:
-  pid=int(entry);args=open('/proc/'+entry+'/cmdline','rb').read().split(b'\0')
-  if len(args)<3 or os.fsdecode(args[0])!=binary or args[1]!=b'-supervise': continue
-  directory=os.fsdecode(args[2])
-  if not directory.startswith(root+'/jobs/'): continue
-  try:
-   child=json.load(open(directory+'/child.json'))['child_pid']
-   stat=open('/proc/'+str(child)+'/stat').read().rsplit(')',1)[1].split()
-   if int(stat[1])==pid and os.getpgid(child)==child: os.killpg(child,signal.SIGKILL)
-  except (FileNotFoundError,ProcessLookupError,KeyError): pass
-  if os.getpgid(pid)==pid: os.killpg(pid,signal.SIGKILL)
- except (FileNotFoundError,ProcessLookupError): pass
-`); err != nil {
-			t.Errorf("job cleanup: %v %s", err, out)
-		}
-	})
+	t.Cleanup(func() { _ = os.Remove(gate) })
+	cleanupRemoteJobSupervisors(t, sshRun)
 	d.start()
 	wires := map[broker.Owner]*runtimeWire{}
 	connect := func() {
@@ -208,4 +186,30 @@ for entry in os.listdir('/proc'):
 	}
 	t.Log("real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once")
 	t.Logf("remote supervisor PIDs retained across recovery: project A=%d project B=%d; final proof file values=%v", infoA.PID, infoB.PID, proofs)
+}
+
+func cleanupRemoteJobSupervisors(t *testing.T, sshRun func(string) ([]byte, error)) {
+	t.Helper()
+	// Cleanup only the exact test namespace and verified child process groups.
+	t.Cleanup(func() {
+		if out, err := sshRun(`import os,sys,signal,json
+root=os.path.expanduser('~/'+sys.argv[1]);binary=root+'/rdev-agent'
+for entry in os.listdir('/proc'):
+ if not entry.isdigit(): continue
+ try:
+  pid=int(entry);args=open('/proc/'+entry+'/cmdline','rb').read().split(b'\0')
+  if len(args)<3 or os.fsdecode(args[0])!=binary or args[1]!=b'-supervise': continue
+  directory=os.fsdecode(args[2])
+  if not directory.startswith(root+'/jobs/'): continue
+  try:
+   child=json.load(open(directory+'/child.json'))['child_pid']
+   stat=open('/proc/'+str(child)+'/stat').read().rsplit(')',1)[1].split()
+   if int(stat[1])==pid and os.getpgid(child)==child: os.killpg(child,signal.SIGKILL)
+  except (FileNotFoundError,ProcessLookupError,KeyError): pass
+  if os.getpgid(pid)==pid: os.killpg(pid,signal.SIGKILL)
+ except (FileNotFoundError,ProcessLookupError): pass
+`); err != nil {
+			t.Errorf("job cleanup: %v %s", err, out)
+		}
+	})
 }

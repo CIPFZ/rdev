@@ -61,7 +61,7 @@ func TestServiceDispatchSharedCoalesces(t *testing.T) {
 	s := NewService(nil)
 	var mu sync.Mutex
 	calls := 0
-	fn := func() (*proto.Response, error) {
+	fn := func(context.Context) (*proto.Response, error) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -73,7 +73,7 @@ func TestServiceDispatchSharedCoalesces(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := s.DispatchShared(context.Background(), "job", fn); err != nil {
+			if _, err := s.DispatchShared(context.Background(), "owner", "job", fn); err != nil {
 				t.Error(err)
 			}
 		}()

@@ -307,3 +307,20 @@ Shared job listing requires an agent advertising `job_filter_ids`; an older
 agent receives no scoped request and the client reports unsupported_feature.
 Upgrade the agent artifact to regain scoped listing. Filtering precedes the
 remote limit and totals, so another project's newer jobs cannot hide owned jobs.
+
+
+## Shared job wait lifecycle
+
+A disconnected wait frontend releases its subscription immediately. The broker
+keeps one observation and its transport lease until the remote wait budget ends,
+the job becomes terminal or the broker shuts down. Reconnecting with the same
+owner, host, wait parameters and explicit deadline joins that active observation.
+Different owners never share broker results. Authenticated `status` includes
+owner-scoped `shared_waits.observers` and `shared_waits.subscribers`.
+
+SIGTERM cancels observations before draining requests; this does not stop the
+detached remote job. Reconnect after restart using the original owner. Durable
+event replay remains unfinished. Modern remote supervisors relay job_stop TERM
+to the command group and persist output before exiting, preserving tail-on-exit.
+Forced KILL and old supervisors can still lose in-memory output; their existing
+stop semantics are retained.

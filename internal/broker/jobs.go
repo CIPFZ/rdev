@@ -458,6 +458,38 @@ func (r *JobRegistry) RecordResponse(host, owner string, req *proto.Request, res
 			}
 		}
 		return r.RemoveOwned(host, owner, ids...)
+	case proto.OpJobWait, proto.OpJobStatus, proto.OpJobStop, proto.OpJobLogs:
+		if req.Job == nil {
+			return fmt.Errorf("job response has no requested scope")
+		}
+		selected := make(map[string]bool, len(req.Job.IDs)+1)
+		selected[req.Job.ID] = req.Job.ID != ""
+		for _, id := range req.Job.IDs {
+			selected[id] = true
+		}
+		validate := func(id string) error {
+			ref, ok := r.GetHost(host, id)
+			if !selected[id] || !ok || ref.Owner != owner {
+				return fmt.Errorf("job response changed owner or target")
+			}
+			return nil
+		}
+		if resp.Job.Info != nil {
+			if err := validate(resp.Job.Info.ID); err != nil {
+				return err
+			}
+		}
+		for _, waited := range resp.Job.Waited {
+			if waited == nil {
+				return fmt.Errorf("invalid waited job")
+			}
+			if err := validate(waited.ID); err != nil {
+				return err
+			}
+			if waited.Info != nil && waited.Info.ID != waited.ID {
+				return fmt.Errorf("waited job changed identity")
+			}
+		}
 	case proto.OpJobList:
 		if req.Job == nil {
 			return fmt.Errorf("job list parameters missing")

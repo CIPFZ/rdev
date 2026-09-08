@@ -228,4 +228,13 @@ func TestJobRequestScopeIsImmutableAndRemovalCannotChangeTarget(t *testing.T) {
 	if len(r.Snapshot()) != 3 {
 		t.Fatal("invalid removal changed ownership")
 	}
+	for _, result := range []*proto.JobResult{
+		{Info: &proto.JobInfo{ID: "other"}},
+		{Info: &proto.JobInfo{ID: "second"}},
+		{Waited: []*proto.WaitedJob{{ID: "first", Info: &proto.JobInfo{ID: "other"}}}},
+	} {
+		if err := r.RecordResponse("h", "a\x00p", &proto.Request{Op: proto.OpJobWait, Job: &proto.JobParams{ID: "first"}}, &proto.Response{OK: true, Job: result}); err == nil {
+			t.Fatal("shared response escaped requested job scope")
+		}
+	}
 }

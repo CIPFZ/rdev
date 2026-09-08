@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -49,6 +50,10 @@ func killJobChildGroup(pid int) {
 // outcome in <jobDir>/status.json. It never returns; it exits with the child's
 // code so `ps` and any outer waiter see a faithful status.
 func runSupervisor(jobDir string, argv []string) {
+	// Install before the metadata start barrier. TERM during startup is queued
+	// until the child can receive it, so the supervisor can still persist output.
+	stopSignals := make(chan os.Signal, 4)
+	signal.Notify(stopSignals, syscall.SIGTERM, syscall.SIGINT)
 	if len(argv) == 0 {
 		fmt.Fprintln(os.Stderr, "rdev-agent -supervise: argv required after --")
 		os.Exit(2)
@@ -119,8 +124,8 @@ func runSupervisor(jobDir string, argv []string) {
 	cmd.Env = withoutEnvValue(os.Environ(), supervisorParentEnv)
 	// Isolate the child in its own process group. This lets timeout and log-limit
 	// enforcement kill the complete descendant tree while keeping the
-	// supervisor alive long enough to publish a terminal status. job_stop
-	// explicitly signals both the supervisor and child groups.
+	// supervisor alive long enough to publish a terminal status. TERM is relayed
+	// by this process; a forced KILL explicitly addresses both groups.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	so := storage.NewSink(policy.PerJob.MaxStdoutBytes, policy.PerJob.OnLogLimit)
@@ -149,11 +154,17 @@ func runSupervisor(jobDir string, argv []string) {
 	// participates in the same transaction lock as job_start/job_rm: a starter
 	// that is still committing metadata, or a remover that is tearing the record
 	// down, must not race a child.json write into a half-removed directory.
+	var childIdentity string
 	childPublishErr := withJobLock(jobDir, func() error {
 		if !jobExists(jobDir) {
 			return nil
 		}
-		return writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid})
+		identity, err := processIdentity(cmd.Process.Pid)
+		if err != nil {
+			return err
+		}
+		childIdentity = identity
+		return writeJSON(filepath.Join(jobDir, "child.json"), map[string]any{"child_pid": cmd.Process.Pid, "process_identity": identity})
 	})
 	if childPublishErr != nil {
 		// Without child.json a later stop cannot address this isolated process
@@ -171,7 +182,9 @@ func runSupervisor(jobDir string, argv []string) {
 	}
 
 	stopLedger := make(chan struct{})
+	ledgerDone := make(chan struct{})
 	go func() {
+		defer close(ledgerDone)
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -204,21 +217,37 @@ func runSupervisor(jobDir string, argv []string) {
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
 	resourceLimit := ""
+	var wallDeadline <-chan time.Time
 	if resources.WallTimeoutSec > 0 {
 		timer := time.NewTimer(time.Duration(resources.WallTimeoutSec) * time.Second)
+		defer timer.Stop()
+		wallDeadline = timer.C
+	}
+	waiting := true
+	for waiting {
 		select {
 		case err = <-waitDone:
-			timer.Stop()
-		case <-timer.C:
+			waiting = false
+		case sig := <-stopSignals:
+			// Wait may have reaped the leader while descendants still own pipes.
+			// A missing leader can retain its group; a reused PID cannot be signaled.
+			identity, identityErr := processIdentity(cmd.Process.Pid)
+			if identityErr == nil && identity != childIdentity {
+				continue
+			}
+			if identityErr != nil && !os.IsNotExist(identityErr) && !errors.Is(identityErr, syscall.ESRCH) {
+				continue
+			}
+			_ = syscall.Kill(-cmd.Process.Pid, sig.(syscall.Signal))
+		case <-wallDeadline:
 			resourceLimit = "wall_timeout"
 			killJobChildGroup(cmd.Process.Pid)
-			err = <-waitDone
+			wallDeadline = nil
 		}
-	} else {
-		err = <-waitDone
 	}
 	close(stopLimit)
 	close(stopLedger)
+	<-ledgerDone
 	_ = so.Flush(filepath.Join(jobDir, "stdout"))
 	_ = se.Flush(filepath.Join(jobDir, "stderr"))
 	_ = writeJSON(filepath.Join(jobDir, "ledger.json"), map[string]any{"stdout_ledger": ledgerProto(so.Ledger()), "stderr_ledger": ledgerProto(se.Ledger())})

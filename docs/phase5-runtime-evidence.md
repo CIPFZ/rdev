@@ -552,3 +552,41 @@ recovery failures`).
 This evidence covers acknowledged detached-job recovery and removal failure,
 not durable pre-ACK start intents/replay, persistent event history or bounded
 shutdown. No additional Phase5 row or Multi Agent Gate is marked Complete.
+
+
+## Shared wait disconnect, shutdown and TERM output follow-up
+
+Review found that the initiating disconnected frontend kept its handler and
+lease for the whole remote wait. Observations now run under a service-owned
+context with independent lease/drain accounting. Each frontend cancellation
+releases its subscriber promptly; zero subscribers preserve the bounded remote
+wait for reconnect. Shutdown cancels observation contexts before drain, while
+detached supervisors continue. Observer admission includes disconnected entries
+and uses global/owner active-plus-queue bounds; subscribers have separate
+512-global/128-owner caps. Status exposes only the authenticated owner's active
+observers/subscribers. Coalescing keys include owner, host, parameters and any
+explicit semantic deadline.
+
+The first real 20-process run caught an existing remote defect: job_stop TERM
+killed the supervisor before its bounded stdout sink flushed. All waiters lost
+the requested terminal tail. Modern supervisors now relay TERM to the child
+group and remain alive through output/ledger/status publication. Their metadata
+marks relay support so legacy and forced-KILL handling remain explicit. Child
+start identity is persisted, relay rejects a reused leader PID, and the periodic
+ledger writer is joined before final ledger publication. A targeted process test
+checks one TERM trap, retained stdout/tail and matching durable byte accounting.
+
+`make remote-wait` repeats the real OpenSSH scenario three times. After the
+initiator is SIGKILLed, status must report 1 observer/0 subscribers. Twenty
+independent frontend processes reconnect to that same observation; five further
+SIGKILLs leave 1/15. SIGHUP preserves those counters. The remaining 15 terminal
+responses must contain the expected tail and share one nonempty remote operation
+ID. A fully granted other project sees zero counters and cannot join the job.
+A second running job has an active wait during SIGTERM; shutdown must finish
+within five seconds, and restart must find the same live detached supervisor.
+The first repaired run passed with a 10.435 ms daemon shutdown.
+
+This proves live wait coalescing, reconnect, cancellation and observation drain;
+it does not prove durable event replay after daemon crash, a full streaming API,
+bounded retention of WatchHub history or all mutation shutdown windows. These
+remain explicit P5-09/P5-16 gaps. Committed-source validation follows below.
