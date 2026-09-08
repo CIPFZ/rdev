@@ -48,7 +48,7 @@ prove their runtime invariants. No Phase5-wide Complete claim is made.
 | No starvation under long exec/job wait/status/sync | In-memory queue/lane tests | Real mixed remote I/O and fair admission required |
 | Bulk transport closes after idle TTL | Real dedicated bulk/base SSH processes during remote I/O, active bulk preservation, one-second idle TTL plus five-second sweep, same base agent retained | Runtime passed on Linux; independent review and broader host/payload matrix remain |
 | Crash/restart never duplicates mutation | Private persist-before-dispatch intent registry; real pre-ACK remote job and append SIGKILL, stable-ID conflict/replay refusal, fresh-agent job tombstones and original-owner recovery | Wire job/write crash windows now have runtime evidence; remaining shared routes, retirement/upgrade matrix and independent review remain |
-| status/doctor exposes pool, quotas, queue, lane bytes and eviction reasons | Authenticated owner-only scheduler snapshot, queue wait and file payload byte counters; separately granted audit sink health | CLI/MCP now project owner scheduler/ingress/wait usage; separately authorized CLI/MCP warm capacity/lease/closing/eviction snapshots now have initial runtime evidence; complete lane bytes, dial/failure reasons and independent review remain |
+| status/doctor exposes pool, quotas, queue, lane bytes and eviction reasons | Authenticated owner-only scheduler snapshot, queue wait and file payload byte counters; separately granted audit sink health | CLI/MCP now project owner scheduler/ingress/wait usage; separately authorized CLI/MCP warm capacity/lease/closing/eviction snapshots now have initial runtime evidence; all three lanes now have initial real byte-for-byte CLI/MCP/SSH traffic evidence; dial/failure reasons and independent review remain |
 | Unauthorized host/secret/job/Fleet use denied | Actual daemon authentication and default-deny process tests | Exact-host/project boundaries and capability-substitution negatives now pass; granted-owner job status/logs/wait/stop/rm and scoped pagination negatives now pass; complete secret/Fleet resource isolation remains |
 | Destructive approval binds exact target snapshot and digest | Real SSH mandatory write approval, owner/host/parameter substitution, expiry/replay/policy-change/restart negatives and audit correlation | Wire runtime passed; remaining shared mutation routes and independent review still open |
 | Reload/upgrade/crash preserve detached background jobs | Actual daemon reload/SIGKILL/service restart lifecycle | Real acknowledged and pre-ACK detached jobs survive SIGKILL/SSH outage; live waits survive reload and cancel on shutdown; complete upgrade/drain failure matrix remains |
@@ -364,3 +364,16 @@ and real race-daemon tests passed before commit. Runtime logs preserve both the
 old-version reproduction and corrected audit-enum failure, with only passing
 final-code runs counted. Shared routes, mixed workload, macOS and independent
 review remain open; Phase5 and Multi Agent Gate retain In progress status.
+
+
+## Protocol lane traffic follow-up
+
+Owner status now exposes sent/received application protocol bytes for control,
+exec and bulk. Meter identity survives retry, caller cancellation and late-frame
+drain; partial writes count actual accepted bytes and rejected frames count zero.
+Initial real CLI/MCP results match an independent byte-only SSH recorder through
+read-terminal loss/retry, streaming, frontend SIGKILL and generated cancellation.
+The same client ID in another project retains separate totals. Full batch and
+committed-artifact evidence are tracked in the runtime record. Dial/failure
+reasons, remaining shared routes, mixed load, macOS and independent review remain
+open; Phase5 and Multi Agent Gate are In progress.

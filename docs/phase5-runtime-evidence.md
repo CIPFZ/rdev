@@ -1170,3 +1170,50 @@ Remaining shared routes, full audit correlation, mixed workload, macOS and
 independent external review keep Phase5 In progress.
 
 Remote committed daemon SHA-256: `c98adb9e2e6d17b26fb9d8ede4d48b71d21be76ced75b04701b08fde918bd369`.
+
+
+## Per-owner protocol bytes across all broker lanes
+
+The scheduler now retains fixed control/exec/bulk traffic meters for each bounded
+owner-history entry. Transport writes account actual accepted pipe bytes,
+including partial writes; response association accounts normalized NDJSON before
+redaction. Retry and abandoned/cancel streams retain the original meter. No
+counter stores payloads, paths, credentials or arbitrary labels, and atomic
+updates avoid introducing another shared scheduler/audit lock in the transport.
+
+Implementing-agent review checked bounded owner history, meter lifetime across
+idle-history eviction, partial/rejected writes, queue cancellation, late stream
+frames, generated cancellation and base/bulk retry propagation. The new pipe
+regression initially sent an invalid successful terminal after acknowledged
+cancellation, causing the existing validator to close the connection and the
+fixture writer to block. It now sends the required canceled error terminal. The
+initial runtime used the text-only CLI read frontend for binary content; that
+frontend correctly rejected it. The corrected test uses CLI text reads for the
+retry and MCP for binary/base64 data. Neither failure required weakening protocol
+validation or changing CLI binary handling.
+
+The corrected real daemon/CLI/MCP/SSH test independently records only frame sizes
+and protocol principal hashes and compares exact lane totals. Initial project
+alpha totals were control 214/731, exec 868/172128 and bulk 618/263110 sent/received
+bytes; project beta had control 213/731, exec 0/0 and bulk 301/2067. Differences in
+later runs reflect actual serialized IDs/metadata and are checked against each
+run's own wire ledger. Alpha's automatically canceled exec and late frames never
+increase beta's exec totals. The lost-terminal read retry, default-denied status and actual CLI/MCP
+projection passed.
+
+Targeted race checks and the first real gate passed. Full check/race, wider
+lifecycle/mutation regressions and committed-artifact SLO/service evidence follow
+after completion. These are normalized application protocol bytes, not ciphertext,
+bootstrap or durable lifetime usage; bounded idle-history eviction resets the
+owner's counters. Full dial/failure reasons, shared secret/sync/session routes,
+mixed load and independent external review remain open. No additional P5 item is
+marked Complete.
+
+
+Final lane-meter code passed full `make check`, full repository race, three real
+byte-ledger scenarios, three retry/cancellation runs, six lease cycles, three
+20-process shared waits and three mutation crash/recovery regressions. The actual
+race-daemon byte-ledger test passed in 12.13 seconds; its daemon SHA-256 was
+`d84d42bd0d7146985e3834eb6108d63674b9b3cf829cb234f5eedbed916219fa`.
+Committed-artifact QoS, stress/readiness/service checks and archived logs follow
+after completion. This remains implementing-agent review.

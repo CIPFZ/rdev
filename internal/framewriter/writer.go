@@ -36,8 +36,9 @@ type Config struct {
 }
 
 type queuedFrame struct {
-	data []byte
-	done chan error
+	written *atomic.Uint64
+	data    []byte
+	done    chan error
 }
 
 type watchdogCommand struct {
@@ -92,8 +93,14 @@ func New(out io.Writer, closeOut func() error, config Config, onFailure func(err
 // Queue admission itself never blocks. Data is dropped under pressure; losing a
 // control frame instead tears down the polluted connection.
 func (w *Writer) Write(ctx context.Context, data []byte, priority Priority) error {
+	return w.WriteCounted(ctx, data, priority, nil)
+}
+
+// WriteCounted counts bytes actually accepted by the underlying writer, including
+// partial writes and writes finishing after the waiting context is canceled.
+func (w *Writer) WriteCounted(ctx context.Context, data []byte, priority Priority, written *atomic.Uint64) error {
 	done := make(chan error, 1)
-	frame, err := w.enqueue(data, priority, done)
+	frame, err := w.enqueue(data, priority, done, written)
 	if err != nil {
 		return err
 	}
@@ -110,11 +117,16 @@ func (w *Writer) Write(ctx context.Context, data []byte, priority Priority) erro
 // Enqueue queues a frame without waiting for the underlying write. It is used
 // for best-effort cancel frames after the caller's context has already ended.
 func (w *Writer) Enqueue(data []byte, priority Priority) error {
-	_, err := w.enqueue(data, priority, nil)
+	return w.EnqueueCounted(data, priority, nil)
+}
+
+// EnqueueCounted also accounts best-effort cancellation after caller exit.
+func (w *Writer) EnqueueCounted(data []byte, priority Priority, written *atomic.Uint64) error {
+	_, err := w.enqueue(data, priority, nil, written)
 	return err
 }
 
-func (w *Writer) enqueue(data []byte, priority Priority, done chan error) (*queuedFrame, error) {
+func (w *Writer) enqueue(data []byte, priority Priority, done chan error, written *atomic.Uint64) (*queuedFrame, error) {
 	if priority > Critical {
 		priority = Critical
 	}
@@ -147,7 +159,7 @@ func (w *Writer) enqueue(data []byte, priority Priority, done chan error) (*queu
 	// Copy only after budget admission and while the reservation is protected by
 	// the lock. Rejected callers therefore cannot transiently allocate one full
 	// frame each outside the connection's total memory budget.
-	frame := &queuedFrame{data: append([]byte(nil), data...), done: done}
+	frame := &queuedFrame{data: append([]byte(nil), data...), done: done, written: written}
 	w.queues[priority] = append(w.queues[priority], frame)
 	w.queuedBytes += size
 	w.mu.Unlock()
@@ -177,7 +189,7 @@ func (w *Writer) writeLoop() {
 			w.finish(frame, w.Err())
 			return
 		}
-		err := writeAll(w.out, frame.data)
+		err := writeAll(w.out, frame.data, frame.written)
 		select {
 		case w.watch <- watchdogCommand{}:
 		case <-w.done:
@@ -317,9 +329,12 @@ func (w *Writer) addDropped(size int64) {
 	}
 }
 
-func writeAll(w io.Writer, p []byte) error {
+func writeAll(w io.Writer, p []byte, written *atomic.Uint64) error {
 	for len(p) > 0 {
 		n, err := w.Write(p)
+		if written != nil && n > 0 && n <= len(p) {
+			written.Add(uint64(n))
+		}
 		if err != nil {
 			return err
 		}

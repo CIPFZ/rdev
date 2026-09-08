@@ -26,11 +26,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/framewriter"
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -180,6 +182,7 @@ type Conn struct {
 }
 
 type streamProgress struct {
+	traffic     *observe.Traffic
 	state       proto.StreamState
 	lastSeq     uint64
 	operationID string
@@ -1248,13 +1251,18 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	}
 	c.seq++
 	req.ID = fmt.Sprint(c.seq)
+	traffic := observe.TrafficFromContext(ctx)
+	// Bootstrap/handshake work is not an authenticated application request.
+	if req.ClientID == "" {
+		traffic = nil
+	}
 	call := &pendingCall{ready: make(chan struct{})}
 	c.pending[req.ID] = call
 	if c.streams == nil {
 		c.streams = make(map[string]streamProgress)
 	}
 	c.streams[req.ID] = streamProgress{
-		state: proto.StreamNew, operationID: req.OperationID,
+		state: proto.StreamNew, operationID: req.OperationID, traffic: traffic,
 		typed: c.protocolVersion >= 3, streaming: c.features[proto.FeatureStreaming],
 	}
 	writer := c.writer
@@ -1274,7 +1282,11 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 		c.abandon(req.ID)
 		return nil, errors.New("connection writer is unavailable")
 	}
-	writeErr := writer.Write(ctx, append(line, '\n'), framewriter.Control)
+	var written *atomic.Uint64
+	if traffic != nil {
+		written = &traffic.Sent
+	}
+	writeErr := writer.WriteCounted(ctx, append(line, '\n'), framewriter.Control, written)
 	if writeErr != nil {
 		if ctx.Err() != nil {
 			if resp, cancelErr := c.finishContextCancellation(req, call, ctx.Err()); resp != nil || cancelErr != nil {
@@ -1385,6 +1397,7 @@ func (c *Conn) finishContextCancellation(req *proto.Request, call *pendingCall, 
 }
 
 type preparedCancel struct {
+	written   *atomic.Uint64
 	requestID string
 	request   *proto.Request
 	writer    *framewriter.Writer
@@ -1401,10 +1414,14 @@ func (c *Conn) prepareCancelLocked(target *proto.Request, cancelID string, eligi
 		c.streams = make(map[string]streamProgress)
 	}
 	c.streams[requestID] = streamProgress{
-		state: proto.StreamNew, operationID: cancelID, abandoned: true,
+		state: proto.StreamNew, operationID: cancelID, abandoned: true, traffic: c.streams[target.ID].traffic,
 		typed: c.protocolVersion >= 3, streaming: c.features[proto.FeatureStreaming],
 	}
-	return &preparedCancel{requestID: requestID, writer: c.writer, request: &proto.Request{
+	var written *atomic.Uint64
+	if traffic := c.streams[target.ID].traffic; traffic != nil {
+		written = &traffic.Sent
+	}
+	return &preparedCancel{requestID: requestID, writer: c.writer, written: written, request: &proto.Request{
 		ID: requestID, OperationID: cancelID, ClientID: target.ClientID,
 		Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: target.OperationID, TargetOp: target.Op},
 	}}
@@ -1420,7 +1437,7 @@ func (c *Conn) sendPreparedCancel(prepared *preparedCancel) {
 		return
 	}
 	if prepared.writer != nil {
-		if err := prepared.writer.Enqueue(append(line, '\n'), framewriter.Critical); err != nil {
+		if err := prepared.writer.EnqueueCounted(append(line, '\n'), framewriter.Critical, prepared.written); err != nil {
 			c.abandon(prepared.requestID)
 		}
 	}
@@ -1483,6 +1500,11 @@ func (c *Conn) readLoop() {
 			c.mu.Unlock()
 			c.stopAfterReadFailure(proto.NewError(proto.CodeInvalidEvent, resp.OperationID, proto.StateAccepted))
 			return
+		}
+		// NDJSON application bytes (JSON plus LF), before payload redaction.
+		// The stream retains its owner meter after cancellation until terminal.
+		if progress.traffic != nil {
+			progress.traffic.Received.Add(uint64(len(raw) + 1))
 		}
 		terminal, validateErr := validateResponseFrame(&resp, progress)
 		if validateErr != nil {

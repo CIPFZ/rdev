@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -66,8 +67,9 @@ type schedulerCount struct {
 }
 
 type SchedulerSnapshot struct {
-	BulkPayloadBytes uint64    `json:"bulk_payload_bytes"`
-	Limits           QoSConfig `json:"limits"`
+	Traffic          map[Lane]observe.TrafficSnapshot `json:"traffic"`
+	BulkPayloadBytes uint64                           `json:"bulk_payload_bytes"`
+	Limits           QoSConfig                        `json:"limits"`
 	// All counts and durations are scoped to the authenticated owner. Do not
 	// expose other owners, host aliases or workload timing through status.
 	WorkCount
@@ -80,6 +82,7 @@ type SchedulerSnapshot struct {
 }
 
 type scheduledItem struct {
+	traffic     *observe.Traffic
 	releaseHost func()
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -94,6 +97,7 @@ type dispatchResult struct {
 	err  error
 }
 type ownerStats struct {
+	traffic                     map[Lane]*observe.Traffic
 	bulkBytes                   uint64
 	started, rejected, canceled uint64
 	wait, maxWait               int64
@@ -184,6 +188,10 @@ func (s *Scheduler) Snapshot(owner string) SchedulerSnapshot {
 		out.Lanes[lane] = c
 	}
 	st := s.stats[owner]
+	out.Traffic = make(map[Lane]observe.TrafficSnapshot, len(schedulerLanes))
+	for _, lane := range schedulerLanes {
+		out.Traffic[lane] = st.traffic[lane].Snapshot()
+	}
 	out.BulkPayloadBytes = st.bulkBytes
 	out.Started, out.Rejected, out.Canceled, out.QueueWaitNS, out.MaxQueueWaitNS = st.started, st.rejected, st.canceled, st.wait, st.maxWait
 	return out
@@ -351,6 +359,13 @@ func (s *Scheduler) scheduleLocked() {
 			s.running[item] = true
 			wait := time.Since(item.enqueued).Nanoseconds()
 			st := s.statLocked(item.owner)
+			if st.traffic == nil {
+				st.traffic = make(map[Lane]*observe.Traffic)
+			}
+			if st.traffic[lane] == nil {
+				st.traffic[lane] = &observe.Traffic{}
+			}
+			item.traffic = st.traffic[lane]
 			st.started++
 			st.wait += wait
 			st.maxWait = max(st.maxWait, wait)
@@ -364,7 +379,7 @@ func (s *Scheduler) run(item *scheduledItem) {
 	var resp *proto.Response
 	err := item.ctx.Err()
 	if err == nil {
-		ctx := item.ctx
+		ctx := observe.WithTraffic(item.ctx, item.traffic)
 		if s.pool != nil {
 			ctx = context.WithValue(ctx, hostPoolLeaseKey{}, hostPoolBinding{pool: s.pool, host: item.host})
 		}

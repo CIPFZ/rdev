@@ -534,7 +534,7 @@ With a `status` grant, `rdev broker status` and MCP `rdev_broker_status` return 
 principal's ingress usage, detached observation bytes, scheduler quotas and lane
 counts, queue timing, bulk payload bytes, wait subscribers and the policy digest.
 Other owners' connection counts and identities are excluded. Pool lifecycle and
-complete lane-byte and transport-failure reason projection remain open acceptance work.
+transport-failure reason projection remains open acceptance work.
 
 `rdev ls HOST [PATH] [-limit N]` and MCP `rdev_list` require the broker's exact-host
 `list` decision. They return the remote listing, including truncation/cursor and
@@ -560,8 +560,7 @@ or output. Global `pool.health` and `audit.health` reject host-scoped/wire reque
 envelopes; an exact-host health grant cannot expose global information.
 
 Warm reasons currently include `capacity_lru`, `capacity_reload`, `idle_ttl`,
-`last_client` and `shutdown`. Full connection failure/probe/dial reasons and
-complete lane byte accounting remain open. A blocked detached bulk close keeps
+`last_client` and `shutdown`. Full connection failure/probe/dial reasons remain open. A blocked detached bulk close keeps
 its host slot reserved, with at most one such closer per host; it runs outside
 the daemon signal/reload loop. Shutdown waits within its existing deadline.
 
@@ -606,3 +605,34 @@ pre-dial malformed rejection, durable grant/revoke and SIGKILL, scoped approval
 issuance, approval preservation, exactly-once appends and host/project-filtered
 mutation outcomes. Rejections use the fixed `route_rejected` audit result without
 recording raw request parameters.
+
+
+## Owner-scoped protocol lane traffic
+
+CLI `rdev broker status` and MCP `rdev_broker_status` include
+`scheduler.traffic.control`, `.exec` and `.bulk`, each with `sent_bytes` and
+`received_bytes`. These are application NDJSON bytes, including JSON/base64
+encoding and one LF delimiter, measured before secret redaction. Stream data and
+the retained terminal payload each count when actually transmitted. They are not
+SSH/TCP ciphertext sizes or unique file/output payload sizes.
+
+Writes count only bytes accepted by the underlying pipe, including partial writes
+and completion after caller cancellation. Rejected frames count zero. Received
+frames are charged through their validated request-ID association; canceled
+streams and automatic cancel requests retain the original owner/lane meter while
+they drain. Retry attempts accumulate in the same meter. Counters never change
+another project's traffic. The hot transport path uses atomic counters and does
+not acquire the scheduler or audit lock.
+
+Unattributable/malformed frames, bootstrap uploads/handshakes, SSH overhead and
+broker-internal startup recovery are outside these authenticated request counters.
+Counters are snapshots of bounded recent owner history; they reset on daemon
+restart or idle-history eviction and are not durable billing records. CRLF input
+is normalized to the protocol's LF delimiter. The existing `bulk_payload_bytes`
+field and pacing behavior retain their prior semantics.
+
+`make remote-lane-traffic` compares real CLI/MCP snapshots byte-for-byte with a
+separate transparent SSH recorder that saves only sizes, fixed lanes and protocol
+principal hashes. It covers text/binary reads, streamed exec, a deliberately lost
+read terminal and retry, frontend SIGKILL, automatic cancellation and late frames,
+plus same-client/different-project and default-denied status queries.
