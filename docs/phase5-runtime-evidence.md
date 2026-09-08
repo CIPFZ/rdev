@@ -192,3 +192,15 @@ consistency, and cleanup of only the generated remote namespace. External
 independent review remains pending authorization. Shared sync/secret/session
 routes, complete host/secret/job policy boundaries and sustained fairness
 remain open; the first Multi Agent runtime criterion is now proven.
+
+
+## Committed-source verification: b5e9422
+
+Implementation commit: `b5e9422be7be55ccdb38a371e3aa76638a5e8e2d`
+(`fix: preserve broker principals across shared remote sessions`).
+
+- [Repository check and real SSH benchmark](evidence/phase5/2026-09-08/committed-check-b5e9422.log): `make check remote-session-benchmark` passed against the clean commit. All three runs used 20 independent client processes, 500 requests, one daemon SSH child, one remote agent PID, and 20 remote principals. Elapsed time was 1667.640–1681.066 ms; ping p95 was 108.610–116.191 ms and exec p95 was 66.284–82.107 ms.
+- [Changed-package race verification](evidence/phase5/2026-09-08/committed-race-b5e9422.log): `go test -race ./internal/client ./internal/broker ./cmd/rdevd -count=1` passed.
+
+These measurements prove shared-session identity preservation, not sustained
+fairness or the control-under-bulk SLO. Phase5 remains In progress.

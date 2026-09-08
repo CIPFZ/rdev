@@ -65,3 +65,10 @@ Audit follow-up `455ff163dc15cd4db932a567271f45b2ac720f59` passed `make check`,
 broker race and the real remote daemon suite. It proves exact owner-query
 isolation and explicit legacy omissions across restart, not the outstanding
 long-duration rotation/recovery portion of P5-14.
+
+
+Shared-session follow-up `b5e9422be7be55ccdb38a371e3aa76638a5e8e2d` passed
+committed-source `make check remote-session-benchmark` (three real SSH runs)
+and changed-package race checks. The runtime evidence links the logs and
+measurements; the remaining routing, policy, fairness and lifecycle gates
+retain their In progress status.
