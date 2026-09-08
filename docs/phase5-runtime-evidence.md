@@ -1333,3 +1333,28 @@ The fixed stage is not a detailed network/OS cause. Full control-path/start/
 negotiation failure, multi-machine backoff, mixed shared workloads and independent
 external review remain open. Counters are transient recent history, not persistent
 billing totals. No Phase5-wide or additional P5 Complete claim is made.
+
+
+## Committed connection diagnostics validation (`0be7127`)
+
+[Committed full check and runtime log](evidence/phase5/2026-09-09/committed-diagnostics-0be7127.log)
+records `make check remote-connection-diagnostics remote-lane-traffic remote-qos
+stress-broker smoke-rdevd remote-phase5-runtime` from the clean, fixed commit.
+All passed: three setup/failure/cancellation scenarios, three exact byte ledgers,
+and three actual 20-process bulk/control QoS runs. Control p95 was 1.316–1.657
+times baseline; weight reversal remained approximately 3:1 then 1:3.
+The sinks had written 146101 records at measurement, rotated six times, and
+reported zero drops/errors, with one self-generated health event pending per run.
+
+The deployed Linux amd64 daemon SHA-256 was
+`b34126cfdbb132fcb0d4e254fd7f388c1b5ec91174e9adfc25b929e0579a2d31`.
+Actual systemd install/enable/start/reload/SIGKILL recovery/stop/start passed,
+with PID `1106842 -> 1106902`. Earlier final-code validation logs are retained:
+[initial runtime](evidence/phase5/2026-09-09/diagnostics-runtime-initial.log),
+[check and SSH regressions](evidence/phase5/2026-09-09/diagnostics-check-runtime.log),
+[full race](evidence/phase5/2026-09-09/diagnostics-full-race.log), and
+[real race daemon](evidence/phase5/2026-09-09/diagnostics-remote-race.log).
+
+Review here was performed by the implementing agent. Shared secret/session/sync
+routes, mixed workload, wider failure matrices, actual macOS runtime and
+independent review remain open. No additional Complete label is assigned.

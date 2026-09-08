@@ -1,0 +1,17 @@
+=== RUN   TestRemoteBrokerConnectionDiagnostics
+=== RUN   TestRemoteBrokerConnectionDiagnostics/agent_lookup
+    remote_diagnostics_test.go:186: actual daemon/SSH setup failure attributed to agent_lookup; one attempt, no success, no active dial
+=== RUN   TestRemoteBrokerConnectionDiagnostics/agent_install
+    remote_diagnostics_test.go:186: actual daemon/SSH setup failure attributed to agent_install; one attempt, no success, no active dial
+=== NAME  TestRemoteBrokerConnectionDiagnostics
+    remote_diagnostics_test.go:190: real daemon/SSH diagnostics: starts=4 successes=2 probe_failures=1 canceled=1 inflight=0 dial_ns=2276875447 max_dial_ns=2065106450; recovered SSH and other-project shared PID preserved; bounded labels contain no host/owner/stderr
+--- PASS: TestRemoteBrokerConnectionDiagnostics (14.63s)
+    --- PASS: TestRemoteBrokerConnectionDiagnostics/agent_lookup (3.34s)
+    --- PASS: TestRemoteBrokerConnectionDiagnostics/agent_install (3.65s)
+=== RUN   TestRemoteBrokerLaneTraffic
+    remote_traffic_test.go:250: project alpha independent SSH byte ledger matched CLI traffic: map[bulk:{SentBytes:616 ReceivedBytes:263110} control:{SentBytes:214 ReceivedBytes:736} exec:{SentBytes:868 ReceivedBytes:172128}]
+    remote_traffic_test.go:250: project beta independent SSH byte ledger matched CLI traffic: map[bulk:{SentBytes:300 ReceivedBytes:2067} control:{SentBytes:213 ReceivedBytes:736} exec:{SentBytes:0 ReceivedBytes:0}]
+    remote_traffic_test.go:270: real daemon/CLI/MCP/SSH: three lanes, binary/base64 and streaming bytes, dropped-terminal retry, frontend SIGKILL and late cancel frames matched independent byte-only recorder; exact project isolation and default denial passed
+--- PASS: TestRemoteBrokerLaneTraffic (12.03s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	26.665s

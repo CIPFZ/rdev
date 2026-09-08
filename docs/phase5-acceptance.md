@@ -422,3 +422,12 @@ project and zero borrowed counts for the other project. Full check/race and real
 race-daemon regressions passed; committed-artifact evidence follows in the runtime
 record. Full failure/host matrices, shared routes, mixed load, macOS and independent
 review keep Phase5 and the Multi Agent Gate In progress.
+
+
+Connection diagnostics `0be7127` passed committed-source full check, three real
+setup/failure/cancellation scenarios, three exact lane-byte ledgers, three
+20-process QoS runs (p95 ratios 1.316–1.657), stress, readiness and Linux systemd
+recovery. The sink measurements total 146101 written records, six rotations and
+zero errors/drops. Runtime and race logs plus artifact digests are linked in the
+runtime evidence record. Shared routes, mixed workloads, broader failure cases,
+macOS and independent review remain open; Phase5 is In progress.
