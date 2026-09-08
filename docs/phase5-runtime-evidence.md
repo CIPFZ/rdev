@@ -805,3 +805,20 @@ This records observed state changes and exposes a pull replay API. Full push
 streaming, prolonged remote event-retention pressure, physical power-loss tests
 and independent external review remain open, along with the broader shared
 secret/session/sync/Fleet and platform gates.
+
+
+## Verification: 371fa30
+
+Implementation: `371fa30cca13327acab161a4d5e0a640f3f9796c` (`feat: persist scoped
+job state history and cursor replay`), committed and pushed after validation.
+
+- [Implementation check and remote regressions](evidence/phase5/2026-09-09/validation-check-371fa30.log): the final code passed `make check remote-events remote-mutation remote-wait remote-jobs remote-phase5-runtime` before commit. Three real event-history runs passed all zero-subscriber, restart, removal, CLI/MCP, owner and storage-failure assertions.
+- [Full repository race](evidence/phase5/2026-09-09/validation-race-371fa30.log): the final code passed `go test -race ./... -count=1` before commit.
+- [Actual daemon event-history race](evidence/phase5/2026-09-09/validation-remote-race-371fa30.log): the daemon and frontend test processes ran with `-race`, passing the real twenty-client/zero-subscriber/restart/history-repair scenario in 43.093 seconds. Daemon SHA-256: `c62b133f194648bae4ce18ecabbb3442ee26893db36a5bac7b92ed44a42863a9`.
+- [Committed artifact/runtime verification](evidence/phase5/2026-09-09/committed-runtime-371fa30.log): after push, `make remote-events remote-mutation remote-wait stress-broker smoke-rdevd remote-phase5-runtime` passed with artifacts rebuilt from the clean commit. Three further real history runs, concurrent mutation recovery, shared waits, 100-run broker stress, readiness and actual Linux systemd recovery all passed.
+- Linux daemon startup rejected malformed, null and public event snapshots while preserving invalid state. The systemd user install/enable/start/reload/SIGKILL recovery/stop/start cycle passed (PID `923832 -> 923926`). Remote normal daemon SHA-256: `b81c729e98fd0772ef19abb334833c200071eb700d84738d390a1d2226a117c8`.
+
+The first three logs are final-code pre-commit validation, not falsely labeled
+as committed-source runs. The last log proves the rebuilt committed artifacts.
+Push streaming, prolonged history-retention pressure, independent review and
+the remaining broader Phase5 gates retain their incomplete status.

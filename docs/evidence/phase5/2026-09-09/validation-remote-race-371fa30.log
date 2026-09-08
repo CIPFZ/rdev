@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:165: real job history: 20 independent wait clients killed; one zero-subscriber observation persisted exactly one terminal event; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (42.07s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	43.093s
