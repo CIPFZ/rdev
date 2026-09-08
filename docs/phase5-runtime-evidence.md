@@ -301,3 +301,18 @@ and [final targeted tests](evidence/phase5/2026-09-08/policy-targeted.log) passe
 Authorization now precedes job registry lookup, so an owner lacking the job
 capability receives the same policy denial independently of a supplied job ID.
 The final committed-source verification additionally exercises that negative.
+
+## Committed-source verification: 669f18f
+
+Implementation commit: `669f18f5779473fc8f2e0ecaa0c227632f3b8836`
+(`fix: persist scoped broker policy before acknowledging changes`).
+
+- [Full check and remote verification](evidence/phase5/2026-09-08/committed-check-669f18f.log): `make check remote-policy remote-phase5-runtime` passed against the clean commit. All three real SSH policy runs proved stable queued decisions, durable acknowledged grant/revoke across SIGKILL, exact host/project boundaries, capability-substitution denial, authorization before job registry lookup, and rollback on an actual rename failure. The remote Linux daemon suite also rejected null, duplicate-key and public policy files before READY.
+- [Changed-package race verification](evidence/phase5/2026-09-08/committed-race-669f18f.log): `go test -race ./internal/broker ./cmd/rdevd -count=1` passed.
+- [Real daemon policy race integration](evidence/phase5/2026-09-08/remote-race-669f18f.log): the real SSH policy test passed with both the frontend test executable and daemon built using `-race`. Daemon SHA-256: `d8cb4abef225e60e8530228a35e83022892dcca451a3c16a56ea9cd2a3eea5be`.
+- The remote service suite passed actual systemd user install/enable/start/reload/SIGKILL recovery/stop/start (PID `771663 -> 771730`). Remote non-race daemon SHA-256: `079c2ba4455caa9b16dc60752d12dcdf66d5ae17acc0eca35699b677b92ce6dc`.
+
+P5-12 remains In progress for complete secret resource permissions, target
+snapshot/approval binding and independent review. P5-14 still needs full
+request/operation/approval correlation and sustained sink recovery evidence;
+P5-16 still needs remote job mutation crash/replay and bounded drain validation.

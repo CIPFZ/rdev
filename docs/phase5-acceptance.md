@@ -79,3 +79,9 @@ and a real SSH integration using a race-instrumented daemon. P5-05/P5-11 now
 have actual retry, other-owner foreground execution, normal-exit/SIGKILL lease,
 and idle-reclamation evidence. Detached job wait/shutdown, sustained QoS and
 independent review remain unfinished; no overall Complete claim is made.
+
+Scoped-policy follow-up `669f18f5779473fc8f2e0ecaa0c227632f3b8836` passed
+committed-source `make check remote-policy remote-phase5-runtime`, broker/daemon
+race, and real SSH policy integration with a race-instrumented daemon. The
+runtime evidence records the three policy runs and remote systemd recovery.
+The P5-12/P5-14/P5-16 remaining requirements above retain In progress status.
