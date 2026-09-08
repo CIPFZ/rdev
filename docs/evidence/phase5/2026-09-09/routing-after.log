@@ -1,0 +1,45 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerRoutes$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:99: route rejection audit count=0 want=18
+    remote_routes_test.go:105: actual daemon: absent/malformed routes rejected before dial; policy denial precedes route lookup; owner-only rejection audit; valid remote ping preserved
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:163: actual daemon: scoped admin cannot grant/revoke globally or another host; matching host grant/revoke survives SIGKILL; other project cannot administer; only intended host executes
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:267: actual daemon/SSH: host-scoped approval issuance bound to nested host; rejection preserves approval; two approved appends exactly once across crash; mutation outcomes filtered by host and project before/after SIGKILL, absent/out-of-scope indistinguishable
+--- FAIL: TestRemoteBrokerRoutes (2.30s)
+    --- FAIL: TestRemoteBrokerRoutes/absent_and_malformed (0.68s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_policy (0.73s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_approval_and_mutation (0.89s)
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:99: route rejection audit count=0 want=18
+    remote_routes_test.go:105: actual daemon: absent/malformed routes rejected before dial; policy denial precedes route lookup; owner-only rejection audit; valid remote ping preserved
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:163: actual daemon: scoped admin cannot grant/revoke globally or another host; matching host grant/revoke survives SIGKILL; other project cannot administer; only intended host executes
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:267: actual daemon/SSH: host-scoped approval issuance bound to nested host; rejection preserves approval; two approved appends exactly once across crash; mutation outcomes filtered by host and project before/after SIGKILL, absent/out-of-scope indistinguishable
+--- FAIL: TestRemoteBrokerRoutes (2.28s)
+    --- FAIL: TestRemoteBrokerRoutes/absent_and_malformed (0.68s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_policy (0.71s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_approval_and_mutation (0.89s)
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:99: route rejection audit count=0 want=18
+    remote_routes_test.go:105: actual daemon: absent/malformed routes rejected before dial; policy denial precedes route lookup; owner-only rejection audit; valid remote ping preserved
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:163: actual daemon: scoped admin cannot grant/revoke globally or another host; matching host grant/revoke survives SIGKILL; other project cannot administer; only intended host executes
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:267: actual daemon/SSH: host-scoped approval issuance bound to nested host; rejection preserves approval; two approved appends exactly once across crash; mutation outcomes filtered by host and project before/after SIGKILL, absent/out-of-scope indistinguishable
+--- FAIL: TestRemoteBrokerRoutes (2.28s)
+    --- FAIL: TestRemoteBrokerRoutes/absent_and_malformed (0.67s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_policy (0.73s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_approval_and_mutation (0.88s)
+FAIL
+FAIL	github.com/CIPFZ/rdev/cmd/rdevd	6.865s
+FAIL
+make: *** [Makefile:117: remote-routes] Error 1

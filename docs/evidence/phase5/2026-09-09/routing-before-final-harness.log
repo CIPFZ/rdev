@@ -1,0 +1,34 @@
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:73: malformed/absent route not-implemented returned success or data
+    remote_routes_test.go:73: malformed/absent route secret.set returned success or data
+    remote_routes_test.go:73: malformed/absent route secret.use returned success or data
+    remote_routes_test.go:73: malformed/absent route sync.pull returned success or data
+    remote_routes_test.go:73: malformed/absent route fleet.plan returned success or data
+    remote_routes_test.go:73: malformed/absent route ping returned success or data
+    remote_routes_test.go:73: malformed/absent route audit_query returned success or data
+    remote_routes_test.go:73: malformed/absent route status returned success or data
+    remote_routes_test.go:73: malformed/absent route audit_query returned success or data
+    remote_routes_test.go:99: route rejection audit count=0 want=18
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:144: scoped policy changed target host="" revoke=false
+    remote_routes_test.go:144: scoped policy changed target host="" revoke=true
+    remote_routes_test.go:144: scoped policy changed target host="other-host" revoke=false
+    remote_routes_test.go:144: scoped policy changed target host="other-host" revoke=true
+    remote_routes_test.go:158: local policy route accepted outer wire
+    remote_routes_test.go:166: rejected administrative requests changed durable grants
+    remote_routes_test.go:184: durable grant broadened/lost host=other-host allowed=true
+    remote_routes_test.go:192: durable grant broadened/lost host=runtime-host allowed=false
+    remote_routes_test.go:192: durable grant broadened/lost host=other-host allowed=false
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:236: scoped admin issued another-host approval
+    remote_routes_test.go:236: scoped admin issued another-host approval
+    remote_routes_test.go:297: host query exposed other-host mutation or existence
+    remote_routes_test.go:300: host query exposed other-host mutation or existence
+--- FAIL: TestRemoteBrokerRoutes (1.69s)
+    --- FAIL: TestRemoteBrokerRoutes/absent_and_malformed (0.42s)
+    --- FAIL: TestRemoteBrokerRoutes/scoped_policy (0.62s)
+    --- FAIL: TestRemoteBrokerRoutes/scoped_approval_and_mutation (0.66s)
+FAIL
+FAIL	github.com/CIPFZ/rdev/cmd/rdevd	1.700s
+FAIL

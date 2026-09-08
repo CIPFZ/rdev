@@ -355,3 +355,12 @@ project isolation, approval preservation and exact append counts across restart.
 The runtime evidence records the predecessor failures, correction and final-code
 check/race/SSH regressions. Complete shared routes, independent external review,
 mixed workload and macOS runtime remain outstanding; status remains In progress.
+
+
+Route implementation `74da502` passed committed-source full check, three complete
+actual route/host-administration scenarios, policy/approval/mutation/frontend
+regressions, stress, readiness and Linux systemd recovery. Full repository race
+and real race-daemon tests passed before commit. Runtime logs preserve both the
+old-version reproduction and corrected audit-enum failure, with only passing
+final-code runs counted. Shared routes, mixed workload, macOS and independent
+review remain open; Phase5 and Multi Agent Gate retain In progress status.

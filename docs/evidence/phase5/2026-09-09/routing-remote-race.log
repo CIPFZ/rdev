@@ -1,0 +1,13 @@
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:108: actual daemon: absent/malformed routes rejected before dial; policy denial precedes route lookup; owner-only rejection audit; valid remote ping preserved
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:196: actual daemon: scoped admin cannot grant/revoke globally or another host; matching host grant/revoke survives SIGKILL; other project cannot administer; only intended host executes
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:310: actual daemon/SSH: host-scoped approval issuance bound to nested host; rejection preserves approval; two approved appends exactly once across crash; mutation outcomes filtered by host and project before/after SIGKILL, absent/out-of-scope indistinguishable
+--- PASS: TestRemoteBrokerRoutes (23.85s)
+    --- PASS: TestRemoteBrokerRoutes/absent_and_malformed (4.47s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_policy (7.56s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_approval_and_mutation (11.81s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	23.856s

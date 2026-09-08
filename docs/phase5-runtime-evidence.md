@@ -1146,3 +1146,27 @@ Committed-artifact validation and archived logs follow after completion. This is
 implementing-agent review, not independent external review. Complete shared
 secret/sync/session routing, full route audit correlation, mixed workload and
 platform matrices remain open; no Phase5-wide Complete claim follows.
+
+
+## Committed route validation: 74da502
+
+Implementation `74da502` was pushed to `origin/main`. Committed-source `make
+check remote-routes remote-policy remote-approval remote-mutation remote-frontends
+stress-broker smoke-rdevd remote-phase5-runtime` exited successfully using the
+Go/SSH paths documented above. The [committed log](evidence/phase5/2026-09-09/committed-routes-74da502.log)
+contains three complete route runs, existing exact-target policy/approval tests,
+pre-ACK mutation and frontend regressions, stress, readiness, daemon credential
+and crash tests, and actual systemd install/enable/start/reload/SIGKILL recovery/
+stop/start (PID `1070111 -> 1070186`).
+
+The [predecessor reproduction](evidence/phase5/2026-09-09/routing-before-final-harness.log)
+is an expected failure against unchanged old production code. The [first corrected
+run](evidence/phase5/2026-09-09/routing-after.log) failed the missing audit-enum
+assertion; it is retained as diagnostic evidence. The final-code [full check and
+remote regressions](evidence/phase5/2026-09-09/routing-fixed-check-runtime.log),
+[full race](evidence/phase5/2026-09-09/routing-full-race.log) and [actual race daemon](evidence/phase5/2026-09-09/routing-remote-race.log)
+passed after that correction. No failed diagnostic is counted as acceptance.
+Remaining shared routes, full audit correlation, mixed workload, macOS and
+independent external review keep Phase5 In progress.
+
+Remote committed daemon SHA-256: `c98adb9e2e6d17b26fb9d8ede4d48b71d21be76ced75b04701b08fde918bd369`.
