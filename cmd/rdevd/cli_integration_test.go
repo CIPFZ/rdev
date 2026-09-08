@@ -32,7 +32,7 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	tmp := t.TempDir()
 	// Darwin limits Unix socket paths to a short sockaddr.sun_path. Keep the
 	// socket in /tmp even though binaries and event data use the test directory.
-	socket := filepath.Join("/tmp", fmt.Sprintf("rdevd-cli-%d.sock", os.Getpid()))
+	socket := privateTestSocket(t)
 	events := filepath.Join(tmp, "events.jsonl")
 	cli := filepath.Join(tmp, "rdev")
 	_ = os.Remove(socket)

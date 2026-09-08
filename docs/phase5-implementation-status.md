@@ -20,3 +20,13 @@ benchmarks remain follow-up validation for the final Phase 5 gate.
 User service templates are provided under `deploy/systemd` and `deploy/launchd`;
 both rely on the private socket lock and bounded shutdown path. Policy grants,
 job ownership, audit events, and config are persisted beside the broker socket.
+
+
+The 2026-09-08 follow-up adds authenticated-by-default daemon startup, private
+key generation and token provisioning, live key rotation with session revocation,
+fail-closed startup/config parsing, and real process lifecycle tests. Linux
+systemd user installation and automatic restart are exercised by
+`make remote-service-smoke`; `make remote-phase5-runtime` additionally executes
+the real credential/crash test suite on the remote host without needing Go there.
+Consult `phase5-acceptance.md` for the authoritative incomplete items; source
+primitives and green unit tests alone are not completion evidence.

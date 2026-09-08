@@ -16,7 +16,7 @@ import (
 )
 
 func TestUnixBrokerMultipleClientsShareService(t *testing.T) {
-	socket := filepath.Join("/tmp", "rdevd-it-"+fmt.Sprint(os.Getpid())+".sock")
+	socket := privateTestSocket(t)
 	_ = os.Remove(socket)
 	defer os.Remove(socket)
 	listener, err := broker.Listen(socket)
@@ -61,9 +61,12 @@ func TestUnixBrokerMultipleClientsShareService(t *testing.T) {
 }
 
 func TestServeConnValidatesPrincipalToken(t *testing.T) {
-	t.Setenv("RDEV_PRINCIPAL_SECRET", "01234567890123456789012345678901")
+	const secret = "01234567890123456789012345678901"
 	owner := broker.Owner{ClientID: "principal", ProjectID: "project"}
 	service := broker.NewService(nil)
+	if err := service.Principals.Rotate(secret); err != nil {
+		t.Fatal(err)
+	}
 	if err := service.Grant(owner, "ping"); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +101,7 @@ func TestServeConnValidatesPrincipalToken(t *testing.T) {
 }
 
 func TestUnixBrokerTwentyClients(t *testing.T) {
-	socket := filepath.Join("/tmp", "rdevd-20-"+fmt.Sprint(os.Getpid())+".sock")
+	socket := privateTestSocket(t)
 	_ = os.Remove(socket)
 	defer os.Remove(socket)
 	listener, err := broker.Listen(socket)
@@ -376,4 +379,14 @@ func TestServeConnSharesServiceAcrossClients(t *testing.T) {
 		}
 		a.Close()
 	}
+}
+
+func privateTestSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "rdev-wire-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "broker.sock")
 }

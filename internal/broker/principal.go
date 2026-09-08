@@ -7,10 +7,53 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 )
 
 const MaxPrincipalTokenTTL = 24 * time.Hour
+
+// PrincipalAuthority owns signing material and invalidates established sessions
+// when an administrator rotates the key. Clients receive only bearer tokens.
+// An empty authority is for explicitly selected single-user compatibility mode.
+type PrincipalAuthority struct {
+	mu      sync.RWMutex
+	secret  string
+	revoked chan struct{}
+}
+
+func (a *PrincipalAuthority) Rotate(secret string) error {
+	if err := ValidatePrincipalSecret(secret); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.secret == secret {
+		return nil
+	}
+	if a.revoked != nil {
+		close(a.revoked)
+	}
+	a.secret = secret
+	a.revoked = make(chan struct{})
+	return nil
+}
+
+func (a *PrincipalAuthority) Authenticate(owner Owner, token string) (time.Time, <-chan struct{}, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.secret == "" {
+		return time.Time{}, nil, nil
+	}
+	expires, err := PrincipalTokenExpiry(a.secret, owner, token)
+	return expires, a.revoked, err
+}
+
+func (a *PrincipalAuthority) Required() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.secret != ""
+}
 
 // Principal tokens authorize a protocol caller to declare one owner. The signing
 // key belongs only to the daemon and provisioning administrator; clients receive

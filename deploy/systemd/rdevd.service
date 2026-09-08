@@ -4,9 +4,12 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/rdevd -ready-file %t/rdevd.ready
+ExecStart=%h/bin/rdevd -ready-file %t/rdevd.ready -principal-key-file %h/.config/rdev/principal.key
 Restart=on-failure
 RestartSec=2
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=15
+UMask=0077
 Environment=RDEV_AGENT_DIR=%h/.local/share/rdev/agents
 
 [Install]

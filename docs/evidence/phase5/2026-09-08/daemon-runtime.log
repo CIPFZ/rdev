@@ -1,0 +1,31 @@
+=== RUN   TestDaemonRuntimeLifecycle
+=== RUN   TestDaemonRuntimeLifecycle/principal_provision_expire_rotate
+    runtime_integration_test.go:236: real daemon: provisioning, principal/project binding, default deny, expiry, atomic config/key reload, established-session revocation, restart passed
+=== RUN   TestDaemonRuntimeLifecycle/single_instance_crash_signal
+    runtime_integration_test.go:251: real UID 65534 process denied access to root-owned broker socket
+    runtime_integration_test.go:278: real daemon: private socket, duplicate-start readiness, SIGKILL stale-socket recovery and SIGTERM cleanup passed
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs
+--- PASS: TestDaemonRuntimeLifecycle (2.00s)
+    --- PASS: TestDaemonRuntimeLifecycle/principal_provision_expire_rotate (1.50s)
+    --- PASS: TestDaemonRuntimeLifecycle/single_instance_crash_signal (0.05s)
+    --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed (0.08s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_key (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_config (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs (0.01s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.008s

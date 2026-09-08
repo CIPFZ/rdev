@@ -48,7 +48,22 @@ func TestServiceTemplatesDeclareReadinessAndRestartPolicy(t *testing.T) {
 func TestServiceTemplatesPassManagerSyntaxChecks(t *testing.T) {
 	root := filepath.Join("..", "..")
 	if tool, err := exec.LookPath("systemd-analyze"); err == nil {
-		cmd := exec.Command(tool, "verify", filepath.Join(root, "deploy", "systemd", "rdevd.service"))
+		// Render the install-time executable path before checking the unit;
+		// the template's %h/bin/rdevd need not already be installed on a builder.
+		data, err := os.ReadFile(filepath.Join(root, "deploy", "systemd", "rdevd.service"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "rdevd")
+		if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		unit := filepath.Join(dir, "rdevd.service")
+		if err := os.WriteFile(unit, []byte(strings.ReplaceAll(string(data), "%h/bin/rdevd", binary)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(tool, "--user", "verify", unit)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("systemd-analyze verify failed: %v\n%s", err, out)
 		}

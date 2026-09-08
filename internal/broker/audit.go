@@ -32,6 +32,17 @@ func NewAuditLog(max int) *AuditLog {
 	return &AuditLog{max: max}
 }
 
+func (a *AuditLog) Close() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.file == nil {
+		return nil
+	}
+	err := a.file.Close()
+	a.file = nil
+	return err
+}
+
 // ConfigureFile enables append-only JSONL persistence with bounded rotation.
 func (a *AuditLog) ConfigureFile(path string, maxBytes int64) error {
 	if path == "" || maxBytes < 1 {

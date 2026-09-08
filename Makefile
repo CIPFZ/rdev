@@ -17,7 +17,7 @@ COMMIT      := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
 STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke stress-broker
+.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime stress-broker
 
 all: agents build
 
@@ -86,22 +86,22 @@ check: vet test check-agents
 # Start the real broker binary, wait for readiness, then verify signal-driven
 # shutdown removes both the readiness marker and private socket.
 smoke-rdevd: agents
-	@tmp=$$(mktemp -d); \
-	sock=$$tmp/rdevd.sock; ready=$$tmp/ready; log=$$tmp/log; \
-	trap 'kill -TERM $$pid 2>/dev/null || true; wait $$pid 2>/dev/null || true; rm -rf $$tmp' EXIT; \
-	bin=$$tmp/rdevd; $(GO) build -trimpath -o "$$bin" ./cmd/rdevd; \
-	"$$bin" -socket "$$sock" -ready-file "$$ready" -agent-dir "$$tmp/agents" >"$$log" 2>&1 & pid=$$!; \
-	for i in $$(seq 1 100); do test -f "$$ready" && break; sleep 0.1; done; \
-	test -f "$$ready"; kill -TERM $$pid; \
-	for i in $$(seq 1 100); do kill -0 $$pid 2>/dev/null || break; sleep 0.1; done; \
-	wait $$pid; test ! -e "$$ready"; test ! -e "$$sock"; \
-	echo 'rdevd readiness/shutdown smoke: ok'
+	@set -eu; tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	$(GO) build -trimpath -o "$$tmp/rdevd" ./cmd/rdevd; \
+	sh scripts/rdevd-smoke-runtime.sh "$$tmp/rdevd" "$$tmp/run"
 
 # Build the Linux daemon locally and exercise it on the configured real SSH
 # host. The script uses the user's SSH alias/configuration and never handles a
 # private key directly. Override RDEV_REMOTE_SSH to test another SSH target.
 remote-smoke: agents
-	RDEV_REMOTE_SSH='$(RDEV_REMOTE_SSH)' RDEV_GO='$(GO)' sh scripts/remote-rdevd-smoke.sh
+	RDEV_REMOTE_SSH='$(RDEV_REMOTE_SSH)' RDEV_SSH_CONFIG='$(RDEV_SSH_CONFIG)' RDEV_GO='$(GO)' sh scripts/remote-rdevd-smoke.sh
+
+remote-service-smoke: agents
+	RDEV_REMOTE_SERVICE=1 RDEV_REMOTE_SSH='$(RDEV_REMOTE_SSH)' RDEV_SSH_CONFIG='$(RDEV_SSH_CONFIG)' RDEV_GO='$(GO)' sh scripts/remote-rdevd-smoke.sh
+
+remote-phase5-runtime: agents
+	RDEV_REMOTE_RUNTIME=1 RDEV_REMOTE_SERVICE=1 RDEV_REMOTE_SSH='$(RDEV_REMOTE_SSH)' RDEV_SSH_CONFIG='$(RDEV_SSH_CONFIG)' RDEV_GO='$(GO)' sh scripts/remote-rdevd-smoke.sh
 
 stress-broker: agents
 	$(GO) test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m

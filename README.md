@@ -590,6 +590,7 @@ make build         # 编译 rdev（含 embed）
 make check-agents  # 校验 embed 的 agent 确实由当前源码构出
 make check         # = vet + test + check-agents
 make remote-smoke  # 在 SSH 配置的 service-deploy 上验证 Linux rdevd readiness/权限/关闭
+make remote-phase5-runtime  # 真实 daemon 凭证/崩溃恢复测试和 systemd 用户服务安装验证
 make test
 make vet
 ```
@@ -654,3 +655,8 @@ MIT，见 [LICENSE](LICENSE)。
 Apache-2.0，尚未取得转授权同意的原贡献仍是 MIT。两者都允许在 MIT 项目里使用。
 只是如果将来要分发**含 SDK 代码**的产物（本项目不这么做——`go.mod` 引用而非 vendor），
 Apache-2.0 的第 4 条要求保留其 NOTICE 和变更声明。
+
+
+共享 `rdevd` 默认要求 principal 凭证。私有签名密钥生成、短期 token 发放、
+SIGHUP 轮换、服务安装与运行时验证见 [rdevd 运维说明](docs/rdevd-operations.md)。
+Phase5 的真实证据和剩余缺口见 [验收记录](docs/phase5-acceptance.md)。

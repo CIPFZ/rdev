@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -2143,13 +2145,10 @@ func TestExecTimeoutStillReportsTrueOutputSize(t *testing.T) {
 // The timeout kill goes to the process group, so a command that backgrounds work
 // does not leave orphans running on the remote after the call returns.
 func TestExecTimeoutKillsGrandchildren(t *testing.T) {
-	// The marker rides along as a shell variable so pgrep can find this test's
-	// process without matching an unrelated sleep.
-	const marker = "rdev_test_orphan_marker"
 	res, err := doExec(&proto.ExecParams{
-		// The inner sleep is a grandchild: killing only the direct child would
-		// leave it running.
-		Argv:       []string{"sh", "-c", marker + "=1 sh -c 'sleep 45' & echo started; wait"},
+		// The outer shell waits for an inner shell whose child PID is reported.
+		// pgrep -f would also match the checker itself on Linux.
+		Argv:       []string{"sh", "-c", "sh -c 'sleep 45 & echo $!; wait' & wait"},
 		TimeoutSec: 1,
 	})
 	if err != nil {
@@ -2158,16 +2157,20 @@ func TestExecTimeoutKillsGrandchildren(t *testing.T) {
 	if !res.TimedOut {
 		t.Fatal("TimedOut should be set")
 	}
+	pid, err := strconv.Atoi(strings.TrimSpace(res.Stdout))
+	if err != nil || pid < 1 {
+		t.Fatalf("missing grandchild PID: %q", res.Stdout)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
+		// Orphan zombies may wait for the host init to reap them, but cannot run.
+		if err != nil || strings.TrimSpace(string(out)) == "" || strings.HasPrefix(strings.TrimSpace(string(out)), "Z") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Fatalf("grandchild %d survived process-group timeout", pid)
 
-	// Give the kill a moment to be reaped, then confirm nothing survived.
-	time.Sleep(300 * time.Millisecond)
-	check, err := doExec(&proto.ExecParams{
-		Argv: []string{"sh", "-c", "pgrep -f " + marker + " | wc -l"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.TrimSpace(check.Stdout); got != "0" {
-		t.Errorf("%s survivors = %s, want 0: the group kill missed a grandchild", marker, got)
-	}
 }

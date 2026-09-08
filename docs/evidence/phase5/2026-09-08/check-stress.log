@@ -1,0 +1,28 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.005s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.317s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.416s
+ok  	github.com/CIPFZ/rdev/internal/broker	1.535s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.005s
+ok  	github.com/CIPFZ/rdev/internal/client	0.449s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.038s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.639s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.005s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.005s
+ok  	github.com/CIPFZ/rdev/internal/session	9.354s
+ok  	github.com/CIPFZ/rdev/internal/state	0.097s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.034s
+ok  	github.com/CIPFZ/rdev/internal/support	0.004s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.324s
+ok       rdev-agent-linux-amd64 52d9b6aea803
+ok       rdev-agent-linux-arm64 30730ddd6334
+ok       rdev-agent-darwin-amd64 6a1590a99116
+ok       rdev-agent-darwin-arm64 cc9f5ae358be
+/data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	0.293s

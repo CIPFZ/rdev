@@ -38,6 +38,7 @@ type Service struct {
 	sharedMu         sync.Mutex
 	shared           map[string]*sharedDispatch
 	Jobs             *JobRegistry
+	Principals       PrincipalAuthority
 	fair             map[Lane]*fairDispatcher
 	weightMu         sync.RWMutex
 	weights          map[string]int

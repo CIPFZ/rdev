@@ -6,14 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/broker"
@@ -22,135 +19,17 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "principal-token" {
-		if err := principalTokenCommand(os.Args[2:], os.Stdout); err != nil {
-			log.Fatal(err)
-		}
-		return
+	var err error
+	switch {
+	case len(os.Args) > 1 && os.Args[1] == "principal-token":
+		err = principalTokenCommand(os.Args[2:], os.Stdout)
+	case len(os.Args) > 1 && os.Args[1] == "principal-keygen":
+		err = principalKeygenCommand(os.Args[2:])
+	default:
+		err = runDaemon(os.Args[1:])
 	}
-	defaultSocket := filepath.Join(os.TempDir(), "rdev", "rdevd.sock")
-	if home, err := os.UserHomeDir(); err == nil {
-		defaultSocket = filepath.Join(home, ".cache", "rdev", "rdevd.sock")
-	}
-	socket := flag.String("socket", defaultSocket, "Unix socket path")
-	defaultAgents := filepath.Join(os.Getenv("HOME"), ".local", "share", "rdev", "agents")
-	if v := os.Getenv("RDEV_AGENT_DIR"); v != "" {
-		defaultAgents = v
-	}
-	agentDir := flag.String("agent-dir", defaultAgents, "directory containing rdev-agent-<os>-<arch> binaries")
-	configPath := flag.String("config", defaultSocket+".json", "broker JSON config path")
-	readyFile := flag.String("ready-file", "", "optional readiness file written after initialization")
-	flag.Parse()
-	if *readyFile != "" {
-		_ = os.Remove(*readyFile)
-	}
-	ln, err := broker.Listen(*socket)
 	if err != nil {
 		log.Fatal(err)
-	}
-	defer ln.Close()
-	service := broker.NewService(agentLookup(*agentDir))
-	service.SetReady(false)
-	loadConfig := func() {
-		data, err := os.ReadFile(*configPath)
-		if os.IsNotExist(err) {
-			return
-		}
-		if err != nil {
-			log.Printf("rdevd: config read failed: %v", err)
-			return
-		}
-		var cfg broker.Config
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			log.Printf("rdevd: config parse failed: %v", err)
-			return
-		}
-		if err := service.ReloadConfig(cfg); err != nil {
-			log.Printf("rdevd: config rejected: %v", err)
-		}
-	}
-	loadConfig()
-	policyPath := *socket + ".policy"
-	if err := service.LoadPolicy(policyPath); err != nil && !os.IsNotExist(err) {
-		log.Printf("rdevd: policy load failed: %v", err)
-	}
-	defer func() {
-		if err := service.SavePolicy(policyPath); err != nil {
-			log.Printf("rdevd: policy save failed: %v", err)
-		}
-	}()
-	if err := service.Audit.ConfigureFile(*socket+".audit", 8<<20); err != nil {
-		log.Printf("rdevd: warning: audit persistence disabled: %v", err)
-	}
-	if err := service.Client().Hosts.Load(); err != nil {
-		log.Printf("rdevd: warning: host registry not loaded: %v", err)
-	}
-	jobsPath := *socket + ".jobs"
-	if err := service.Jobs.ConfigurePersistence(jobsPath); err != nil {
-		log.Fatalf("rdevd: job registry load failed: %v", err)
-	}
-	defer service.Jobs.Save(jobsPath)
-	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
-	service.RecoverJobs(recoveryCtx)
-	cancelRecovery()
-	service.SetReady(true)
-	if *readyFile != "" {
-		if err := os.WriteFile(*readyFile, []byte("READY\n"), 0o600); err != nil {
-			log.Printf("rdevd: readiness file: %v", err)
-		}
-		defer os.Remove(*readyFile)
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := service.Close(shutdownCtx); err != nil {
-			log.Printf("rdevd: shutdown: %v", err)
-		}
-	}()
-	var ready broker.Readiness
-	ready.SetReady(true)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
-	go func() {
-		for {
-			select {
-			case <-hup:
-				loadConfig()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case now := <-ticker.C:
-				if service.ReapIdle(now) {
-					log.Printf("rdevd: reaped idle broker connections")
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			continue
-		}
-		go serveConn(conn, service)
 	}
 }
 
@@ -190,9 +69,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		return
 	}
 	var boundOwner broker.Owner
-	var principalDeadline time.Time
-	secret := os.Getenv("RDEV_PRINCIPAL_SECRET")
-	if secret != "" || hello.ClientID != "" || hello.ProjectID != "" {
+	if service.Principals.Required() || hello.ClientID != "" || hello.ProjectID != "" {
 		boundOwner = broker.Owner{ClientID: hello.ClientID, ProjectID: hello.ProjectID}
 		if err := boundOwner.Validate(); err != nil {
 			resp.Error = err.Error()
@@ -200,18 +77,29 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			return
 		}
 	}
-	if secret != "" {
-		var err error
-		principalDeadline, err = broker.PrincipalTokenExpiry(secret, boundOwner, hello.PrincipalToken)
-		if err != nil {
-			resp.Error = err.Error()
-			_ = json.NewEncoder(conn).Encode(resp)
-			return
-		}
-		// Expiration applies to established sessions, including idle clients and
-		// outstanding calls. The decoder deadline cancels the connection context.
+	var revoked <-chan struct{}
+	principalDeadline, revoked, err := service.Principals.Authenticate(boundOwner, hello.PrincipalToken)
+	if err != nil {
+		resp.Error = err.Error()
+		_ = json.NewEncoder(conn).Encode(resp)
+		return
+	}
+	if !principalDeadline.IsZero() {
 		_ = conn.SetDeadline(principalDeadline)
 	}
+	// Rotation closes authenticated sessions, including idle clients and calls.
+	sessionDone := make(chan struct{})
+	defer close(sessionDone)
+	if revoked != nil {
+		go func() {
+			select {
+			case <-revoked:
+				_ = conn.Close()
+			case <-sessionDone:
+			}
+		}()
+	}
+
 	resp.OK = true
 	if err := json.NewEncoder(conn).Encode(resp); err != nil {
 		return
@@ -248,6 +136,11 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			return
 		case <-connCtx.Done():
 			return
+		}
+		select {
+		case <-revoked:
+			return
+		default:
 		}
 		if !principalDeadline.IsZero() && !time.Now().Before(principalDeadline) {
 			return

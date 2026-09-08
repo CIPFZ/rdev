@@ -4,7 +4,11 @@
 <dict>
 	<key>Label</key><string>com.cipfz.rdevd</string>
 	<key>ProgramArguments</key>
-	<array><string>/Users/REPLACE/bin/rdevd</string></array>
+	<array>
+  <string>/Users/REPLACE/bin/rdevd</string>
+  <string>-principal-key-file</string><string>/Users/REPLACE/.config/rdev/principal.key</string>
+  <string>-ready-file</string><string>/Users/REPLACE/.cache/rdev/ready</string>
+ </array>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
 	<key>ProcessType</key><string>Interactive</string>
