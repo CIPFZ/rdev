@@ -379,7 +379,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		lane := broker.LaneControl
 		switch req.Operation {
-		case "exec", "job.start", "job.stop", "job.wait":
+		case "exec", "job_start", "job_stop", "job_wait":
 			lane = broker.LaneExec
 		case "sync.push", "sync.pull", "write", "write_file":
 			lane = broker.LaneBulk
