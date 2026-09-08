@@ -35,65 +35,7 @@ func TestRemoteBrokerProcesses(t *testing.T) {
 		runRemoteProcessClient(t)
 		return
 	}
-	if os.Getenv("RDEV_RUN_REMOTE") != "1" {
-		t.Skip("set RDEV_RUN_REMOTE=1 for the real SSH multi-process benchmark")
-	}
-	if runtime.GOOS != "linux" {
-		t.Skip("local /proc process-count evidence currently requires Linux")
-	}
-	remote := os.Getenv("RDEV_TEST_REMOTE")
-	if remote == "" {
-		remote = "service-deploy"
-	}
-	sshConfig := os.Getenv("RDEV_TEST_SSH_CONFIG")
-	sshPath, err := exec.LookPath("ssh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin := filepath.Join(t.TempDir(), "rdevd")
-	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build daemon: %v %s", err, out)
-	}
-	d := newRuntimeDaemon(t, bin)
-	namespace := ".cache/rdev-phase5-" + filepath.Base(d.dir)
-	sshRun := func(script string) ([]byte, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		args := []string{}
-		if sshConfig != "" {
-			args = append(args, "-F", sshConfig)
-		}
-		args = append(args, remote, "python3 - '"+namespace+"'")
-		cmd := exec.CommandContext(ctx, sshPath, args...)
-		cmd.Stdin = strings.NewReader(script)
-		return cmd.CombinedOutput()
-	}
-	t.Cleanup(func() {
-		d.stop(syscall.SIGTERM)
-		out, err := sshRun("import os,sys,shutil\np=os.path.expanduser('~/'+sys.argv[1])\nassert '/.cache/rdev-phase5-' in p\nshutil.rmtree(p,ignore_errors=True)\n")
-		if err != nil {
-			t.Errorf("remote test namespace cleanup failed: %v %s", err, out)
-		}
-	})
-	// The wrapper only supplies the user's selected SSH configuration. It execs
-	// real OpenSSH unchanged; transport, agent and daemon code are not replaced.
-	wrapDir := filepath.Join(d.dir, "tools")
-	if err := os.Mkdir(wrapDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	wrap := "#!/bin/sh\nif [ -n \"$RDEV_TEST_SSH_CONFIG\" ]; then exec \"$RDEV_TEST_REAL_SSH\" -F \"$RDEV_TEST_SSH_CONFIG\" \"$@\"; fi\nexec \"$RDEV_TEST_REAL_SSH\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(wrapDir, "ssh"), []byte(wrap), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	d.env = append(os.Environ(), "PATH="+wrapDir+string(os.PathListSeparator)+os.Getenv("PATH"), "RDEV_TEST_REAL_SSH="+sshPath, "RDEV_TEST_SSH_CONFIG="+sshConfig)
-	hosts := map[string]any{"hosts": []map[string]any{{"name": "runtime-host", "addr": remote, "remote_dir": namespace, "login_shell": false}}}
-	data, _ := json.Marshal(hosts)
-	hostsPath := filepath.Join(d.dir, "hosts.json")
-	if err := os.WriteFile(hostsPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	d.extraArgs = []string{"-hosts-file", hostsPath, "-agent-dir", filepath.Join(repoRoot(t), "cmd", "rdev", "agents")}
+	d, _, sshRun := newRemoteRuntime(t)
 	const clients, rounds = 20, 25
 	policy := broker.NewPolicy()
 	owners := make([]broker.Owner, clients)
@@ -227,6 +169,74 @@ func TestRemoteBrokerProcesses(t *testing.T) {
 	metrics := map[string]any{"clients": clients, "calls": clients * rounds, "elapsed_ms": float64(time.Since(started).Microseconds()) / 1000, "remote_agent_max": maxAgent, "remote_agent_distinct": len(agentPIDs), "remote_principals": len(principalIDs), "daemon_ssh_max": maxSSH, "process_samples": samples, "ping_p50_ms": percentile(allPing, .50), "ping_p95_ms": percentile(allPing, .95), "ping_p99_ms": percentile(allPing, .99), "exec_p95_ms": percentile(allExec, .95)}
 	report, _ := json.Marshal(metrics)
 	t.Logf("real SSH multi-process benchmark: %s", report)
+}
+
+// newRemoteRuntime uses isolated local and remote namespaces and real OpenSSH.
+func newRemoteRuntime(t *testing.T) (*runtimeDaemon, string, func(string) ([]byte, error)) {
+	t.Helper()
+	if os.Getenv("RDEV_RUN_REMOTE") != "1" {
+		t.Skip("set RDEV_RUN_REMOTE=1 for the real SSH multi-process benchmark")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("local /proc process-count evidence currently requires Linux")
+	}
+	remote := os.Getenv("RDEV_TEST_REMOTE")
+	if remote == "" {
+		remote = "service-deploy"
+	}
+	sshConfig := os.Getenv("RDEV_TEST_SSH_CONFIG")
+	sshPath, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := os.Getenv("RDEV_TEST_DAEMON_BINARY")
+	if bin == "" {
+		bin = filepath.Join(t.TempDir(), "rdevd")
+		build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", bin, ".")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build daemon: %v %s", err, out)
+		}
+	}
+	d := newRuntimeDaemon(t, bin)
+	namespace := ".cache/rdev-phase5-" + filepath.Base(d.dir)
+	sshRun := func(script string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		args := []string{}
+		if sshConfig != "" {
+			args = append(args, "-F", sshConfig)
+		}
+		args = append(args, remote, "python3 - '"+namespace+"'")
+		cmd := exec.CommandContext(ctx, sshPath, args...)
+		cmd.Stdin = strings.NewReader(script)
+		return cmd.CombinedOutput()
+	}
+	t.Cleanup(func() {
+		d.stop(syscall.SIGTERM)
+		out, err := sshRun("import os,sys,shutil\np=os.path.expanduser('~/'+sys.argv[1])\nassert '/.cache/rdev-phase5-' in p\nshutil.rmtree(p,ignore_errors=True)\n")
+		if err != nil {
+			t.Errorf("remote test namespace cleanup failed: %v %s", err, out)
+		}
+	})
+	// The wrapper only supplies the user's selected SSH configuration. It execs
+	// real OpenSSH unchanged; transport, agent and daemon code are not replaced.
+	wrapDir := filepath.Join(d.dir, "tools")
+	if err := os.Mkdir(wrapDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wrap := "#!/bin/sh\nif [ -n \"$RDEV_TEST_SSH_CONFIG\" ]; then exec \"$RDEV_TEST_REAL_SSH\" -F \"$RDEV_TEST_SSH_CONFIG\" \"$@\"; fi\nexec \"$RDEV_TEST_REAL_SSH\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapDir, "ssh"), []byte(wrap), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d.env = append(os.Environ(), "PATH="+wrapDir+string(os.PathListSeparator)+os.Getenv("PATH"), "RDEV_TEST_REAL_SSH="+sshPath, "RDEV_TEST_SSH_CONFIG="+sshConfig)
+	hosts := map[string]any{"hosts": []map[string]any{{"name": "runtime-host", "addr": remote, "remote_dir": namespace, "login_shell": false}}}
+	data, _ := json.Marshal(hosts)
+	hostsPath := filepath.Join(d.dir, "hosts.json")
+	if err := os.WriteFile(hostsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.extraArgs = []string{"-hosts-file", hostsPath, "-agent-dir", filepath.Join(repoRoot(t), "cmd", "rdev", "agents")}
+	return d, namespace, sshRun
 }
 
 const remoteAgentPIDScript = `import os,sys,json

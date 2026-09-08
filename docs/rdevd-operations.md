@@ -148,3 +148,16 @@ Broker-mode protocol dispatch requires a version-3 agent to preserve principal
 metadata. Direct compatibility clients retain their legacy behavior. The new
 optional ping `caller_id` reports only the current request's opaque protocol
 identity; older ping clients can ignore it.
+
+`make remote-lifecycle RDEV_SSH_CONFIG=/path/to/ssh/config` runs real SSH
+cancellation and lease tests. It kills the test namespace's verified agent PID,
+pauses replacement-agent startup at an OpenSSH wrapper barrier, cancels a
+waiting frontend context, and kills the initiating frontend process. It checks
+that another owner completes exactly one mutation and that foreground
+cancellation preserves other owners' execs and the shared agent. Six additional
+lease cycles alternate normal frontend exit and SIGKILL, hold each connection
+across a reaper tick, and verify that both the SSH child and remote agent exit
+after the final lease expires. The current reaper tick is five seconds, so
+observed reclamation takes the configured `idle_ttl` plus up to one tick and
+process-exit latency. These tests require Linux `/proc` locally and remotely,
+Python 3, and an authorized SSH target; all resources use generated namespaces.

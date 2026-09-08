@@ -204,3 +204,45 @@ Implementation commit: `b5e9422be7be55ccdb38a371e3aa76638a5e8e2d`
 
 These measurements prove shared-session identity preservation, not sustained
 fairness or the control-under-bulk SLO. Phase5 remains In progress.
+
+## Cancellation and atomic lease reclamation follow-up
+
+The per-host connection setup mutex previously ignored a waiting caller's
+context. It is now a cancellable per-host admission channel; cancellation of
+one waiter does not interrupt another caller's initialization. Canceled dial
+or secret initialization also leaves the shared host cold and retryable rather
+than permanently denying all later callers as a credential failure.
+
+The lease's idle check now atomically detaches the old connection pool under
+the same lock used by attachment and request admission. Closing those detached
+SSH processes happens outside the lock. Publication tokens prevent old cleanup
+from changing a newly published connection's security state. Each idle
+generation is reaped once, and startup's unowned pool also has an idle epoch.
+Authenticated handshakes register their lease before acknowledging success.
+
+`make remote-lifecycle` exercises the real daemon, independent authenticated
+frontend processes, real OpenSSH, and the actual remote agent. The retry test
+kills the exact test agent after verifying its executable path, then pauses
+replacement startup in an SSH wrapper. It verifies a canceled waiting frontend
+returns before that barrier is released, killing the initiating frontend lets
+another owner redial, one survivor mutation executes exactly once, and killing
+a foreground owner removes its remote process while another exec completes
+on the same agent. The wrapper changes only startup timing; protocol dispatch
+and remote operations are not replaced.
+
+The [first lease soak](evidence/phase5/2026-09-08/lease-runtime-initial.log) ran six cycles over 65.363 seconds: three normal frontend
+exits, three SIGKILL exits, 60 additional new-owner requests, no active-agent
+replacement, zero SSH children/remote agents after each idle generation, and
+exactly six reaper events. Configured grace was 250 ms with a five-second
+reaper tick; observed cleanup was 4602.664–4815.387 ms after last-client exit.
+This is repeated runtime lifecycle evidence, not an hours-long capacity soak.
+The committed-source section below records the final implementation checks.
+
+A separate root review checked lock ordering (lease then client pool), cleanup
+outside admission, replacement publication tokens, canceled security state,
+handshake acknowledgment ordering, actual process identifiers, and test cleanup.
+No external independent-review approval is claimed. P5-05/P5-11 now have real
+SSH cancellation and grace evidence; full job wait/shutdown behavior, prolonged
+QoS pressure, and independent review remain separate unfinished work.
+
+[Targeted final-source tests](evidence/phase5/2026-09-08/lifecycle-targeted.log) passed for `internal/client`, `internal/broker`, and `cmd/rdevd`.

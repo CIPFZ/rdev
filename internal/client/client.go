@@ -89,7 +89,7 @@ type Client struct {
 	// dialing serializes connection setup per host. MCP dispatches tool calls
 	// concurrently, and without this several goroutines would bootstrap the same
 	// host at once, racing on the agent upload's temp file.
-	dialing map[string]*sync.Mutex
+	dialing map[string]chan struct{}
 	// A monotonically increasing publication token prevents teardown of an old
 	// connection from overwriting the security state of a newer one.
 	nextPublication   uint64
@@ -141,7 +141,7 @@ func New(lookup AgentLookup) *Client {
 		},
 		conns:             make(map[string]pooledConnection),
 		security:          make(map[string]ConnectionSecurityStatus),
-		dialing:           make(map[string]*sync.Mutex),
+		dialing:           make(map[string]chan struct{}),
 		latestPublication: make(map[string]uint64),
 		capabilities:      make(map[string]capabilityCacheEntry),
 	}
@@ -251,13 +251,13 @@ func (c *Client) ConnectionSecurity(host string) ConnectionSecurityStatus {
 	return ConnectionSecurityStatus{State: observe.SecurityCold}
 }
 
-// dialLock returns the per-host setup mutex, creating it on first use.
-func (c *Client) dialLock(name string) *sync.Mutex {
+// dialLock serializes setup while allowing each waiter to cancel independently.
+func (c *Client) dialLock(name string) chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	m, ok := c.dialing[name]
 	if !ok {
-		m = &sync.Mutex{}
+		m = make(chan struct{}, 1)
 		c.dialing[name] = m
 	}
 	return m
@@ -273,10 +273,17 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 	// Serialize setup for this host: bootstrap writes a shared temp file on the
 	// remote, so two concurrent dials would clobber each other.
 	lock := c.dialLock(resolved.Host.Name)
-	lock.Lock()
-	defer lock.Unlock()
+	select {
+	case lock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-lock }()
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		resolved, err = c.Hosts.Resolve(hostName)
 		if err != nil {
 			return nil, err
@@ -331,6 +338,11 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 
 		conn, dialErr := c.dial(ctx, resolved.Host, c.lookup)
 		if dialErr != nil {
+			if ctx.Err() != nil {
+				c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: resolved.Generation})
+				releaseIdentity()
+				return nil, ctx.Err()
+			}
 			if len(st.Secrets) > 0 {
 				// Declared values are intentionally not available until the secure
 				// connection can read them. Bootstrap diagnostics may nevertheless
@@ -350,13 +362,22 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 		}
 		loaded, reason, loadErr := c.loadHostSecrets(ctx, resolved, st, conn)
 		if loadErr != nil {
+			state := observe.SecurityFailed
+			if ctx.Err() != nil {
+				// Caller cancellation says nothing about this host's credentials.
+				// Do not poison secure initialization for every other principal.
+				state = observe.SecurityCold
+			}
 			c.closeDetachedConnection(resolved.Host.Name, pooledConnection{
 				conn: conn, generation: resolved.Generation, publication: setupPublication,
 			}, ConnectionSecurityStatus{
-				State: observe.SecurityFailed, Generation: resolved.Generation,
+				State: state, Generation: resolved.Generation,
 				Declared: len(st.Secrets), Loaded: loaded, Reason: reason,
 			})
 			releaseIdentity()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			c.Hosts.RecordSecretLoadFailure(reason, resolved.Host.Name)
 			return nil, fmt.Errorf("connection security initialization failed (%s)", reason)
 		}
@@ -2117,18 +2138,25 @@ func (c *Client) disconnectWithStatus(hostName string, status ConnectionSecurity
 
 // Close tears down all pooled connections.
 func (c *Client) Close() {
+	c.DetachConnections()()
+}
+
+// DetachConnections atomically removes the current pool and returns its cleanup.
+// The broker calls this under its idle admission lock, then closes the detached
+// transports outside that lock. New requests can publish fresh connections while
+// old SSH processes shut down; cleanup cannot remove those replacements.
+func (c *Client) DetachConnections() func() {
 	c.mu.Lock()
-	conns := make(map[string]pooledConnection, len(c.conns))
-	for name, conn := range c.conns {
-		conns[name] = conn
-	}
+	conns := c.conns
 	c.conns = make(map[string]pooledConnection)
 	c.mu.Unlock()
 
-	for name, conn := range conns {
-		c.closeDetachedConnection(name, conn, ConnectionSecurityStatus{
-			State: observe.SecurityCold, Generation: conn.generation,
-		})
+	return func() {
+		for name, conn := range conns {
+			c.closeDetachedConnection(name, conn, ConnectionSecurityStatus{
+				State: observe.SecurityCold, Generation: conn.generation,
+			})
+		}
 	}
 }
 

@@ -242,11 +242,7 @@ func (s *Service) AttachClient() bool {
 func (s *Service) DetachClient()               { s.lease.Detach() }
 func (s *Service) Reapable(now time.Time) bool { return s.lease.Reapable(now) }
 func (s *Service) ReapIdle(now time.Time) bool {
-	if !s.Reapable(now) {
-		return false
-	}
-	s.client.Close()
-	return true
+	return s.lease.Reap(now, s.client.DetachConnections)
 }
 
 func (s *Service) Decide(owner Owner, operation string) Decision {

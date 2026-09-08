@@ -12,7 +12,7 @@ type Lease struct {
 	grace             time.Duration
 }
 
-func NewLease(grace time.Duration) *Lease     { return &Lease{grace: grace} }
+func NewLease(grace time.Duration) *Lease     { return &Lease{grace: grace, detachedAt: time.Now()} }
 func (l *Lease) SetGrace(grace time.Duration) { l.mu.Lock(); l.grace = grace; l.mu.Unlock() }
 func (l *Lease) Attach()                      { l.mu.Lock(); l.clients++; l.detachedAt = time.Time{}; l.mu.Unlock() }
 func (l *Lease) Detach() {
@@ -36,5 +36,25 @@ func (l *Lease) End() {
 func (l *Lease) Reapable(now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.reapable(now)
+}
+
+func (l *Lease) reapable(now time.Time) bool {
 	return l.clients == 0 && l.inflight == 0 && !l.detachedAt.IsZero() && now.Sub(l.detachedAt) >= l.grace
+}
+
+// Reap makes the idle check and pool detachment atomic with Attach and Begin.
+// detach must only remove the pool snapshot; blocking transport cleanup runs
+// after admission is unlocked, so a new caller need not wait for old SSH exits.
+func (l *Lease) Reap(now time.Time, detach func() func()) bool {
+	l.mu.Lock()
+	if !l.reapable(now) {
+		l.mu.Unlock()
+		return false
+	}
+	cleanup := detach()
+	l.detachedAt = time.Time{}
+	l.mu.Unlock()
+	cleanup()
+	return true
 }

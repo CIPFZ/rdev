@@ -100,14 +100,14 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}()
 	}
 
-	resp.OK = true
-	if err := json.NewEncoder(conn).Encode(resp); err != nil {
-		return
-	}
 	if !service.AttachClient() {
 		return
 	}
 	defer service.DetachClient()
+	resp.OK = true
+	if err := json.NewEncoder(conn).Encode(resp); err != nil {
+		return
+	}
 	enc := json.NewEncoder(conn)
 	connCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
