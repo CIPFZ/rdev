@@ -14,7 +14,7 @@ runtime path is exercised.
 | P5-05 | Per-connection context cancellation, broker frontend `DoContext` cancellation that closes only the local socket, shared client pool, disconnect integration test, transport cancellation/late-frame tests, full race test, and `make remote-lifecycle` real daemon/OpenSSH retry cancellation | In progress | Real SSH retry barrier, frontend context cancellation, SIGKILL and other-owner exec preservation now pass; independent review and shared job lifecycle integration remain |
 | P5-06 | Atomic fair admission with separate global/host/owner execution and queue limits, reserved control capacity, cancellable queued work and owner-only status snapshots; real 20-process remote bulk overload and owner SIGKILL tests | In progress | Remote file-I/O owner pressure now has runtime evidence; frontend ingress budgets now implemented with targeted real pressure coverage; warm pool has committed real 100-alias capacity/LRU/control/exec/reload/zero-subscriber tests and owner lane-byte projection; broader exec/job/sync pressure, response allocations and active-host saturation remain |
 | P5-07 | Eligible-owner weighted scheduling, removal of empty/canceled queues, live weight changes for existing backlog; real continuously queued SSH file reads with 3:1 weights reversed to 1:3 by SIGHUP | In progress | Remote weighted file-I/O evidence passes; mixed long exec/job wait/status/sync and independent review remain |
-| P5-08 | Reserved control handlers/queues, dedicated on-demand bulk transport, actual payload byte pacing, and real baseline-versus-bulk control p95 assertions in `make remote-qos` | In progress | Latest committed three-run real 20-process SLO passed on `a8dbe3d` (ratios 1.229–1.663); wider payload/job/sync/streaming and independent review remain |
+| P5-08 | Reserved control handlers/queues, dedicated on-demand bulk transport, actual payload byte pacing, and real baseline-versus-bulk control p95 assertions in `make remote-qos` | In progress | Latest committed three-run real 20-process SLO passed on `c5707ee` (ratios 1.313–1.616); wider payload/job/sync/streaming and independent review remain |
 | P5-09 | Bounded owner-scoped wait coalescing with independently canceled subscribers and observation leases; real 20-process wait test covers initiator/follower SIGKILL, reconnect, SIGHUP, shared terminal operation ID/tail and prompt SIGTERM observation cancellation; private bounded event history persists state changes in the observation worker, including zero-subscriber completion, and exposes job.events plus CLI/MCP cursor replay | In progress | Owner-scoped durable metadata history and CLI/MCP cursor replay now have initial real zero-subscriber/crash/removal/storage-failure evidence; full push streaming, extended retention pressure and independent review remain |
 | P5-10 | Versioned private bounded job registry with persist-before-publish updates and fail-closed uncertain commits; real two-project detached jobs survive repeated daemon SIGKILL, SSH-unavailable recovery, SIGHUP and remote-delete/local-rename failure (`make remote-jobs`); `make remote-mutation` exercises execution-before-ACK SIGKILL, SSH outage, durable job rediscovery, append replay refusal, intent rename failure, CLI/MCP stable IDs and exact-project outcome isolation | In progress | Pre-ACK job-start and append SIGKILL recovery, owner-bound stable IDs, fresh-agent durable tombstone recovery, and actual CLI/MCP outcome queries now pass; event replay, upgrade matrix, identity retirement and independent review remain |
 | P5-11 | Atomic lease admission/pool detachment, cleanup outside the lease lock, in-flight accounting, runtime `IdleTTL` reload, and six real remote lifecycle cycles over 65 seconds (normal exit/SIGKILL, 60 new-owner requests) | In progress | Atomic reaping defect fixed; repeated real SSH lifecycle passed. Real detached wait now keeps an independent lease through zero subscribers and releases it on observation shutdown; independent review and full drain failure matrix remain |
@@ -152,20 +152,20 @@ evidence document; a passing command applies only to the scenario it exercises.
 |---|---|---|
 | P5-01 | `020230b` and predecessors | Broker negotiation/pipelining tests; repeated full check/race |
 | P5-02 | `020230b` | Real daemon duplicate-start, SIGKILL, private socket and foreign UID denial |
-| P5-03 | `b5e9422`, `08ff4fb`, `a47c59a`, `74da502` | Three 20-process / 500-call SSH shared-session benchmarks; bounded 100-alias host pool and fail-closed broker routes |
-| P5-04 | `020230b`, `b5e9422`, `e3ac9c2` | Real principal provision/expiry/rotation, remote identity and two-project job negatives |
-| P5-05 | `2a61674`, `bd03436`, `7026bdf` | Real retry/frontend cancellation/SIGKILL and shared-wait disconnect/reconnect |
-| P5-06 | `6f62f60`, `bd03436`, `7026bdf`, `a47c59a`, `a8dbe3d` | Remote sustained file-I/O, ingress and observer bounds, 100-alias capacity/leases, exact owner lane-byte ledgers |
+| P5-03 | `b5e9422`, `08ff4fb`, `a47c59a`, `74da502`, `c5707ee` | Three 20-process / 500-call SSH shared-session benchmarks; bounded 100-alias host pool and fail-closed broker routes |
+| P5-04 | `020230b`, `b5e9422`, `e3ac9c2`, `c5707ee` | Real principal provision/expiry/rotation, remote identity and two-project job negatives |
+| P5-05 | `2a61674`, `bd03436`, `7026bdf`, `c5707ee` | Real retry/frontend cancellation/SIGKILL and shared-wait disconnect/reconnect |
+| P5-06 | `6f62f60`, `bd03436`, `7026bdf`, `a47c59a`, `a8dbe3d`, `0be7127`, `c5707ee` | Remote sustained file-I/O, ingress and observer bounds, 100-alias capacity/leases, exact owner lane-byte ledgers |
 | P5-07 | `6f62f60` | Continuously backlogged real SSH owners, live 3:1 to 1:3 weight reversal |
-| P5-08 | `6f62f60`, `a47c59a`, `a8dbe3d` | Repeated three-run real bulk/control p95 SLO; latest ratios 1.229–1.663 |
+| P5-08 | `6f62f60`, `a47c59a`, `a8dbe3d`, `c5707ee` | Repeated three-run real bulk/control p95 SLO; latest ratios 1.313–1.616 |
 | P5-09 | `bd03436`, `371fa30`, `7026bdf` | Real shared waits plus 20-client zero-subscriber durable terminal history, restart cursors, CLI/MCP replay, removal isolation and storage repair |
-| P5-10 | `e3ac9c2`, `bd03436`, `a96b359`, `a3ccb8d` | Acknowledged and pre-ACK job/append recovery, fresh-agent durable tombstones, CLI/MCP queries and owner isolation |
+| P5-10 | `e3ac9c2`, `bd03436`, `a96b359`, `a3ccb8d`, `c5707ee` | Acknowledged and pre-ACK job/append recovery, fresh-agent durable tombstones, CLI/MCP queries and owner isolation |
 | P5-11 | `2a61674`, `bd03436` | Six real lease cycles, zero-subscriber observation lease and shutdown release |
-| P5-12 | `020230b`, `669f18f`, `e3ac9c2`, `08ff4fb`, `74da502` | Default deny, exact-host policy/crash, project job isolation and host-bound administration |
-| P5-13 | `915fb5e`, `74da502` | Real mandatory exact-request approval substitution/replay/expiry/restart negatives and scoped issuance |
-| P5-14 | `455ff16`, `6f62f60`, `a96b359`, `41cddb4`, `8af4fb7` | Exact owner privacy, persistent crash continuity, 600-second/603079-call soak with 21 rotations and five SIGKILL recoveries |
-| P5-15 | `020230b`; repeated through `20b4615` | Actual Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start |
-| P5-16 | `020230b`, `669f18f`, `e3ac9c2`, `bd03436`, `20b4615`, `a96b359` | Invalid reload preservation, durable policy ACK, job deletion recovery, wait drain, replay digest negatives |
+| P5-12 | `020230b`, `669f18f`, `e3ac9c2`, `08ff4fb`, `74da502`, `c5707ee` | Default deny, exact-host policy/crash, project job isolation and host-bound administration |
+| P5-13 | `915fb5e`, `74da502`, `c5707ee` | Real mandatory exact-request approval substitution/replay/expiry/restart negatives and scoped issuance |
+| P5-14 | `455ff16`, `6f62f60`, `a96b359`, `41cddb4`, `8af4fb7`, `c5707ee` | Exact owner privacy, persistent crash continuity, 600-second/603079-call soak with 21 rotations and five SIGKILL recoveries |
+| P5-15 | `020230b`; repeated through `c5707ee` | Actual Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start |
+| P5-16 | `020230b`, `669f18f`, `e3ac9c2`, `bd03436`, `20b4615`, `a96b359`, `c5707ee` | Invalid reload preservation, durable policy ACK, job deletion recovery, wait drain, replay digest negatives |
 
 
 ## Durable mutation intent follow-up
@@ -448,3 +448,13 @@ validation results are maintained in the runtime evidence record.
 No additional Complete claim is made: shared file imports/declarative delegation,
 sync/session work, secret archive retirement and broader failure/load matrices,
 macOS runtime and independent review remain open.
+
+
+Secret implementation `c5707ee` passed committed-source full check, three actual
+secret/CLI/MCP/SSH scenarios, repeated approval/mutation crash regressions, three
+20-process QoS runs (p95 ratios 1.313–1.616), stress, readiness and Linux systemd
+recovery. The runtime record links logs, exact artifact digests and the earlier
+fixture diagnoses. Secret archives were empty in these QoS fixtures; archive
+load, file imports/declarative delegation, retirement/storage/upgrade cases,
+sync/session routes, macOS and independent review remain open. No new Complete
+label is applied.

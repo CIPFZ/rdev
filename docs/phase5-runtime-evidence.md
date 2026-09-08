@@ -1424,3 +1424,35 @@ seconds with SHA-256 `58c6c97b7ed6b22a9d46df98502607a8c8c5bdc4835084f27185e3d906
 This run used `GORACE=atexit_sleep_ms=0` to remove the race runtime's one-second
 exit delay from each short administrator subprocess; race detection remained
 enabled. Committed-source full check, QoS and service verification follows.
+
+
+## Committed shared secret validation (`c5707ee`)
+
+[Committed full check and runtime log](evidence/phase5/2026-09-09/committed-secrets-c5707ee.log)
+records passing `make check remote-secrets remote-approval remote-mutation
+remote-qos stress-broker smoke-rdevd remote-phase5-runtime` from the fixed, clean
+commit. Three complete secret scenarios, approval and crash/replay regressions
+passed. Three 20-process bulk/control runs measured p95 ratios 1.313–1.616.
+At measurement the audit sinks had written 146233 / accepted 146236 records,
+rotated six times and reported zero errors/drops, with one self-health event
+pending per run. These QoS fixtures do not contain a populated secret archive;
+archive-under-load coverage remains open.
+
+The remote Linux amd64 artifact SHA-256 was
+`a2d5caba8d128884288134632d854aeab077ea6d567140b3871b8263a511f997`.
+Actual systemd installation, enable/start/reload, SIGKILL recovery and stop/start
+passed with PID `1128471 -> 1128538`. Startup also rejected malformed, null,
+public, duplicate and symlink credential state.
+
+Supporting logs: [targeted repeats](evidence/phase5/2026-09-09/secrets-final-targeted.log),
+[private state and recovery](evidence/phase5/2026-09-09/secrets-hardening-runtime.log),
+[check and broader SSH regression](evidence/phase5/2026-09-09/secrets-final-check-runtime.log),
+[full race before the final capacity correction](evidence/phase5/2026-09-09/secrets-full-race.log),
+[final capacity race](evidence/phase5/2026-09-09/secrets-encoded-capacity-race.log), and
+[final actual race daemon](evidence/phase5/2026-09-09/secrets-final-remote-race.log).
+Diagnostic history retains [missing embedded artifacts](evidence/phase5/2026-09-09/secrets-initial-unit.log),
+[JSON marker assertion failure](evidence/phase5/2026-09-09/secrets-initial-runtime.log),
+and [corrected runtime](evidence/phase5/2026-09-09/secrets-runtime-corrected.log).
+Only passing final behavior is counted as evidence. Missing routes/delegation,
+archive retirement and load/storage/upgrade matrices, independent review and
+macOS runtime keep the overall Phase5/Multi Agent Gate In progress.
