@@ -1,0 +1,15 @@
+Implementation: 6f62f60e513c2c4dd560668dc6b530de2de6494a
+Actual daemon SHA256: 224b1159393c4a97901d2aa692dee073d8831dce80e637cea0c4673c183bba00
+Daemon and frontend test executable both built with -race.
+
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (20.12s)
+=== RUN   TestRemoteBrokerRetryCancellation
+    remote_lifecycle_test.go:315: real SSH retry/cancellation: old_agent=825239 replacement_agent=825318 waiter_cancel_ms=10.540 retry_cancel_ms=32.664 foreground_cancel_ms=12.583 mutation_executions=1 survivor_exec=passed shared_transport_preserved=true
+--- PASS: TestRemoteBrokerRetryCancellation (20.66s)
+=== RUN   TestRemoteBrokerPolicyIsolation
+    remote_policy_test.go:234: real SSH policy: queued_decision=ba733de29dfc9bef4f3861699c5e332241599a1c6608378eb91053641432d95a revoked_decision=557591ebf3e179919b7a8915db494c2f8011fd8b5906f7150235a8458771cc2f grant_and_revoke_survived_SIGKILL=true exact_host_and_project_isolation=true caller_capability_substitution=denied persistence_failure=rolled_back audit_owner_and_digest=verified
+--- PASS: TestRemoteBrokerPolicyIsolation (16.08s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	57.885s

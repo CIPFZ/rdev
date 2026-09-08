@@ -1066,7 +1066,7 @@ Phase 3 完成记录：
 - [x] 20 个本地 client 同时访问一台 host，只有一个基础 transport/agent 会话。2026-09-08 真 SSH 运行时通过（20 进程、3 × 500 请求）；见 `docs/phase5-runtime-evidence.md`，其余 Gate 与独立 review 仍未完成。
 - [ ] 每 client 的配额和取消互不影响。
 - [ ] 长 exec、job wait、status 和 sync 混合负载下没有饥饿。
-- [ ] bulk lane 空闲后按 TTL 自动退出。
+- [x] bulk lane 空闲后按 TTL 自动退出。2026-09-08 提交 `6f62f60` 的三轮真 SSH 负载验证独立 bulk transport、1 秒 TTL + 5 秒 sweep 回收及基础 agent 保留；见 `docs/phase5-runtime-evidence.md`。独立 review 和其余 Gate 仍未完成。
 - [ ] broker 崩溃重启后不会重复执行 mutation。
 - [ ] 连接状态、client 配额、queue wait、lane 流量和 eviction reason 可通过 `status/doctor` 观察。
 - [ ] 未授权 client 无法使用 host、secret、job 或 Fleet capability。

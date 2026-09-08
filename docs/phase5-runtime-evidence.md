@@ -472,3 +472,23 @@ lease cycles (65.368 seconds, final zero SSH/agent processes). All three session
 runs retained one base agent and 20 distinct remote principals. Changed-package
 race tests passed, followed by
 [20 repeated scheduler/audit/fair-queue race runs](evidence/phase5/2026-09-08/qos-race-repeat-precommit.log).
+
+
+## Committed-source verification: 6f62f60
+
+Implementation commit: `6f62f60e513c2c4dd560668dc6b530de2de6494a`
+(`fix: enforce fair broker admission and protect control latency`).
+
+- [Full check, QoS, stress and smoke](evidence/phase5/2026-09-08/committed-check-6f62f60.log): `make check remote-qos stress-broker smoke-rdevd remote-phase5-runtime` passed against the clean implementation commit, using official Linux Go 1.25.0. All four embedded-agent platform artifacts were rebuilt and verified.
+- Three 66-second real 20-process QoS runs passed (198.276 seconds total). The six loaded/control p95 ratios were 1.267–1.488, with loaded p95 1.700–1.932 ms. Both owners were continuously backlogged in all 150 one-second samples. The measured dispatch ratio was 2.993–3.020 at weights 3:1 and 0.331–0.333 at weights 1:3.
+- Each run preserved one base agent, used one independent bulk transport while busy, and closed bulk after the configured one-second idle TTL plus sweep interval. Killing all nine processes of one owner released its queue and did not interrupt the surviving owner or replace the base agent. Per-owner payload counters and global-health authorization negatives passed.
+- The three runs wrote 146438 audit records in total, completed three actual rotations, and reported zero dropped records or sink errors. Both segments stayed within 8 MiB per run. This proves repeated short rotation under load; it does not prove a long crash/recovery soak or lossless SIGKILL of queued audit records.
+- [Full repository race verification](evidence/phase5/2026-09-08/committed-race-6f62f60.log): `go test -race ./... -count=1` passed.
+- [Real daemon race integration](evidence/phase5/2026-09-08/remote-race-6f62f60.log): approval isolation, retry/cancellation and policy isolation all passed with both the real daemon and frontend tests built using `-race`. Daemon SHA-256: `224b1159393c4a97901d2aa692dee073d8831dce80e637cea0c4673c183bba00`.
+- Linux remote startup/authentication/audit/restart tests and actual systemd user install/enable/start/reload/SIGKILL recovery/stop/start passed (PID `824360 -> 824426`). Remote non-race daemon SHA-256: `13d1fbd8efe2c744ff340f86fd2d47cacdd7bd4557a126da55cc0b561fcc66c0`.
+
+P5-06/P5-07/P5-08/P5-14 retain In progress labels for the remaining scope stated
+above. In particular, the complete mixed job/sync workload, warm-host capacity,
+ingress bounds, long audit recovery, durable job mutation/observations, shared
+secret/Fleet routing and permissions, launchd runtime and independent external
+review are not inferred from these passing tests.
