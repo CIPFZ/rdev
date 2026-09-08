@@ -69,6 +69,9 @@ func (c *Client) DoContext(ctx context.Context, req Request) (Response, error) {
 	if req.Owner == (Owner{}) {
 		req.Owner = c.owner
 	}
+	if req.Approval == "" {
+		req.Approval = os.Getenv("RDEV_APPROVAL_TOKEN")
+	}
 	if err := req.Owner.Validate(); err != nil {
 		return Response{}, err
 	}

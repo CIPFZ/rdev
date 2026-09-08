@@ -443,3 +443,36 @@ func TestSmokeFailsWhenDaemonNeverCreatesSocket(t *testing.T) {
 		t.Fatalf("failed smoke reported success: %v %s", err, out)
 	}
 }
+
+func runtimeApprovalAdmin() broker.Owner {
+	return broker.Owner{ClientID: "phase5-approval-admin", ProjectID: "phase5-runtime-admin"}
+}
+
+func (d *runtimeDaemon) approve(owner broker.Owner, wire *proto.Request) string {
+	d.t.Helper()
+	spec := broker.ApprovalSpec{Owner: owner, Operation: wire.Op, Host: "runtime-host", Wire: wire, TTL: 5 * time.Minute}
+	file, err := os.CreateTemp(d.dir, "approval-spec-*")
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+	if err := json.NewEncoder(file).Encode(spec); err != nil {
+		file.Close()
+		d.t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		d.t.Fatal(err)
+	}
+	admin := runtimeApprovalAdmin()
+	cmd := exec.Command(d.bin, "approval-create", "-socket", d.socket, "-request-file", file.Name())
+	cmd.Env = append(os.Environ(), "RDEV_CLIENT_ID="+admin.ClientID, "RDEV_PROJECT_ID="+admin.ProjectID, "RDEV_PRINCIPAL_TOKEN="+d.token(admin, "5m"))
+	out, err := cmd.Output()
+	if err != nil {
+		d.t.Fatalf("administrator approval-create failed: %v", err)
+	}
+	var approval broker.Approval
+	if err := json.Unmarshal(out, &approval); err != nil || approval.Token == "" {
+		d.t.Fatal("approval-create returned no approval")
+	}
+	return approval.Token
+}

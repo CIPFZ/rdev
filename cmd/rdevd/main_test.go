@@ -13,6 +13,7 @@ import (
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 func TestUnixBrokerMultipleClientsShareService(t *testing.T) {
@@ -279,34 +280,60 @@ func TestServeConnConsumesRiskApprovalOnce(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
 	service := broker.NewService(nil)
+	defer service.Close(t.Context())
 	owner := broker.Owner{ClientID: "risk", ProjectID: "p"}
-	if err := service.Grant(owner, "delete"); err != nil {
+	if err := service.Grant(owner, proto.OpWriteFile); err != nil {
 		t.Fatal(err)
 	}
-	approval, err := service.CreateApproval(owner, "delete", "target-1", time.Minute)
+	if err := service.Client().Hosts.Add(transport.Host{Name: "h", Addr: "test.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	service.SetDispatcher(func(context.Context, string, *proto.Request) (*proto.Response, error) {
+		calls++
+		return &proto.Response{OK: true}, nil
+	})
+	wire := &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: "/tmp/approved", Content: "reviewed"}}
+	approval, err := service.IssueApproval(broker.ApprovalSpec{Owner: owner, Operation: wire.Op, Host: "h", Wire: wire, TTL: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
 	go serveConn(b, service)
-	_ = json.NewEncoder(a).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion})
+	enc, dec := json.NewEncoder(a), json.NewDecoder(a)
+	_ = enc.Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion})
 	var hello proto.BrokerHelloResponse
-	if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+	if err := dec.Decode(&hello); err != nil || !hello.OK {
 		t.Fatal(err)
 	}
-	req := broker.Request{ID: "risk-1", Owner: owner, Operation: "delete", Target: "target-1", Approval: approval.Token, Risk: true}
-	_ = json.NewEncoder(a).Encode(req)
-	var first broker.Response
-	if err := json.NewDecoder(a).Decode(&first); err != nil || !first.OK {
-		t.Fatalf("first approval failed: %v %s", err, first.Error)
+	req := broker.Request{ID: "risk", Owner: owner, Operation: wire.Op, Host: "h", Wire: wire, Target: "untrusted-hint", Risk: false}
+	call := func() broker.Response {
+		t.Helper()
+		if err := enc.Encode(req); err != nil {
+			t.Fatal(err)
+		}
+		var out broker.Response
+		if err := dec.Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
 	}
-	req.ID = "risk-2"
-	_ = json.NewEncoder(a).Encode(req)
-	var second broker.Response
-	if err := json.NewDecoder(a).Decode(&second); err != nil {
-		t.Fatal(err)
+	if call().OK {
+		t.Fatal("Risk=false bypassed mandatory write approval")
 	}
-	if second.OK || second.Error == "" {
+	req.Approval = approval.Token
+	req.Wire.Cat.Path = "/tmp/swapped"
+	if call().OK {
+		t.Fatal("unchanged Target hint hid a changed write path")
+	}
+	req.Wire.Cat.Path = "/tmp/approved"
+	if out := call(); !out.OK {
+		t.Fatalf("correct approval rejected: %s", out.Error)
+	}
+	if call().OK {
 		t.Fatal("replayed approval accepted")
+	}
+	if calls != 1 {
+		t.Fatalf("unauthorized dispatches: %d", calls)
 	}
 }
 
@@ -337,16 +364,16 @@ func TestServeConnAppliesPolicy(t *testing.T) {
 	var hello proto.BrokerHelloResponse
 	_ = json.NewDecoder(a).Decode(&hello)
 	owner := broker.Owner{ClientID: "c", ProjectID: "p"}
-	_ = json.NewEncoder(a).Encode(broker.Request{ID: "1", Owner: owner, Operation: "exec"})
+	_ = json.NewEncoder(a).Encode(broker.Request{ID: "1", Owner: owner, Operation: "status"})
 	var denied broker.Response
 	_ = json.NewDecoder(a).Decode(&denied)
 	if denied.OK {
 		t.Fatal("default policy allowed request")
 	}
-	if err := service.Grant(owner, "exec"); err != nil {
+	if err := service.Grant(owner, "status"); err != nil {
 		t.Fatal(err)
 	}
-	_ = json.NewEncoder(a).Encode(broker.Request{ID: "2", Owner: owner, Operation: "exec"})
+	_ = json.NewEncoder(a).Encode(broker.Request{ID: "2", Owner: owner, Operation: "status"})
 	var allowed broker.Response
 	_ = json.NewDecoder(a).Decode(&allowed)
 	if !allowed.OK {

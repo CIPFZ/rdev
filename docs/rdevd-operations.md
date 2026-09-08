@@ -188,3 +188,59 @@ policy tests. Each holds actual remote startup to test a queued decision across
 revocation, SIGKILLs the daemon after grant/revoke acknowledgments, checks exact
 host/project boundaries and capability substitution negatives, and injects a
 real atomic-rename failure without publishing the attempted permission change.
+
+## Exact-request approvals
+
+Shared-broker mutating wire operations require approval, including arbitrary
+exec, writes, job start/stop/removal and state/storage mutations. `Risk=false`
+cannot disable this requirement and `Target` is ignored as an authorization
+hint. Read-only requests still need their normal policy grant. The administrator
+has a separate principal explicitly granted `approval.create`; executors do not
+receive that capability merely because they can execute an operation.
+
+The administrator writes the reviewed `ApprovalSpec` to a private 0600 JSON
+file. Its `owner`, `operation`, `host` and `wire` must exactly match the intended
+request, including argv, cwd, env, stdin, write content/mode/append, job parameters
+and any explicit semantic deadline. For example, a CLI write without flags uses:
+
+```json
+{"owner":{"client_id":"agent-a","project_id":"project-a"},"operation":"write_file","host":"dev","wire":{"op":"write_file","write":{"path":"/tmp/reviewed.txt","content":"reviewed"}}}
+```
+
+Using the administrator's `RDEV_CLIENT_ID`, `RDEV_PROJECT_ID` and
+`RDEV_PRINCIPAL_TOKEN`, issue one approval:
+
+```sh
+rdevd approval-create -socket /private/rdevd.sock \
+  -request-file /private/reviewed-request.json > /private/approval.json
+```
+
+The response contains a token and its immutable plan. Give only the token to
+the intended executor. The CLI reads `RDEV_APPROVAL_TOKEN`; broker MCP exec,
+write and mutating job tools also accept `approval_token` per call. For the
+example above, the executor sends exactly `reviewed` on stdin to
+`rdev write dev /tmp/reviewed.txt`, without a trailing newline. Approval cannot
+be used for different content, path, host, operation, owner/project or policy.
+
+Lifetime defaults to one minute and is bounded to ten minutes (`ttl` in the
+JSON spec is nanoseconds). Tokens are consumed once at admission; approval
+expiry controls admission, not the completion time of already admitted work.
+Invalid substitution attempts do not consume another principal's valid token.
+All outstanding tokens are invalid after daemon restart. An unconsumed token
+must be reissued after a policy or host/session snapshot change. Pending
+approvals are bounded in memory and expired entries are reclaimed when issuing
+new approvals; raw tokens are never written to the audit sink.
+
+The broker captures the configured host/session snapshot before approval and
+checks it under the client's identity lease before any new connection setup
+and before dispatch. An operation's explicit deadline can be shortened by its
+context but never extended. Audits correlate request/target digests and an
+opaque SHA-256 approval reference across issuance, use and result, without
+recording raw request bodies, outputs or approval tokens.
+
+`make remote-approval RDEV_SSH_CONFIG=/path/to/ssh/config` runs three real SSH
+approval tests covering mandatory classification, separate issuer/executor,
+owner/host/parameter substitution, expiry, one-use, policy change, restart and
+owner-scoped audit privacy. The session benchmark and lifecycle tests now issue
+explicit administrator approvals for each mutation during setup; they retain
+separate executor principals and their real shared-transport assertions.

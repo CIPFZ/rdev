@@ -39,7 +39,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		if in.LoginShell != nil {
 			login = *in.LoginShell
 		}
-		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "exec", Host: in.Host, Wire: &proto.Request{Op: proto.OpExec, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Exec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login, Stdin: in.Stdin, TimeoutSec: in.TimeoutSec, MaxOutputBytes: in.MaxOutputBytes}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "exec", Host: in.Host, Wire: &proto.Request{Op: proto.OpExec, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Exec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login, Stdin: in.Stdin, TimeoutSec: in.TimeoutSec, MaxOutputBytes: in.MaxOutputBytes}}})
 		if err != nil {
 			return nil, ExecOut{}, err
 		}
@@ -60,7 +60,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, ReadOut{Content: r.Content, Base64: r.ContentB64, Size: r.Size, EOF: r.EOF, Truncation: r.Truncation, OperationID: r.OperationID, Terminal: r.Terminal, ExecutionState: r.Execution}, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_write", Description: "Write a remote file through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in WriteIn) (*mcp.CallToolResult, WriteOut, error) {
-		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "write_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpWriteFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Cat: &proto.WriteParams{Path: in.Path, Content: in.Content, Mode: in.Mode, Append: in.Append}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "write_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpWriteFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Cat: &proto.WriteParams{Path: in.Path, Content: in.Content, Mode: in.Mode, Append: in.Append}}})
 		if err != nil {
 			return nil, WriteOut{}, err
 		}
@@ -91,7 +91,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		if in.LoginShell != nil {
 			login = *in.LoginShell
 		}
-		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_start", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Label: in.Label, Spec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login}}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "job_start", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Label: in.Label, Spec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login}}}})
 		if err != nil {
 			return nil, JobOut{}, err
 		}
@@ -138,7 +138,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, toJobLogsOut(j), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_stop", Description: "Stop a supervised job through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStopIn) (*mcp.CallToolResult, JobOut, error) {
-		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_stop", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStop, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Signal: in.Signal, GraceSec: in.GraceSec}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "job_stop", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobStop, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, Signal: in.Signal, GraceSec: in.GraceSec}}})
 		if err != nil {
 			return nil, JobOut{}, err
 		}
@@ -151,7 +151,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		if in.ID == "" && in.OlderThanSec <= 0 && in.KeepLast <= 0 {
 			return nil, JobRmOut{}, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 		}
-		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "job_rm", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobRm, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, OlderThanSec: in.OlderThanSec, KeepLast: in.KeepLast}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "job_rm", Host: in.Host, Wire: &proto.Request{Op: proto.OpJobRm, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{ID: in.ID, OlderThanSec: in.OlderThanSec, KeepLast: in.KeepLast}}})
 		if err != nil {
 			return nil, JobRmOut{}, err
 		}

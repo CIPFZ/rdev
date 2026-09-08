@@ -1,0 +1,4 @@
+ok  	github.com/CIPFZ/rdev/internal/client	1.521s
+ok  	github.com/CIPFZ/rdev/internal/broker	2.416s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	5.632s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	6.667s

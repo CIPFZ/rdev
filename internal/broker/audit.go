@@ -13,13 +13,16 @@ import (
 )
 
 type AuditEvent struct {
-	PolicyDigest string    `json:"policy_digest,omitempty"`
-	Schema       int       `json:"schema,omitempty"`
-	At           time.Time `json:"at"`
-	Owner        string    `json:"owner,omitempty"`
-	Operation    string    `json:"operation,omitempty"`
-	Decision     string    `json:"decision,omitempty"`
-	Result       string    `json:"result,omitempty"`
+	RequestDigest string    `json:"request_digest,omitempty"`
+	TargetDigest  string    `json:"target_digest,omitempty"`
+	ApprovalID    string    `json:"approval_id,omitempty"`
+	PolicyDigest  string    `json:"policy_digest,omitempty"`
+	Schema        int       `json:"schema,omitempty"`
+	At            time.Time `json:"at"`
+	Owner         string    `json:"owner,omitempty"`
+	Operation     string    `json:"operation,omitempty"`
+	Decision      string    `json:"decision,omitempty"`
+	Result        string    `json:"result,omitempty"`
 }
 type AuditLog struct {
 	mu       sync.RWMutex
@@ -85,8 +88,10 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
 	e.Schema = 1
-	if digest, err := hex.DecodeString(e.PolicyDigest); err != nil || len(digest) != sha256.Size {
-		e.PolicyDigest = ""
+	for _, field := range []*string{&e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID} {
+		if digest, err := hex.DecodeString(*field); err != nil || len(digest) != sha256.Size {
+			*field = ""
+		}
 	}
 	e.Owner = AuditOwnerID(e.Owner)
 	e.Operation = auditOperation(e.Operation)
@@ -140,7 +145,7 @@ func auditOperation(operation string) string {
 
 func auditCode(code string) string {
 	switch code {
-	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_invalid", "accepted", "completed", "dispatch_error", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "state_persist_failed":
+	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_issued", "approval_used", "approval_invalid", "accepted", "completed", "dispatch_error", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "state_persist_failed":
 		return code
 	default:
 		return "unknown"

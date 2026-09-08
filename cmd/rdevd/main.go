@@ -21,6 +21,8 @@ import (
 func main() {
 	var err error
 	switch {
+	case len(os.Args) > 1 && os.Args[1] == "approval-create":
+		err = approvalCreateCommand(os.Args[2:], os.Stdout)
 	case len(os.Args) > 1 && os.Args[1] == "principal-token":
 		err = principalTokenCommand(os.Args[2:], os.Stdout)
 	case len(os.Args) > 1 && os.Args[1] == "principal-keygen":
@@ -187,14 +189,6 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
-		if req.Risk {
-			if err := service.ConsumeApproval(req.Approval, req.Owner.Key(), req.Operation, req.Target); err != nil {
-				service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "approval_denied", Result: "approval_invalid"})
-				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
-				endRequest()
-				continue
-			}
-		}
 		if req.Wire != nil {
 			if req.Host == "" {
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "host required for wire request"})
@@ -237,8 +231,37 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				}
 			}
 		}
+		if req.Operation == "approval.create" {
+			if req.ApprovalSpec == nil {
+				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "approval_spec required"})
+			} else {
+				approval, err := service.IssueApproval(*req.ApprovalSpec)
+				if err != nil {
+					_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				} else {
+					service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "approval_issued", RequestDigest: approval.Plan.RequestDigest, TargetDigest: approval.Plan.TargetDigest, ApprovalID: broker.ApprovalReference(approval.Token)})
+					_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Approval: &approval})
+				}
+			}
+			endRequest()
+			continue
+		}
+		var approvedTarget string
+		var approvedPlan broker.ApprovalPlan
+		if broker.RequiresApproval(req) {
+			plan, err := service.AuthorizeApproval(req, decision)
+			if err != nil {
+				service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "approval_denied", Result: "approval_invalid"})
+				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				endRequest()
+				continue
+			}
+			approvedTarget = plan.TargetDigest
+			approvedPlan = plan
+			service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "approval_used", RequestDigest: plan.RequestDigest, TargetDigest: plan.TargetDigest, ApprovalID: plan.ApprovalID})
+		}
 		if req.Wire != nil {
-			service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
+			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
 		}
 		if req.Operation == "audit_query" {
 			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key()), AuditIncomplete: service.Audit.HasLegacyRecords()})
@@ -261,10 +284,10 @@ func serveConn(conn net.Conn, service *broker.Service) {
 				policyErr = service.Grant(req.GrantOwner, req.GrantOperation)
 			}
 			if policyErr != nil {
-				service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "policy_update_failed"})
+				service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "policy_update_failed"})
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: policyErr.Error()})
 			} else {
-				service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "policy_updated"})
+				service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "policy_updated"})
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true})
 			}
 			endRequest()
@@ -272,7 +295,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		quotaHost := req.Host
 		if err := service.Quota.AcquireHostContext(requestCtx, quotaHost, req.Owner.Key()); err != nil {
-			service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
+			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
 			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
 			endRequest()
 			continue
@@ -292,7 +315,12 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		if req.Wire != nil {
 			dispatch := func() (*proto.Response, error) {
-				return service.DispatchFair(requestCtx, req.Owner.Key(), lane, func() (*proto.Response, error) { return service.Dispatch(requestCtx, req.Host, req.Wire) })
+				return service.DispatchFair(requestCtx, req.Owner.Key(), lane, func() (*proto.Response, error) {
+					if approvedTarget != "" {
+						return service.DispatchApproved(requestCtx, req.Host, req.Wire, approvedTarget)
+					}
+					return service.Dispatch(requestCtx, req.Host, req.Wire)
+				})
 			}
 			var wireResp *proto.Response
 			var err error
@@ -305,14 +333,14 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			if err != nil {
 				service.Lanes.Release(lane)
 				service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
-				service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "dispatch_error"})
+				service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "dispatch_error"})
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
 				endRequest()
 				continue
 			}
 			service.Lanes.Release(lane)
 			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
-			service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
+			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			if err := service.Jobs.RecordResponse(req.Host, req.Owner.Key(), req.Wire, wireResp); err != nil {
 				// Remote mutation completed but durable ownership state did not.
 				// Return an ambiguous outcome and never replay the mutation.
@@ -326,7 +354,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		service.Lanes.Release(lane)
 		service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
-		service.Audit.Append(broker.AuditEvent{PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
+		service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
 		_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true})
 		endRequest()
 	}

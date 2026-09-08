@@ -12,6 +12,7 @@ type Request struct {
 	Host            string         `json:"host,omitempty"`
 	Wire            *proto.Request `json:"wire,omitempty"`
 	Target          string         `json:"target,omitempty"`
+	ApprovalSpec    *ApprovalSpec  `json:"approval_spec,omitempty"`
 	Approval        string         `json:"approval,omitempty"`
 	Risk            bool           `json:"risk,omitempty"`
 	Capability      string         `json:"capability,omitempty"`
@@ -28,6 +29,7 @@ type Response struct {
 	Error           string          `json:"error,omitempty"`
 	Wire            *proto.Response `json:"wire,omitempty"`
 	Audit           []AuditEvent    `json:"audit,omitempty"`
+	Approval        *Approval       `json:"approval,omitempty"`
 	PolicyDigest    string          `json:"policy_digest,omitempty"`
 	AuditIncomplete bool            `json:"audit_incomplete,omitempty"`
 }

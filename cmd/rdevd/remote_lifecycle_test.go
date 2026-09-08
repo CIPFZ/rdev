@@ -104,6 +104,9 @@ func startLifecycleProcess(t *testing.T, d *runtimeDaemon, owner broker.Owner, r
 	data, _ := json.Marshal(request)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRemoteBrokerLifecycleClient$", "-test.timeout=50s")
 	cmd.Env = append(os.Environ(), "RDEV_LIFECYCLE_HELPER=1", "RDEV_CLIENT_ID="+owner.ClientID, "RDEV_PRINCIPAL_TOKEN="+d.token(owner, "2m"), "RDEV_BROKER_SOCKET="+d.socket, "RDEV_LIFECYCLE_REQUEST="+string(data), "RDEV_LIFECYCLE_RESULT="+path)
+	if broker.RequiresApproval(broker.Request{Operation: request.Op, Wire: request}) {
+		cmd.Env = append(cmd.Env, "RDEV_APPROVAL_TOKEN="+d.approve(owner, request))
+	}
 	if hold {
 		cmd.Env = append(cmd.Env, "RDEV_LIFECYCLE_HOLD=1")
 	}
@@ -172,6 +175,9 @@ func remoteWireCall(t *testing.T, w *runtimeWire, owner broker.Owner, wire *prot
 func lifecyclePolicy(t *testing.T, d *runtimeDaemon, names ...string) []broker.Owner {
 	t.Helper()
 	policy := broker.NewPolicy()
+	if err := policy.Grant(runtimeApprovalAdmin().Key(), "approval.create"); err != nil {
+		t.Fatal(err)
+	}
 	owners := make([]broker.Owner, len(names))
 	for i, name := range names {
 		owners[i] = broker.Owner{ClientID: name, ProjectID: "phase5-lifecycle"}

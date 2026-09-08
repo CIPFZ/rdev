@@ -31,7 +31,6 @@ type Service struct {
 	Watches          *WatchHub
 	Audit            *AuditLog
 	config           *ConfigStore
-	approvals        *ApprovalStore
 	approvalMu       sync.Mutex
 	approvalByToken  map[string]Approval
 	readiness        Readiness
@@ -102,7 +101,7 @@ func newFairDispatcher(workers int) *fairDispatcher {
 
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvals: NewApprovalStore(), approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry(), fair: map[Lane]*fairDispatcher{LaneControl: newFairDispatcher(2), LaneExec: newFairDispatcher(8), LaneBulk: newFairDispatcher(1)}, weights: make(map[string]int)}
+	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry(), fair: map[Lane]*fairDispatcher{LaneControl: newFairDispatcher(2), LaneExec: newFairDispatcher(8), LaneBulk: newFairDispatcher(1)}, weights: make(map[string]int)}
 	s.SetReady(true)
 	return s
 }
@@ -123,6 +122,22 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 		return override(ctx, host, req)
 	}
 	return s.client.DoProtocol(ctx, host, req)
+}
+func (s *Service) DispatchApproved(ctx context.Context, host string, req *proto.Request, target string) (*proto.Response, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	current, err := s.client.ProtocolTargetIdentity(host)
+	if err != nil || current != target {
+		return nil, errors.New("approved target changed before dispatch")
+	}
+	s.dispatchMu.RLock()
+	override := s.dispatchOverride
+	s.dispatchMu.RUnlock()
+	if override != nil {
+		return override(ctx, host, req)
+	}
+	return s.client.DoProtocolApproved(ctx, host, req, target)
 }
 func (s *Service) SetDispatcher(fn func(context.Context, string, *proto.Request) (*proto.Response, error)) {
 	s.dispatchMu.Lock()
@@ -331,33 +346,6 @@ func (s *Service) RecoverJobs(ctx context.Context) {
 			s.Audit.Append(AuditEvent{At: time.Now(), Owner: ref.Owner, Operation: proto.OpJobStatus, Result: "recovery_missing"})
 		}
 	}
-}
-
-func (s *Service) CreateApproval(owner Owner, operation, target string, ttl time.Duration) (Approval, error) {
-	if err := owner.Validate(); err != nil {
-		return Approval{}, err
-	}
-	a, err := NewApproval(owner.Key(), operation, target, ttl)
-	if err != nil {
-		return Approval{}, err
-	}
-	s.approvalMu.Lock()
-	s.approvalByToken[a.Token] = a
-	s.approvalMu.Unlock()
-	return a, nil
-}
-
-func (s *Service) ConsumeApproval(token, owner, operation, target string) error {
-	s.approvalMu.Lock()
-	a, ok := s.approvalByToken[token]
-	if ok {
-		delete(s.approvalByToken, token)
-	}
-	s.approvalMu.Unlock()
-	if !ok {
-		return errors.New("approval token unknown")
-	}
-	return s.approvals.Consume(a, token, owner, operation, target, time.Now())
 }
 
 // SharedConnectionKey is the canonical identity used before a host is pooled.

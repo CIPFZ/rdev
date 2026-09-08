@@ -38,6 +38,9 @@ func TestRemoteBrokerProcesses(t *testing.T) {
 	d, _, sshRun := newRemoteRuntime(t)
 	const clients, rounds = 20, 25
 	policy := broker.NewPolicy()
+	if err := policy.Grant(runtimeApprovalAdmin().Key(), "approval.create"); err != nil {
+		t.Fatal(err)
+	}
 	owners := make([]broker.Owner, clients)
 	for i := range owners {
 		owners[i] = broker.Owner{ClientID: fmt.Sprintf("remote-client-%02d", i%10), ProjectID: fmt.Sprintf("phase5-%d", i/10)}
@@ -57,6 +60,17 @@ func TestRemoteBrokerProcesses(t *testing.T) {
 	children := make([]child, 0, clients)
 	for i, owner := range owners {
 		instance := fmt.Sprintf("process-%02d", i)
+		approvals := make([]string, rounds)
+		for round := 0; round < rounds; round++ {
+			wire := remoteBenchmarkRequest(round)
+			if broker.RequiresApproval(broker.Request{Operation: wire.Op, Wire: wire}) {
+				approvals[round] = d.approve(owner, wire)
+			}
+		}
+		approvalData, _ := json.Marshal(approvals)
+		if err := os.WriteFile(filepath.Join(d.dir, instance+".approvals"), approvalData, 0600); err != nil {
+			t.Fatal(err)
+		}
 		cmd := exec.Command(os.Args[0], "-test.run=^TestRemoteBrokerProcesses$", "-test.timeout=2m")
 		cmd.Env = append(os.Environ(), "RDEV_REMOTE_PROCESS_HELPER=1", "RDEV_REMOTE_INSTANCE_ID="+instance, "RDEV_CLIENT_ID="+owner.ClientID, "RDEV_PROJECT_ID="+owner.ProjectID, "RDEV_PRINCIPAL_TOKEN="+d.token(owner, "5m"), "RDEV_BROKER_SOCKET="+d.socket, "RDEV_REMOTE_PROCESS_DIR="+d.dir, "RDEV_REMOTE_PROCESS_ROUNDS="+strconv.Itoa(rounds))
 		log := new(bytes.Buffer)
@@ -310,13 +324,18 @@ func runRemoteProcessClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := remoteProcessResult{PID: os.Getpid(), Client: instance}
+	data, err := os.ReadFile(filepath.Join(dir, instance+".approvals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var approvals []string
+	if json.Unmarshal(data, &approvals) != nil || len(approvals) != rounds {
+		t.Fatal("missing administrator approvals")
+	}
 	for i := 0; i < rounds; i++ {
-		wire := &proto.Request{Op: proto.OpPing}
-		if i%2 == 1 {
-			wire = &proto.Request{Op: proto.OpExec, Exec: &proto.ExecParams{Argv: []string{"sh", "-c", "sleep .02; printf broker-ok"}, TimeoutSec: 10, MaxOutputBytes: 256}}
-		}
+		wire := remoteBenchmarkRequest(i)
 		started := time.Now()
-		response, err := c.DoContext(ctx, broker.Request{Operation: wire.Op, Host: "runtime-host", Wire: wire})
+		response, err := c.DoContext(ctx, broker.Request{Approval: approvals[i], Operation: wire.Op, Host: "runtime-host", Wire: wire})
 		elapsed := float64(time.Since(started).Microseconds()) / 1000
 		if err != nil || !response.OK || response.Wire == nil || !response.Wire.OK {
 			t.Fatalf("remote %s failed: %v %+v", wire.Op, err, response)
@@ -339,7 +358,7 @@ func runRemoteProcessClient(t *testing.T) {
 		}
 		result.Calls++
 	}
-	data, err := json.Marshal(result)
+	data, err = json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,4 +373,11 @@ func percentile(values []float64, p float64) float64 {
 	}
 	sort.Float64s(values)
 	return values[int(float64(len(values)-1)*p)]
+}
+
+func remoteBenchmarkRequest(round int) *proto.Request {
+	if round%2 == 0 {
+		return &proto.Request{Op: proto.OpPing}
+	}
+	return &proto.Request{Op: proto.OpExec, Exec: &proto.ExecParams{Argv: []string{"sh", "-c", "sleep .02; printf broker-ok"}, TimeoutSec: 10, MaxOutputBytes: 256}}
 }

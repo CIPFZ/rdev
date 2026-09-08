@@ -175,8 +175,9 @@ func decodeJSONValue(raw []byte) (any, bool) {
 // ---------- exec ----------
 
 type ExecIn struct {
-	Host string   `json:"host" jsonschema:"Host alias or ssh destination such as user@1.2.3.4:2222"`
-	Argv []string `json:"argv" jsonschema:"Command and arguments as separate array elements. Never a shell string: argv is exec'd directly so quotes and $(...) are passed through literally. Use argv ['sh','-c','a | b'] only when you genuinely need a pipeline."`
+	ApprovalToken string   `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
+	Host          string   `json:"host" jsonschema:"Host alias or ssh destination such as user@1.2.3.4:2222"`
+	Argv          []string `json:"argv" jsonschema:"Command and arguments as separate array elements. Never a shell string: argv is exec'd directly so quotes and $(...) are passed through literally. Use argv ['sh','-c','a | b'] only when you genuinely need a pipeline."`
 
 	Cwd            string            `json:"cwd,omitempty" jsonschema:"Working directory. Supports a leading ~. Defaults to the host's session cwd."`
 	Env            map[string]string `json:"env,omitempty" jsonschema:"Extra environment variables. Use the value 'secret:NAME' to inject a registered secret without exposing it."`
@@ -263,12 +264,13 @@ func toExecOut(res *client.ExecResult) ExecOut {
 // ---------- jobs ----------
 
 type JobStartIn struct {
-	Host       string            `json:"host"`
-	Argv       []string          `json:"argv" jsonschema:"Command and arguments as separate array elements."`
-	Cwd        string            `json:"cwd,omitempty"`
-	Env        map[string]string `json:"env,omitempty" jsonschema:"Extra environment variables. 'secret:NAME' injects a registered secret."`
-	LoginShell *bool             `json:"login_shell,omitempty"`
-	Label      string            `json:"label,omitempty" jsonschema:"Short human-readable tag, e.g. 'swe-oracle-20'."`
+	ApprovalToken string            `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
+	Host          string            `json:"host"`
+	Argv          []string          `json:"argv" jsonschema:"Command and arguments as separate array elements."`
+	Cwd           string            `json:"cwd,omitempty"`
+	Env           map[string]string `json:"env,omitempty" jsonschema:"Extra environment variables. 'secret:NAME' injects a registered secret."`
+	LoginShell    *bool             `json:"login_shell,omitempty"`
+	Label         string            `json:"label,omitempty" jsonschema:"Short human-readable tag, e.g. 'swe-oracle-20'."`
 }
 
 type JobOut struct {
@@ -345,10 +347,11 @@ type JobLogsOut struct {
 }
 
 type JobStopIn struct {
-	Host     string `json:"host"`
-	ID       string `json:"id"`
-	Signal   string `json:"signal,omitempty" jsonschema:"TERM or KILL. Default TERM."`
-	GraceSec int    `json:"grace_sec,omitempty" jsonschema:"Seconds to wait after TERM before sending KILL."`
+	ApprovalToken string `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
+	Host          string `json:"host"`
+	ID            string `json:"id"`
+	Signal        string `json:"signal,omitempty" jsonschema:"TERM or KILL. Default TERM."`
+	GraceSec      int    `json:"grace_sec,omitempty" jsonschema:"Seconds to wait after TERM before sending KILL."`
 }
 
 type JobWaitIn struct {
@@ -382,10 +385,11 @@ type JobWaitOut struct {
 }
 
 type JobRmIn struct {
-	Host         string `json:"host"`
-	ID           string `json:"id,omitempty" jsonschema:"Remove this one job. Omit to sweep using the filters below."`
-	OlderThanSec int    `json:"older_than_sec,omitempty" jsonschema:"Remove finished jobs that ended more than this many seconds ago."`
-	KeepLast     int    `json:"keep_last,omitempty" jsonschema:"Retain this many of the newest finished jobs. With older_than_sec, a job must satisfy both filters to be removed."`
+	ApprovalToken string `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
+	Host          string `json:"host"`
+	ID            string `json:"id,omitempty" jsonschema:"Remove this one job. Omit to sweep using the filters below."`
+	OlderThanSec  int    `json:"older_than_sec,omitempty" jsonschema:"Remove finished jobs that ended more than this many seconds ago."`
+	KeepLast      int    `json:"keep_last,omitempty" jsonschema:"Retain this many of the newest finished jobs. With older_than_sec, a job must satisfy both filters to be removed."`
 }
 
 type JobRmOut struct {
@@ -601,11 +605,12 @@ type ReadOut struct {
 }
 
 type WriteIn struct {
-	Host    string `json:"host"`
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Mode    uint32 `json:"mode,omitempty" jsonschema:"Octal file mode as a decimal number, e.g. 493 for 0755. Default 0644."`
-	Append  bool   `json:"append,omitempty"`
+	ApprovalToken string `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
+	Host          string `json:"host"`
+	Path          string `json:"path"`
+	Content       string `json:"content"`
+	Mode          uint32 `json:"mode,omitempty" jsonschema:"Octal file mode as a decimal number, e.g. 493 for 0755. Default 0644."`
+	Append        bool   `json:"append,omitempty"`
 }
 
 type WriteOut struct {

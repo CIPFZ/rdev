@@ -316,3 +316,51 @@ P5-12 remains In progress for complete secret resource permissions, target
 snapshot/approval binding and independent review. P5-14 still needs full
 request/operation/approval correlation and sustained sink recovery evidence;
 P5-16 still needs remote job mutation crash/replay and bounded drain validation.
+
+## Mandatory request-bound approval follow-up
+
+The approval path no longer trusts client Risk or Target. Every mutating wire
+operation needs an approval for the server's exact owner, host/session snapshot,
+wire parameters and policy digest. Arbitrary exec is included because argv and
+stdin cannot be proved harmless from a client hint. `approval.create` is a
+separately granted administrator RPC, exposed through the actual
+`rdevd approval-create -request-file` command. CLI and MCP transmit one-use
+executor tokens rather than gaining issuance authority.
+
+Approvals use unambiguous JSON tuple framing and 256-bit random tokens, with a
+bounded lifetime and pending store. Changed requests and other owners cannot
+consume a valid token. The target snapshot is checked under the client identity
+lease before dialing a replacement and before dispatch, and explicit approved
+deadlines cannot be expanded by a later context. A separate review caught and
+fixed the pre-dial ordering: checking only inside the request builder would
+have allowed bootstrap/secret I/O against a changed target before rejecting
+its mutation. Target-change tests assert zero dials.
+
+`TestRemoteBrokerApprovalIsolation` uses the real daemon, Unix clients, SSH and
+remote file operations. It proves Risk=false denial before transport creation,
+separate issuer/executor capabilities, owner/host/path/content/append/operation
+substitution denial, one actual append, replay/expiry/policy-change/restart
+rejection, and retained owner-only approval/result correlation after restart.
+The audit file is checked for absence of raw approval tokens and request content.
+Targeted tests also cover argv, cwd, env, stdin, deadline, login settings,
+project identity, target-session changes and ambiguous delimiter boundaries.
+
+The actual CLI integration now obtains approvals from a separate administrator
+principal for exec, write and job mutations. The real 20-process benchmark
+pre-provisions a distinct one-use approval for each mutating request before
+its start barrier; measured execution still consists of 500 remote calls per
+run. Remote cancellation/lifecycle tests use the same administrator command.
+These adaptations exercise authorization rather than disabling its checks.
+
+Independent external review remains pending. Shared sync/secret/Fleet mutation
+routes that are not yet implemented must integrate the same approval contract;
+this batch does not claim those routes or the remaining Phase5 QoS/job/audit
+recovery requirements are complete.
+
+[Initial full check and runtime regression](evidence/phase5/2026-09-08/approval-check-runtime-initial.log)
+passed `make check remote-approval remote-session-benchmark remote-lifecycle`:
+three approval runs, three approved 20-process/500-call session runs, three
+retry/cancellation runs, and six lease cycles over 65.362 seconds. Each session
+run still had one SSH child, one remote agent and 20 distinct remote principals.
+[Changed-package race tests](evidence/phase5/2026-09-08/approval-race-initial.log)
+also passed. Committed-source verification below identifies the final artifact.

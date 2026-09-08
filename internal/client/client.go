@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -101,6 +102,25 @@ type Client struct {
 // pooling, secret redaction, retry identity, and transport ownership inside
 // Client while allowing rdevd to serve multiple local clients.
 func (c *Client) DoProtocol(ctx context.Context, host string, req *proto.Request) (*proto.Response, error) {
+	return c.DoProtocolApproved(ctx, host, req, "")
+}
+
+// ProtocolTargetIdentity snapshots the configured host and session settings.
+// Unlike Resolve, Inspect cannot register a caller-supplied SSH destination.
+func (c *Client) ProtocolTargetIdentity(host string) (string, error) {
+	snapshot, err := c.Hosts.Inspect(host)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func (c *Client) DoProtocolApproved(ctx context.Context, host string, req *proto.Request, target string) (*proto.Response, error) {
 	if req == nil || req.ClientID == "" || req.ProjectID == "" {
 		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
@@ -112,7 +132,13 @@ func (c *Client) DoProtocol(ctx context.Context, host string, req *proto.Request
 	// hashing also produces a protocol-valid ID for arbitrary local owner names.
 	identity := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%d:%s", len(req.ClientID), req.ClientID, len(req.ProjectID), req.ProjectID)))
 	callerID := fmt.Sprintf("principal_%x", identity)
-	response, _, err := c.doBuilt(ctx, host, func(operationIdentity) (*builtRequest, error) {
+	response, _, err := c.doBuiltForTarget(ctx, host, target, func(operationIdentity) (*builtRequest, error) {
+		if target != "" {
+			current, err := c.ProtocolTargetIdentity(host)
+			if err != nil || current != target {
+				return nil, errors.New("approved target changed before dispatch")
+			}
+		}
 		copy := *req
 		return &builtRequest{Request: &copy, CallerID: callerID}, nil
 	})
@@ -265,6 +291,10 @@ func (c *Client) dialLock(name string) chan struct{} {
 
 // conn returns a pooled connection, dialing on first use.
 func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, error) {
+	return c.connForTarget(ctx, hostName, "")
+}
+
+func (c *Client) connForTarget(ctx context.Context, hostName, target string) (remoteConnection, error) {
 	resolved, err := c.Hosts.Resolve(hostName)
 	if err != nil {
 		return nil, err
@@ -311,6 +341,13 @@ func (c *Client) conn(ctx context.Context, hostName string) (remoteConnection, e
 		releaseIdentity, acquired := c.Hosts.AcquireIdentity(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
 		if !acquired {
 			continue
+		}
+		if target != "" {
+			current, err := c.ProtocolTargetIdentity(hostName)
+			if err != nil || current != target {
+				releaseIdentity()
+				return nil, errors.New("approved target changed before connection setup")
+			}
 		}
 		// Reserve the next publication token before validation or dialing. A
 		// detached predecessor may still be blocked in Close; from this point its
@@ -411,8 +448,12 @@ func secretHostIdentity(resolved session.ResolvedHost) secrets.HostIdentity {
 }
 
 func (c *Client) leasedConn(ctx context.Context, hostName string) (pooledConnection, session.State, func(), error) {
+	return c.leasedConnForTarget(ctx, hostName, "")
+}
+
+func (c *Client) leasedConnForTarget(ctx context.Context, hostName, target string) (pooledConnection, session.State, func(), error) {
 	for {
-		conn, err := c.conn(ctx, hostName)
+		conn, err := c.connForTarget(ctx, hostName, target)
 		if err != nil {
 			return pooledConnection{}, session.State{}, nil, err
 		}
@@ -433,6 +474,13 @@ func (c *Client) leasedConn(ctx context.Context, hostName string) (pooledConnect
 		if !stillPublished || current.conn != conn || current.generation != pooled.generation {
 			release()
 			continue
+		}
+		if target != "" {
+			current, err := c.ProtocolTargetIdentity(hostName)
+			if err != nil || current != target {
+				release()
+				return pooledConnection{}, session.State{}, nil, errors.New("approved target changed before request dispatch")
+			}
 		}
 		return pooled, c.Hosts.State(name), release, nil
 	}
@@ -582,6 +630,10 @@ func (c *Client) do(ctx context.Context, hostName string, req *proto.Request) (*
 // for the same immutable identity; an alias redefinition aborts rather than
 // replaying argv, stdin, labels, paths, or content from host A to host B.
 func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operationIdentity) (*builtRequest, error)) (*proto.Response, map[string]string, error) {
+	return c.doBuiltForTarget(ctx, hostName, "", build)
+}
+
+func (c *Client) doBuiltForTarget(ctx context.Context, hostName, target string, build func(operationIdentity) (*builtRequest, error)) (*proto.Response, map[string]string, error) {
 	if c.callerIDErr != nil || c.callerID == "" {
 		return nil, nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
 	}
@@ -603,7 +655,7 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 	var operationName string
 	for attempt := 0; attempt < 2; attempt++ {
 		redactionSnapshot := c.Secrets.Snapshot()
-		pooled, st, release, err := c.leasedConn(ctx, hostName)
+		pooled, st, release, err := c.leasedConnForTarget(ctx, hostName, target)
 		if err != nil {
 			if firstErr != nil {
 				return nil, nil, fmt.Errorf("%w (reconnect failed: %v)", firstErr, c.redactErrWith(redactionSnapshot, err))
@@ -647,9 +699,9 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 				release()
 				return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
 			}
-			// An explicit protocol deadline wins when the context has none, but it
-			// is still frozen here and reused verbatim on every attempt.
-			if deadlineSupported && deadlineUnixMilli == 0 {
+			// A context can shorten an approved semantic deadline, never extend
+			// it. Freeze the earliest bound for every transport attempt.
+			if deadlineSupported && built.Request.DeadlineUnixMilli != 0 && (deadlineUnixMilli == 0 || built.Request.DeadlineUnixMilli < deadlineUnixMilli) {
 				deadlineUnixMilli = built.Request.DeadlineUnixMilli
 			}
 		} else if built.Request.Op != operationName {

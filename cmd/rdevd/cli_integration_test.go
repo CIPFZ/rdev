@@ -20,6 +20,7 @@ import (
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 func TestCLIUsesSharedBrokerService(t *testing.T) {
@@ -53,6 +54,20 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	defer func() { _ = daemon.Process.Signal(syscall.SIGTERM); _, _ = daemon.Process.Wait() }()
 	waitForSocket(t, socket)
 
+	approve := func(cmd *exec.Cmd, wire *proto.Request) {
+		t.Helper()
+		admin := broker.Owner{ClientID: "cli-admin", ProjectID: "phase5"}
+		c, err := broker.DialClient(t.Context(), socket, admin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		response, err := c.Do(broker.Request{Operation: "approval.create", ApprovalSpec: &broker.ApprovalSpec{Owner: broker.Owner{ClientID: "cli-allowed", ProjectID: "phase5"}, Operation: wire.Op, Host: "remote-that-is-not-an-ssh-host", Wire: wire}})
+		if err != nil || !response.OK || response.Approval == nil {
+			t.Fatalf("administrator approval failed: %v %s", err, response.Error)
+		}
+		cmd.Env = append(cmd.Env, "RDEV_APPROVAL_TOKEN="+response.Approval.Token)
+	}
 	run := func(clientID string) *exec.Cmd {
 		cmd := exec.Command(cli, "ping", "remote-that-is-not-an-ssh-host")
 		cmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID="+clientID, "RDEV_PROJECT_ID=phase5")
@@ -86,6 +101,7 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	}
 	execCmd := exec.Command(cli, "exec", "remote-that-is-not-an-ssh-host", "--", "echo", "broker")
 	execCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	approve(execCmd, &proto.Request{Op: proto.OpExec, Exec: &proto.ExecParams{Argv: []string{"echo", "broker"}, LoginShell: true}})
 	execOut, execErr := execCmd.CombinedOutput()
 	if execErr != nil || string(execOut) != "broker\n" {
 		t.Fatalf("broker exec failed: err=%v output=%q", execErr, execOut)
@@ -99,6 +115,7 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	writeCmd := exec.Command(cli, "write", "remote-that-is-not-an-ssh-host", "/tmp/broker.txt")
 	writeCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
 	writeCmd.Stdin = strings.NewReader("broker-write")
+	approve(writeCmd, &proto.Request{Op: proto.OpWriteFile, Cat: &proto.WriteParams{Path: "/tmp/broker.txt", Content: "broker-write"}})
 	writeOut, writeErr := writeCmd.CombinedOutput()
 	if writeErr != nil || !strings.Contains(string(writeOut), "bytes_written") {
 		t.Fatalf("broker write failed: err=%v output=%q", writeErr, writeOut)
@@ -123,6 +140,7 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	}
 	startCmd := exec.Command(cli, "job", "start", "remote-that-is-not-an-ssh-host", "--", "echo", "background")
 	startCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	approve(startCmd, &proto.Request{Op: proto.OpJobStart, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"echo", "background"}, LoginShell: true}}})
 	startOut, startErr := startCmd.CombinedOutput()
 	if startErr != nil || !strings.Contains(string(startOut), "job-2") {
 		t.Fatalf("broker job start failed: err=%v output=%q", startErr, startOut)
@@ -135,6 +153,7 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	}
 	stopCmd := exec.Command(cli, "job", "stop", "remote-that-is-not-an-ssh-host", "job-1")
 	stopCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	approve(stopCmd, &proto.Request{Op: proto.OpJobStop, Job: &proto.JobParams{ID: "job-1"}})
 	stopOut, stopErr := stopCmd.CombinedOutput()
 	if stopErr != nil || !strings.Contains(string(stopOut), "job-1") {
 		t.Fatalf("broker job stop failed: err=%v output=%q", stopErr, stopOut)
@@ -147,6 +166,7 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	}
 	rmCmd := exec.Command(cli, "job", "rm", "remote-that-is-not-an-ssh-host", "job-1")
 	rmCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
+	approve(rmCmd, &proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: "job-1"}})
 	rmOut, rmErr := rmCmd.CombinedOutput()
 	if rmErr != nil || !strings.Contains(string(rmOut), "job-1") {
 		t.Fatalf("broker job rm failed: err=%v output=%q", rmErr, rmOut)
@@ -179,6 +199,12 @@ func runCLIBrokerDaemon(t *testing.T) {
 	}
 	defer listener.Close()
 	service := broker.NewService(nil)
+	if err := service.Client().Hosts.Add(transport.Host{Name: "remote-that-is-not-an-ssh-host", Addr: "test.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Grant(broker.Owner{ClientID: "cli-admin", ProjectID: "phase5"}, "approval.create"); err != nil {
+		t.Fatal(err)
+	}
 	allowed := broker.Owner{ClientID: "cli-allowed", ProjectID: "phase5"}
 	if err := service.Grant(allowed, "ping"); err != nil {
 		t.Fatal(err)

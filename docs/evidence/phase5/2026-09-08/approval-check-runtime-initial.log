@@ -1,0 +1,68 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.006s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.430s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.990s
+ok  	github.com/CIPFZ/rdev/internal/broker	1.480s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.003s
+ok  	github.com/CIPFZ/rdev/internal/client	0.477s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.038s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.705s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.003s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.005s
+ok  	github.com/CIPFZ/rdev/internal/session	9.192s
+ok  	github.com/CIPFZ/rdev/internal/state	0.096s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.028s
+ok  	github.com/CIPFZ/rdev/internal/support	0.002s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.311s
+ok       rdev-agent-linux-amd64 f62409163d1c
+ok       rdev-agent-linux-arm64 67bb410850c9
+ok       rdev-agent-darwin-amd64 b168ccf32480
+ok       rdev-agent-darwin-arm64 7c7e554910e8
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerApprovalIsolation$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (1.11s)
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (1.11s)
+=== RUN   TestRemoteBrokerApprovalIsolation
+    remote_approval_test.go:183: real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified
+--- PASS: TestRemoteBrokerApprovalIsolation (1.12s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	3.346s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerProcesses$' -count=3 -timeout=5m -v
+=== RUN   TestRemoteBrokerProcesses
+    remote_process_test.go:185: real SSH multi-process benchmark: {"calls":500,"clients":20,"daemon_ssh_max":1,"elapsed_ms":2800.948,"exec_p95_ms":130.446,"ping_p50_ms":64.118,"ping_p95_ms":117.255,"ping_p99_ms":141.577,"process_samples":10,"remote_agent_distinct":1,"remote_agent_max":1,"remote_principals":20}
+--- PASS: TestRemoteBrokerProcesses (5.66s)
+=== RUN   TestRemoteBrokerProcesses
+    remote_process_test.go:185: real SSH multi-process benchmark: {"calls":500,"clients":20,"daemon_ssh_max":1,"elapsed_ms":2792.524,"exec_p95_ms":134.165,"ping_p50_ms":66.862,"ping_p95_ms":112.396,"ping_p99_ms":136.142,"process_samples":10,"remote_agent_distinct":1,"remote_agent_max":1,"remote_principals":20}
+--- PASS: TestRemoteBrokerProcesses (5.76s)
+=== RUN   TestRemoteBrokerProcesses
+    remote_process_test.go:185: real SSH multi-process benchmark: {"calls":500,"clients":20,"daemon_ssh_max":1,"elapsed_ms":2789.62,"exec_p95_ms":145.862,"ping_p50_ms":71.493,"ping_p95_ms":108.631,"ping_p99_ms":138.039,"process_samples":10,"remote_agent_distinct":1,"remote_agent_max":1,"remote_principals":20}
+--- PASS: TestRemoteBrokerProcesses (5.62s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	17.053s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerRetryCancellation$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerRetryCancellation
+    remote_lifecycle_test.go:315: real SSH retry/cancellation: old_agent=786175 replacement_agent=786199 waiter_cancel_ms=10.380 retry_cancel_ms=10.368 foreground_cancel_ms=10.602 mutation_executions=1 survivor_exec=passed shared_transport_preserved=true
+--- PASS: TestRemoteBrokerRetryCancellation (4.73s)
+=== RUN   TestRemoteBrokerRetryCancellation
+    remote_lifecycle_test.go:315: real SSH retry/cancellation: old_agent=786276 replacement_agent=786337 waiter_cancel_ms=10.360 retry_cancel_ms=10.333 foreground_cancel_ms=10.546 mutation_executions=1 survivor_exec=passed shared_transport_preserved=true
+--- PASS: TestRemoteBrokerRetryCancellation (4.74s)
+=== RUN   TestRemoteBrokerRetryCancellation
+    remote_lifecycle_test.go:315: real SSH retry/cancellation: old_agent=786442 replacement_agent=786666 waiter_cancel_ms=10.323 retry_cancel_ms=10.353 foreground_cancel_ms=10.537 mutation_executions=1 survivor_exec=passed shared_transport_preserved=true
+--- PASS: TestRemoteBrokerRetryCancellation (4.72s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	14.191s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerLeaseLifecycle$' -count=1 -timeout=2m -v
+=== RUN   TestRemoteBrokerLeaseLifecycle
+    remote_lifecycle_test.go:412: real SSH lease lifecycle: {"active_agent_preserved":true,"cycles":6,"elapsed_ms":65362.137,"final_daemon_ssh":0,"frontend_normal_close":3,"frontend_sigkill":3,"idle_ttl_ms":250,"new_owner_requests":60,"reap_ms":[4767.621,4568.418,4570.607,4588.586,4590.625,4569.078],"reaper_tick_ms":5000}
+--- PASS: TestRemoteBrokerLeaseLifecycle (65.93s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	65.938s
