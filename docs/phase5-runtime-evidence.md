@@ -1280,3 +1280,22 @@ race-daemon route/correlation run (6.59 seconds). Its daemon SHA-256 was
 Full check, three correlation scenarios and continuity/predecessor/mutation/scoped
 route regressions all passed. Committed-artifact load and service verification
 will be recorded separately; no independent external review is implied.
+
+
+## Committed audit-route verification: 8af4fb7
+
+Implementation `8af4fb7` was pushed to `origin/main`. Committed-source `make
+check remote-audit-routes remote-audit-continuity remote-audit-upgrade
+remote-mutation remote-qos stress-broker smoke-rdevd remote-phase5-runtime`
+exited successfully with the established Go/SSH settings.
+
+- [Committed log](evidence/phase5/2026-09-09/committed-audit-routes-8af4fb7.log): full check, three route-correlation scenarios, three continuity/predecessor/mutation regressions, three QoS runs, stress, readiness and real Linux service lifecycle passed.
+- Control p95 ratios were 1.3786/1.3161, 1.5531/1.5148 and 1.3711/1.4476, all below the unchanged two-times threshold. The sinks had written 146147 records at measurement, with six rotations and zero drops/errors. Accepted totaled 146150: each newly audited health query had one pending event in its own live snapshot. These pending records are not classified as drops, and the counts are observations before shutdown rather than a claim about every event's eventual persistence.
+- Remote daemon SHA-256: `2eca0f9ded308a78c2ffe690714153644f9dbba666917688abcf5b693f3ae137`. Systemd user install/enable/start/reload/SIGKILL recovery/stop/start passed, PID `1093246 -> 1093312`.
+- Final-code [full check and remote regressions](evidence/phase5/2026-09-09/audit-routes-fixed-check-runtime.log), [full race](evidence/phase5/2026-09-09/audit-routes-full-race.log), [actual race daemon](evidence/phase5/2026-09-09/audit-routes-remote-race.log) and [initial targeted correlation](evidence/phase5/2026-09-09/audit-routes-targeted.log) passed. The [outdated query-count failure](evidence/phase5/2026-09-09/audit-routes-check-runtime.log) is retained separately; the corrected test includes each new query's event while retaining exact-owner validation.
+
+This adds actual correlation and recovery evidence for implemented authenticated
+routes. It does not remove async crash-tail uncertainty or cover pre-owner-binding
+identity/ingress errors with the same trace. Extended retention/storage-failure,
+remaining shared routes, mixed load, macOS and independent external review remain
+open. Phase5 and the Multi Agent Gate are still In progress.

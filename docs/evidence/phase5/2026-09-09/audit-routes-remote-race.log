@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerAuditRoutes
+    remote_audit_routes_test.go:158: actual daemon/SSH: repeated caller IDs have unique response/audit request references; local outcomes and pre-dispatch rejections traced; approval/admission/append/query share exact digests; all traces survive SIGKILL; same-client project isolation and payload/token privacy passed
+--- PASS: TestRemoteBrokerAuditRoutes (6.59s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	6.596s

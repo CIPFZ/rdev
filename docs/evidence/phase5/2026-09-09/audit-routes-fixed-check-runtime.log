@@ -1,0 +1,121 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.005s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.617s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	8.974s
+ok  	github.com/CIPFZ/rdev/internal/broker	3.188s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.003s
+ok  	github.com/CIPFZ/rdev/internal/client	0.472s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.039s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.693s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.004s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.004s
+ok  	github.com/CIPFZ/rdev/internal/session	9.188s
+ok  	github.com/CIPFZ/rdev/internal/state	0.100s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.034s
+ok  	github.com/CIPFZ/rdev/internal/support	0.004s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.274s
+ok       rdev-agent-linux-amd64 c7181bc460dc
+ok       rdev-agent-linux-arm64 5585f910c7ab
+ok       rdev-agent-darwin-amd64 0d7a21efd828
+ok       rdev-agent-darwin-arm64 bb96349a603a
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerAuditRoutes$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerAuditRoutes
+    remote_audit_routes_test.go:158: actual daemon/SSH: repeated caller IDs have unique response/audit request references; local outcomes and pre-dispatch rejections traced; approval/admission/append/query share exact digests; all traces survive SIGKILL; same-client project isolation and payload/token privacy passed
+--- PASS: TestRemoteBrokerAuditRoutes (0.74s)
+=== RUN   TestRemoteBrokerAuditRoutes
+    remote_audit_routes_test.go:158: actual daemon/SSH: repeated caller IDs have unique response/audit request references; local outcomes and pre-dispatch rejections traced; approval/admission/append/query share exact digests; all traces survive SIGKILL; same-client project isolation and payload/token privacy passed
+--- PASS: TestRemoteBrokerAuditRoutes (0.74s)
+=== RUN   TestRemoteBrokerAuditRoutes
+    remote_audit_routes_test.go:158: actual daemon/SSH: repeated caller IDs have unique response/audit request references; local outcomes and pre-dispatch rejections traced; approval/admission/append/query share exact digests; all traces survive SIGKILL; same-client project isolation and payload/token privacy passed
+--- PASS: TestRemoteBrokerAuditRoutes (0.73s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.223s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerAuditContinuity$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerAuditContinuity
+    remote_audit_continuity_test.go:129: actual daemon/OpenSSH audit continuity: clean exit/restart remains complete; SIGKILL leaves durable open marker and explicit possible-tail-loss flag; later clean restart preserves gap; real marker publication failure recovered as another unclean run; exact-project audit history and separately authorized health; no payload/owner names in private bounded marker
+--- PASS: TestRemoteBrokerAuditContinuity (0.96s)
+=== RUN   TestRemoteBrokerAuditContinuity
+    remote_audit_continuity_test.go:129: actual daemon/OpenSSH audit continuity: clean exit/restart remains complete; SIGKILL leaves durable open marker and explicit possible-tail-loss flag; later clean restart preserves gap; real marker publication failure recovered as another unclean run; exact-project audit history and separately authorized health; no payload/owner names in private bounded marker
+--- PASS: TestRemoteBrokerAuditContinuity (0.95s)
+=== RUN   TestRemoteBrokerAuditContinuity
+    remote_audit_continuity_test.go:129: actual daemon/OpenSSH audit continuity: clean exit/restart remains complete; SIGKILL leaves durable open marker and explicit possible-tail-loss flag; later clean restart preserves gap; real marker publication failure recovered as another unclean run; exact-project audit history and separately authorized health; no payload/owner names in private bounded marker
+--- PASS: TestRemoteBrokerAuditContinuity (0.93s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.836s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' scripts/remote-audit-upgrade.sh '/data/tmp/rdev-toolchain/go/bin/go'
+audit predecessor commit: 08ff4fb91478205af93e9fdf0752e88b47c33e72
+dde6e3246d85259d126e5b00b8fa18ecb495d15bab3de81052b7b0c3735e825f  /data/tmp/rdev-audit-predecessor.9XtF5F/rdevd
+=== RUN   TestRemoteBrokerAuditPredecessorRecovery
+    remote_audit_continuity_test.go:208: actual daemon downgrade/upgrade: current clean seal retained while predecessor wrote both projects' real remote requests; unchanged old marker cannot hide segment digest changes; re-upgrade reports incomplete history with exact-owner queries, without inventing an open-marker crash count
+--- PASS: TestRemoteBrokerAuditPredecessorRecovery (0.82s)
+=== RUN   TestRemoteBrokerAuditPredecessorRecovery
+    remote_audit_continuity_test.go:208: actual daemon downgrade/upgrade: current clean seal retained while predecessor wrote both projects' real remote requests; unchanged old marker cannot hide segment digest changes; re-upgrade reports incomplete history with exact-owner queries, without inventing an open-marker crash count
+--- PASS: TestRemoteBrokerAuditPredecessorRecovery (0.80s)
+=== RUN   TestRemoteBrokerAuditPredecessorRecovery
+    remote_audit_continuity_test.go:208: actual daemon downgrade/upgrade: current clean seal retained while predecessor wrote both projects' real remote requests; unchanged old marker cannot hide segment digest changes; re-upgrade reports incomplete history with exact-owner queries, without inventing an open-marker crash count
+--- PASS: TestRemoteBrokerAuditPredecessorRecovery (0.82s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	2.446s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerMutationCrashRecovery$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1085807; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.013634821s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.14s)
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1086061; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.015092952s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.09s)
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1086267; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.015064881s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.12s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	33.353s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerRoutes$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:108: actual daemon: absent/malformed routes rejected before dial; policy denial precedes route lookup; owner-only rejection audit; valid remote ping preserved
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:196: actual daemon: scoped admin cannot grant/revoke globally or another host; matching host grant/revoke survives SIGKILL; other project cannot administer; only intended host executes
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:310: actual daemon/SSH: host-scoped approval issuance bound to nested host; rejection preserves approval; two approved appends exactly once across crash; mutation outcomes filtered by host and project before/after SIGKILL, absent/out-of-scope indistinguishable
+--- PASS: TestRemoteBrokerRoutes (2.31s)
+    --- PASS: TestRemoteBrokerRoutes/absent_and_malformed (0.67s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_policy (0.72s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_approval_and_mutation (0.91s)
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:108: actual daemon: absent/malformed routes rejected before dial; policy denial precedes route lookup; owner-only rejection audit; valid remote ping preserved
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:196: actual daemon: scoped admin cannot grant/revoke globally or another host; matching host grant/revoke survives SIGKILL; other project cannot administer; only intended host executes
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:310: actual daemon/SSH: host-scoped approval issuance bound to nested host; rejection preserves approval; two approved appends exactly once across crash; mutation outcomes filtered by host and project before/after SIGKILL, absent/out-of-scope indistinguishable
+--- PASS: TestRemoteBrokerRoutes (2.26s)
+    --- PASS: TestRemoteBrokerRoutes/absent_and_malformed (0.66s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_policy (0.72s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_approval_and_mutation (0.88s)
+=== RUN   TestRemoteBrokerRoutes
+=== RUN   TestRemoteBrokerRoutes/absent_and_malformed
+    remote_routes_test.go:108: actual daemon: absent/malformed routes rejected before dial; policy denial precedes route lookup; owner-only rejection audit; valid remote ping preserved
+=== RUN   TestRemoteBrokerRoutes/scoped_policy
+    remote_routes_test.go:196: actual daemon: scoped admin cannot grant/revoke globally or another host; matching host grant/revoke survives SIGKILL; other project cannot administer; only intended host executes
+=== RUN   TestRemoteBrokerRoutes/scoped_approval_and_mutation
+    remote_routes_test.go:310: actual daemon/SSH: host-scoped approval issuance bound to nested host; rejection preserves approval; two approved appends exactly once across crash; mutation outcomes filtered by host and project before/after SIGKILL, absent/out-of-scope indistinguishable
+--- PASS: TestRemoteBrokerRoutes (2.28s)
+    --- PASS: TestRemoteBrokerRoutes/absent_and_malformed (0.67s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_policy (0.73s)
+    --- PASS: TestRemoteBrokerRoutes/scoped_approval_and_mutation (0.89s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	6.853s

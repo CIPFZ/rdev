@@ -1,0 +1,29 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.005s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.554s
+=== RUN   TestCLIUsesSharedBrokerService
+--- FAIL: TestDaemonRuntimeLifecycle (2.92s)
+    --- FAIL: TestDaemonRuntimeLifecycle/audit_owner_query_restart (0.05s)
+        runtime_integration_test.go:321: audit history missing or broadened: ok=true count=3
+FAIL
+FAIL	github.com/CIPFZ/rdev/cmd/rdevd	9.563s
+ok  	github.com/CIPFZ/rdev/internal/broker	3.357s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.004s
+ok  	github.com/CIPFZ/rdev/internal/client	0.464s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.043s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.647s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.003s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.004s
+ok  	github.com/CIPFZ/rdev/internal/session	9.703s
+ok  	github.com/CIPFZ/rdev/internal/state	0.088s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.027s
+ok  	github.com/CIPFZ/rdev/internal/support	0.002s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.355s
+FAIL
+make: *** [Makefile:177: test] Error 1
