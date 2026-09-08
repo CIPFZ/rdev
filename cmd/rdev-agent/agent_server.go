@@ -543,6 +543,7 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 	switch request.Op {
 	case proto.OpPing:
 		response.Ping = doPing()
+		response.Ping.CallerID = request.ClientID
 		if request.Hello != nil {
 			if version, ok := proto.NegotiateVersion(
 				proto.ProtocolRange{Min: proto.MinVersion, Max: proto.Version},

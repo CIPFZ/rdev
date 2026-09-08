@@ -6,10 +6,12 @@
 package session
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -625,6 +627,32 @@ func (r *Registry) Load() error {
 		}
 	}
 	return nil
+}
+
+// LoadGlobalData imports administrator-selected bytes. The daemon validates the
+// file's ownership, mode and size before calling this; no project discovery or
+// project trust grant is performed. All entries pass the normal host validator.
+func (r *Registry) LoadGlobalData(source string, data []byte) error {
+	if err := r.fatalError(); err != nil {
+		return err
+	}
+	var file hostFile
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&file); err != nil {
+		return fmt.Errorf("invalid administrator host registry: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF || file.Hosts == nil {
+		return errors.New("administrator host registry requires one object with a hosts array")
+	}
+	seen := make(map[string]bool)
+	for _, host := range file.Hosts {
+		if seen[host.Name] {
+			return errors.New("duplicate administrator host name")
+		}
+		seen[host.Name] = true
+	}
+	return r.loadBytes(source, data, ScopeGlobal)
 }
 
 // loadFile merges one host file into the registry, tagging each entry's scope.

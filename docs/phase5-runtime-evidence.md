@@ -148,3 +148,47 @@ Implementation commit: `455ff163dc15cd4db932a567271f45b2ac720f59`
 
 P5-14 and the overall Phase5 gate remain In progress for the outstanding
 requirements above. This evidence does not claim sustained audit rotation.
+
+
+## Real shared-session and remote principal benchmark
+
+`make remote-session-benchmark` now starts the actual daemon and 20 separate
+client processes. All clients authenticate and wait at a common start barrier,
+then each performs 25 alternating remote ping/exec requests over real OpenSSH.
+The test observes local `/proc` SSH children and remote `/proc` agent PIDs;
+every returned ping also has to report that same agent PID throughout the run.
+No dispatcher, remote operation or transport implementation is substituted.
+A small SSH wrapper only supplies the administrator's chosen SSH config file.
+
+[Initial full check and benchmark log](evidence/phase5/2026-09-08/session-benchmark.log):
+three consecutive runs, each with 500 calls, 20 process PIDs, one daemon SSH
+child, one remote agent PID, and 20 distinct remote principal IDs. Elapsed
+workload time was 1.395–1.398 seconds; mixed cold/warm ping p95 was 109.958–117.849
+ms and exec p95 54.162–57.258 ms. These are measurements of this short mixed
+load, not the P5-08 control-under-bulk SLO or a sustained fairness result.
+
+The benchmark includes ten client IDs reused in two different projects.
+`Client.DoProtocol` previously replaced all callers with the shared Client's
+random process identity. It now hashes a length-framed client/project tuple
+into a stable protocol-valid principal ID, preserves that identity across
+retry/restart, and leaves the broker's original request unchanged. Ordinary
+non-broker client identity behavior is unchanged. Broker dispatch refuses
+legacy peers that would strip principal metadata. Ping's optional `caller_id`
+field echoes only the current request's identity, allowing the real agent to
+prove both shared PID and separate principals; it is not a new credential or
+an OS sandbox claim.
+
+[Targeted identity negatives](evidence/phase5/2026-09-08/principal-identity.log)
+cover distinct tuples, retry/restart stability, original-request immutability,
+missing owner rejection, and fail-closed legacy execution. Startup process
+negatives cover private explicit host registries: malformed/null documents,
+unknown fields, duplicate names and public permissions all fail before READY.
+The daemon's `-hosts-file` avoids altering the operator's global/project host
+registry for isolated deployments and runtime tests.
+
+A separate root review checked source immutability, unambiguous tuple framing,
+legacy stripping, host config trust, process barriers/counting, per-call PID
+consistency, and cleanup of only the generated remote namespace. External
+independent review remains pending authorization. Shared sync/secret/session
+routes, complete host/secret/job policy boundaries and sustained fairness
+remain open; the first Multi Agent runtime criterion is now proven.

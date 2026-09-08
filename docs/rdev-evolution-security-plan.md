@@ -1063,7 +1063,7 @@ Phase 3 完成记录：
 
 多 Agent Gate：
 
-- [ ] 20 个本地 client 同时访问一台 host，只有一个基础 transport/agent 会话。
+- [x] 20 个本地 client 同时访问一台 host，只有一个基础 transport/agent 会话。2026-09-08 真 SSH 运行时通过（20 进程、3 × 500 请求）；见 `docs/phase5-runtime-evidence.md`，其余 Gate 与独立 review 仍未完成。
 - [ ] 每 client 的配额和取消互不影响。
 - [ ] 长 exec、job wait、status 和 sync 混合负载下没有饥饿。
 - [ ] bulk lane 空闲后按 TTL 自动退出。

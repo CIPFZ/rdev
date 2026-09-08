@@ -591,6 +591,7 @@ make check-agents  # 校验 embed 的 agent 确实由当前源码构出
 make check         # = vet + test + check-agents
 make remote-smoke  # 在 SSH 配置的 service-deploy 上验证 Linux rdevd readiness/权限/关闭
 make remote-phase5-runtime  # 真实 daemon 凭证/崩溃恢复测试和 systemd 用户服务安装验证
+make remote-session-benchmark  # 20 个独立进程通过真 SSH 共享一个远端 agent 会话
 make test
 make vet
 ```

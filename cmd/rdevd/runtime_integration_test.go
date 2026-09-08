@@ -24,6 +24,8 @@ type runtimeDaemon struct {
 	bin, dir, socket, ready, key string
 	cmd                          *exec.Cmd
 	done                         chan error
+	extraArgs                    []string
+	env                          []string
 }
 
 func newRuntimeDaemon(t *testing.T, bin string) *runtimeDaemon {
@@ -50,7 +52,7 @@ func (d *runtimeDaemon) admin(args ...string) string {
 }
 
 func (d *runtimeDaemon) args() []string {
-	return []string{"-socket", d.socket, "-ready-file", d.ready, "-principal-key-file", d.key}
+	return append([]string{"-socket", d.socket, "-ready-file", d.ready, "-principal-key-file", d.key}, d.extraArgs...)
 }
 
 func (d *runtimeDaemon) start() {
@@ -61,6 +63,9 @@ func (d *runtimeDaemon) start() {
 	}
 	d.cmd = exec.Command(d.bin, d.args()...)
 	d.cmd.Dir = d.dir
+	if d.env != nil {
+		d.cmd.Env = d.env
+	}
 	d.cmd.Stdout, d.cmd.Stderr = logFile, logFile
 	if err := d.cmd.Start(); err != nil {
 		logFile.Close()
@@ -340,7 +345,7 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 		t.Log("real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded")
 	})
 	t.Run("startup_fail_closed", func(t *testing.T) {
-		for _, kind := range []string{"missing_key", "weak_key", "public_key", "symlink_key", "bad_config", "null_config", "unknown_config_field", "bad_policy", "bad_jobs"} {
+		for _, kind := range []string{"missing_key", "weak_key", "public_key", "symlink_key", "bad_config", "null_config", "unknown_config_field", "bad_policy", "bad_jobs", "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts"} {
 			t.Run(kind, func(t *testing.T) {
 				d := newRuntimeDaemon(t, bin)
 				switch kind {
@@ -363,6 +368,23 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 					os.WriteFile(d.socket+".policy", []byte(`invalid-policy`), 0o600)
 				case "bad_jobs":
 					os.WriteFile(d.socket+".jobs", []byte(`invalid-jobs`), 0o600)
+				case "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts":
+					hosts := filepath.Join(d.dir, "hosts.json")
+					d.extraArgs = []string{"-hosts-file", hosts}
+					content := `null`
+					mode := os.FileMode(0o600)
+					switch kind {
+					case "public_hosts":
+						content = `{"hosts":[]}`
+						mode = 0o644
+					case "unknown_host_field":
+						content = `{"hosts":[{"name":"h","addr":"host","unsafe_option":true}]}`
+					case "duplicate_hosts":
+						content = `{"hosts":[{"name":"h","addr":"one"},{"name":"h","addr":"two"}]}`
+					}
+					if err := os.WriteFile(hosts, []byte(content), mode); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if err := os.WriteFile(d.ready, []byte("STALE\n"), 0o600); err != nil {
 					t.Fatal(err)

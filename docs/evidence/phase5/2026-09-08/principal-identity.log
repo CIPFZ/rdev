@@ -1,0 +1,8 @@
+=== RUN   TestBrokerPrincipalIdentitySurvivesRetryAndClientRestart
+--- PASS: TestBrokerPrincipalIdentitySurvivesRetryAndClientRestart (0.00s)
+=== RUN   TestBrokerPrincipalSeparatesClientAndProject
+--- PASS: TestBrokerPrincipalSeparatesClientAndProject (0.00s)
+=== RUN   TestBrokerDoesNotDropPrincipalForLegacyPeer
+--- PASS: TestBrokerDoesNotDropPrincipalForLegacyPeer (0.00s)
+PASS
+ok  	github.com/CIPFZ/rdev/internal/client	0.003s

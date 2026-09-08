@@ -356,6 +356,9 @@ type PingResult struct {
 	OS         string `json:"os"`
 	Arch       string `json:"arch"`
 	PID        int    `json:"pid"`
+	// CallerID echoes only this request's protocol identity. It lets a broker
+	// verify principal separation while observing the shared agent PID.
+	CallerID string `json:"caller_id,omitempty"`
 	// Build is the agent's build stamp (see internal/buildinfo). Empty from a
 	// build that predates it, which callers must read as "unknown" rather than
 	// as a mismatch. Protocol version answers "can we talk"; this answers "which

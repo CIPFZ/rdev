@@ -125,3 +125,26 @@ are omitted from principal queries with `audit_incomplete=true`, because their
 ownership cannot safely be reconstructed. Administrators can inspect the old
 segments locally. Long-running rotation and sink failure acceptance remain
 open in the Phase5 record.
+
+
+## Explicit host registry and real session benchmark
+
+`rdevd -hosts-file /private/hosts.json` loads only the administrator-selected
+0600 regular file, with a 4 MiB bound, normal host/security validation, and
+strict JSON fields. The object must contain a `hosts` array; duplicate names,
+null and unknown fields are rejected. It replaces implicit global/project
+registry discovery for that daemon. Host-file changes currently require a
+restart; SIGHUP reloads the broker config and principal key.
+
+`make remote-session-benchmark RDEV_SSH_CONFIG=/path/to/ssh/config` runs three
+20-process / 500-request real-SSH workloads against `service-deploy` (or
+`RDEV_REMOTE_SSH`). It creates a unique remote state directory, observes one
+shared remote agent PID and the daemon's SSH child count, and verifies distinct
+client/project protocol identities. It requires a Linux test runner and Linux
+remote with Python 3. This is a short session benchmark; it does not claim
+long-running fairness or the bulk/control latency SLO.
+
+Broker-mode protocol dispatch requires a version-3 agent to preserve principal
+metadata. Direct compatibility clients retain their legacy behavior. The new
+optional ping `caller_id` reports only the current request's opaque protocol
+identity; older ping clients can ignore it.

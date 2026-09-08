@@ -56,6 +56,7 @@ func runDaemon(args []string) error {
 	configPath := flags.String("config", "", "broker JSON config path (default: <socket>.json)")
 	readyFile := flags.String("ready-file", "", "optional readiness file")
 	keyFile := flags.String("principal-key-file", "", "0600 administrator signing key; reloaded on SIGHUP")
+	hostsFile := flags.String("hosts-file", "", "private administrator host registry (replaces default global/project discovery)")
 	unauthenticated := flags.Bool("allow-unauthenticated", false, "explicit single-user compatibility mode; declared owners are not authenticated")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -138,7 +139,15 @@ func runDaemon(args []string) error {
 	if err := service.Audit.ConfigureFile(*socket+".audit", 8<<20); err != nil {
 		return fmt.Errorf("audit initialization failed: %w", err)
 	}
-	if err := service.Client().Hosts.Load(); err != nil {
+	if *hostsFile != "" {
+		data, err := broker.ReadPrivateFile(*hostsFile, 4<<20)
+		if err == nil {
+			err = service.Client().Hosts.LoadGlobalData(*hostsFile, data)
+		}
+		if err != nil {
+			return fmt.Errorf("host registry load failed: %w", err)
+		}
+	} else if err := service.Client().Hosts.Load(); err != nil {
 		return fmt.Errorf("host registry load failed: %w", err)
 	}
 	if err := service.Jobs.ConfigurePersistence(jobsPath); err != nil {

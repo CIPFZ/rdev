@@ -101,7 +101,22 @@ type Client struct {
 // pooling, secret redaction, retry identity, and transport ownership inside
 // Client while allowing rdevd to serve multiple local clients.
 func (c *Client) DoProtocol(ctx context.Context, host string, req *proto.Request) (*proto.Response, error) {
-	return c.do(ctx, host, req)
+	if req == nil || req.ClientID == "" || req.ProjectID == "" {
+		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	if _, err := proto.RequireOperation(req.Op); err != nil {
+		return nil, err
+	}
+	// A shared Client must not collapse every principal into c.callerID. Length
+	// framing preserves both fields even when owner strings contain separators;
+	// hashing also produces a protocol-valid ID for arbitrary local owner names.
+	identity := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%d:%s", len(req.ClientID), req.ClientID, len(req.ProjectID), req.ProjectID)))
+	callerID := fmt.Sprintf("principal_%x", identity)
+	response, _, err := c.doBuilt(ctx, host, func(operationIdentity) (*builtRequest, error) {
+		copy := *req
+		return &builtRequest{Request: &copy, CallerID: callerID}, nil
+	})
+	return response, err
 }
 
 type capabilityCacheEntry struct {
@@ -521,6 +536,8 @@ type operationIdentity struct {
 type builtRequest struct {
 	Request *proto.Request
 	Echo    map[string]string
+	// Set only by the authenticated broker-facing entrypoint.
+	CallerID string
 }
 
 // do sends a request according to the retry policy in proto's shared operation
@@ -589,6 +606,10 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 			release()
 			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
 		}
+		if built.CallerID != "" && connectionUsesLegacyUnary(pooled.conn) {
+			release()
+			return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+		}
 		if attempt == 0 {
 			operationName = built.Request.Op
 			var descriptorErr error
@@ -625,6 +646,9 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 
 		built.Request.OperationID = operationID
 		built.Request.ClientID = c.callerID
+		if built.CallerID != "" {
+			built.Request.ClientID = built.CallerID
+		}
 		built.Request.Replay = attempt > 0
 		built.Request.DeadlineUnixMilli = 0
 		for _, feature := range descriptor.RequiredFeatures {
