@@ -13,12 +13,13 @@ import (
 )
 
 type AuditEvent struct {
-	Schema    int       `json:"schema,omitempty"`
-	At        time.Time `json:"at"`
-	Owner     string    `json:"owner,omitempty"`
-	Operation string    `json:"operation,omitempty"`
-	Decision  string    `json:"decision,omitempty"`
-	Result    string    `json:"result,omitempty"`
+	PolicyDigest string    `json:"policy_digest,omitempty"`
+	Schema       int       `json:"schema,omitempty"`
+	At           time.Time `json:"at"`
+	Owner        string    `json:"owner,omitempty"`
+	Operation    string    `json:"operation,omitempty"`
+	Decision     string    `json:"decision,omitempty"`
+	Result       string    `json:"result,omitempty"`
 }
 type AuditLog struct {
 	mu       sync.RWMutex
@@ -84,6 +85,9 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
 	e.Schema = 1
+	if digest, err := hex.DecodeString(e.PolicyDigest); err != nil || len(digest) != sha256.Size {
+		e.PolicyDigest = ""
+	}
 	e.Owner = AuditOwnerID(e.Owner)
 	e.Operation = auditOperation(e.Operation)
 	e.Decision = auditCode(e.Decision)
@@ -136,7 +140,7 @@ func auditOperation(operation string) string {
 
 func auditCode(code string) string {
 	switch code {
-	case "", "allow", "deny", "granted", "denied", "denied by default", "approval_denied", "approval_required", "approval_invalid", "accepted", "completed", "dispatch_error", "quota_rejected", "policy_updated", "recovery_missing", "recovery_unreachable", "state_persist_failed":
+	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_invalid", "accepted", "completed", "dispatch_error", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "state_persist_failed":
 		return code
 	default:
 		return "unknown"

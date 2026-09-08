@@ -345,7 +345,7 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 		t.Log("real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded")
 	})
 	t.Run("startup_fail_closed", func(t *testing.T) {
-		for _, kind := range []string{"missing_key", "weak_key", "public_key", "symlink_key", "bad_config", "null_config", "unknown_config_field", "bad_policy", "bad_jobs", "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts"} {
+		for _, kind := range []string{"missing_key", "weak_key", "public_key", "symlink_key", "bad_config", "null_config", "unknown_config_field", "bad_policy", "null_policy", "duplicate_policy", "public_policy", "bad_jobs", "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts"} {
 			t.Run(kind, func(t *testing.T) {
 				d := newRuntimeDaemon(t, bin)
 				switch kind {
@@ -366,6 +366,12 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 					os.WriteFile(d.socket+".json", []byte(`{"typo":1}`), 0o600)
 				case "bad_policy":
 					os.WriteFile(d.socket+".policy", []byte(`invalid-policy`), 0o600)
+				case "null_policy":
+					os.WriteFile(d.socket+".policy", []byte(`null`), 0600)
+				case "duplicate_policy":
+					os.WriteFile(d.socket+".policy", []byte(`{"owner":{"ping":true,"ping":false}}`), 0600)
+				case "public_policy":
+					os.WriteFile(d.socket+".policy", []byte(`{}`), 0644)
 				case "bad_jobs":
 					os.WriteFile(d.socket+".jobs", []byte(`invalid-jobs`), 0o600)
 				case "bad_hosts", "public_hosts", "unknown_host_field", "duplicate_hosts":

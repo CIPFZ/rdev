@@ -17,6 +17,7 @@ type Request struct {
 	Capability      string         `json:"capability,omitempty"`
 	GrantOwner      Owner          `json:"grant_owner,omitempty"`
 	GrantOperation  string         `json:"grant_operation,omitempty"`
+	GrantHost       string         `json:"grant_host,omitempty"`
 	GrantCapability string         `json:"grant_capability,omitempty"`
 	Revoke          bool           `json:"revoke,omitempty"`
 	Since           time.Time      `json:"since,omitempty"`
@@ -27,5 +28,6 @@ type Response struct {
 	Error           string          `json:"error,omitempty"`
 	Wire            *proto.Response `json:"wire,omitempty"`
 	Audit           []AuditEvent    `json:"audit,omitempty"`
+	PolicyDigest    string          `json:"policy_digest,omitempty"`
 	AuditIncomplete bool            `json:"audit_incomplete,omitempty"`
 }

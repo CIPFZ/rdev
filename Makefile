@@ -17,7 +17,7 @@ COMMIT      := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
 STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle stress-broker
+.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy stress-broker
 
 all: agents build
 
@@ -109,6 +109,9 @@ remote-session-benchmark: agents
 remote-lifecycle: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerRetryCancellation$$' -count=3 -timeout=2m -v
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerLeaseLifecycle$$' -count=1 -timeout=2m -v
+
+remote-policy: agents
+	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerPolicyIsolation$$' -count=3 -timeout=2m -v
 
 stress-broker: agents
 	$(GO) test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m

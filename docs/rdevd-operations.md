@@ -161,3 +161,30 @@ after the final lease expires. The current reaper tick is five seconds, so
 observed reclamation takes the configured `idle_ttl` plus up to one tick and
 process-exit latency. These tests require Linux `/proc` locally and remotely,
 Python 3, and an authorized SSH target; all resources use generated namespaces.
+
+Policy changes made through `policy.grant` are written to a unique 0600 file,
+synced, atomically renamed and directory-synced before success is returned.
+`grant_host` restricts a grant/revoke to that exact host alias; omit it only when
+an operation-wide grant across all targets is intended. Existing operation-wide
+file grants retain that administrator-selected scope. Capability is determined
+by the server: `exec`, `file.read`, `file.write`, `job`, `sync`, `secret`, `fleet`,
+or the operation name for control/administration operations. Old arbitrary
+capability labels (for example `operator` for `exec`) must be migrated to the
+server's classification; request hints cannot choose a different capability.
+
+Responses and owner-scoped audit records carry `policy_digest`, a SHA-256 of
+the policy snapshot used at admission. Revocation affects new admissions;
+already-authorized queued requests finish under their captured decision.
+Policy files must be private regular files no larger than 4 MiB. Null, duplicate
+keys, non-boolean grants and malformed maps fail startup. Errors before rename
+retain the old active snapshot. If rename succeeds but directory durability
+cannot be confirmed, the policy stops admitting requests and preserves the
+possibly committed disk state for administrator recovery instead of overwriting
+it during shutdown. Inspect the private policy file and restart after fixing
+storage health; a failed acknowledgment in this case has an uncertain outcome.
+
+`make remote-policy RDEV_SSH_CONFIG=/path/to/ssh/config` runs three real SSH
+policy tests. Each holds actual remote startup to test a queued decision across
+revocation, SIGKILLs the daemon after grant/revoke acknowledgments, checks exact
+host/project boundaries and capability substitution negatives, and injects a
+real atomic-rename failure without publishing the attempted permission change.

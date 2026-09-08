@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerPolicyIsolation
+    remote_policy_test.go:223: real SSH policy: queued_decision=ba733de29dfc9bef4f3861699c5e332241599a1c6608378eb91053641432d95a revoked_decision=557591ebf3e179919b7a8915db494c2f8011fd8b5906f7150235a8458771cc2f grant_and_revoke_survived_SIGKILL=true exact_host_and_project_isolation=true caller_capability_substitution=denied persistence_failure=rolled_back audit_owner_and_digest=verified
+--- PASS: TestRemoteBrokerPolicyIsolation (1.00s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	0.999s

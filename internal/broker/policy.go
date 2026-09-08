@@ -1,98 +1,335 @@
 package broker
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 )
 
+// Decision is a value captured before queuing. The digest names the complete
+// policy snapshot that authorized this request, even if an administrator changes
+// grants while the request waits for a worker.
 type Decision struct {
-	Allow  bool
-	Reason string
+	Allow      bool   `json:"allow"`
+	Reason     string `json:"reason"`
+	Digest     string `json:"digest"`
+	Capability string `json:"capability,omitempty"`
+	Host       string `json:"host,omitempty"`
 }
+
 type Policy struct {
 	mu     sync.RWMutex
 	grants map[string]map[string]bool
+	path   string
+	digest string
+	failed error
+	write  func(string, map[string]map[string]bool) error
 }
 
-func NewPolicy() *Policy { return &Policy{grants: make(map[string]map[string]bool)} }
-func (p *Policy) Grant(owner, operation string) {
-	p.mu.Lock()
-	if p.grants[owner] == nil {
-		p.grants[owner] = make(map[string]bool)
-	}
-	p.grants[owner][operation] = true
-	p.mu.Unlock()
+func NewPolicy() *Policy {
+	p := &Policy{grants: make(map[string]map[string]bool), write: savePolicy}
+	p.digest = policyDigest(p.grants)
+	return p
 }
-func (p *Policy) Revoke(owner, operation string) {
+
+func policyDigest(grants map[string]map[string]bool) string {
+	data, _ := json.Marshal(grants) // encoding/json sorts string map keys.
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (p *Policy) update(owner, operation string, grant bool) error {
+	if owner == "" || len(owner) > 512 || operation == "" || len(operation) > 2048 {
+		return fmt.Errorf("invalid policy grant")
+	}
 	p.mu.Lock()
-	if operations := p.grants[owner]; operations != nil {
-		delete(operations, operation)
-		if len(operations) == 0 {
-			delete(p.grants, owner)
+	defer p.mu.Unlock()
+	if p.failed != nil {
+		return p.failed
+	}
+	next := make(map[string]map[string]bool, len(p.grants))
+	for key, operations := range p.grants {
+		values := make(map[string]bool, len(operations))
+		for operation, allow := range operations {
+			values[operation] = allow
+		}
+		next[key] = values
+	}
+	if grant {
+		if next[owner] == nil {
+			next[owner] = make(map[string]bool)
+		}
+		next[owner][operation] = true
+	} else {
+		delete(next[owner], operation)
+		if len(next[owner]) == 0 {
+			delete(next, owner)
 		}
 	}
-	p.mu.Unlock()
+	if p.path != "" {
+		if err := p.write(p.path, next); err != nil {
+			var uncertain *policyCommitUncertain
+			if errors.As(err, &uncertain) {
+				p.failed = err
+			}
+			return err
+		}
+	}
+	// A failed persistence operation never publishes a permission change.
+	p.grants = next
+	p.digest = policyDigest(next)
+	return nil
 }
+
+// Grant authorizes an operation across all targets. Administrators should use
+// GrantHost when only one host is intended. Existing files retain their explicit
+// operation-wide grants; target scope is never inferred from a request hint.
+func (p *Policy) Grant(owner, operation string) error  { return p.update(owner, operation, true) }
+func (p *Policy) Revoke(owner, operation string) error { return p.update(owner, operation, false) }
 func (p *Policy) Decide(owner, operation string) Decision {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.grants[owner][operation] {
-		return Decision{Allow: true, Reason: "granted"}
+	return p.decision(p.grants[owner][operation], "", "")
+}
+func (p *Policy) decision(allow bool, capability, host string) Decision {
+	reason := "denied by default"
+	if allow {
+		reason = "granted"
 	}
-	return Decision{Reason: "denied by default"}
+	if p.failed != nil {
+		allow, reason = false, "policy storage unavailable"
+	}
+	return Decision{Allow: allow, Reason: reason, Digest: p.digest, Capability: capability, Host: host}
 }
 
 func capabilityKey(capability, operation string) string {
 	return "@cap:" + capability + "\x00" + operation
 }
-func (p *Policy) GrantCapability(owner, capability, operation string) {
-	p.Grant(owner, capabilityKey(capability, operation))
+func (p *Policy) GrantCapability(owner, capability, operation string) error {
+	if err := validateCapability(capability, operation); err != nil {
+		return err
+	}
+	return p.Grant(owner, capabilityKey(capability, operation))
+}
+func validateCapability(capability, operation string) error {
+	if capability == "" || operation == "" || len(capability) > 128 || len(operation) > 128 || strings.ContainsAny(capability+operation, "\x00\r\n") {
+		return fmt.Errorf("invalid capability or operation")
+	}
+	return nil
 }
 func (p *Policy) DecideCapability(owner, capability, operation string) Decision {
 	return p.Decide(owner, capabilityKey(capability, operation))
 }
 
-func (p *Policy) Save(path string) error {
+func hostGrantKey(host, capability, operation string) string {
+	data, _ := json.Marshal([3]string{host, capability, operation})
+	return "@host:" + string(data)
+}
+func (p *Policy) GrantHost(owner, host, capability, operation string) error {
+	if err := validateHostGrant(host, capability, operation); err != nil {
+		return err
+	}
+	return p.Grant(owner, hostGrantKey(host, capability, operation))
+}
+func (p *Policy) RevokeHost(owner, host, capability, operation string) error {
+	if err := validateHostGrant(host, capability, operation); err != nil {
+		return err
+	}
+	return p.Revoke(owner, hostGrantKey(host, capability, operation))
+}
+func validateHostGrant(host, capability, operation string) error {
+	if host == "" || len(host) > 512 || strings.ContainsAny(host, "\x00\r\n") {
+		return fmt.Errorf("invalid grant host")
+	}
+	return validateCapability(capability, operation)
+}
+
+// CapabilityForOperation is a server-owned classification. A caller cannot
+// substitute an unrelated granted capability for the operation being executed.
+func CapabilityForOperation(operation string) string {
+	switch operation {
+	case "exec":
+		return "exec"
+	case "read_file", "list":
+		return "file.read"
+	case "write_file":
+		return "file.write"
+	case "job_start", "job_list", "job_status", "job_logs", "job_stop", "job_wait", "job_rm":
+		return "job"
+	case "sync.push", "sync.pull", "sync.delete":
+		return "sync"
+	case "secret.set", "secret.delete", "secret.use":
+		return "secret"
+	case "fleet.plan", "fleet.execute", "fleet.approve":
+		return "fleet"
+	default:
+		return operation
+	}
+}
+func (p *Policy) DecideRequest(owner, operation, host string) Decision {
+	capability := CapabilityForOperation(operation)
 	p.mu.RLock()
-	data, err := json.Marshal(p.grants)
-	p.mu.RUnlock()
+	defer p.mu.RUnlock()
+	grants := p.grants[owner]
+	allow := grants[operation] || grants[capabilityKey(capability, operation)]
+	if host != "" {
+		allow = allow || grants[hostGrantKey(host, capability, operation)]
+	}
+	return p.decision(allow, capability, host)
+}
+
+type policyCommitUncertain struct{ cause error }
+
+func (e *policyCommitUncertain) Error() string {
+	return "policy commit durability uncertain; administrator recovery required"
+}
+func (e *policyCommitUncertain) Unwrap() error { return e.cause }
+
+func savePolicy(path string, grants map[string]map[string]bool) error {
+	data, err := json.Marshal(grants)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if len(data) > 4<<20 {
+		return fmt.Errorf("policy exceeds size limit")
+	}
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".rdev-policy-*")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	defer os.Remove(f.Name())
+	if _, err = f.Write(data); err != nil {
+		f.Close()
 		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return &policyCommitUncertain{cause: err}
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return &policyCommitUncertain{cause: err}
 	}
 	return nil
 }
+func (p *Policy) Save(path string) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	// Never overwrite a possibly committed snapshot during shutdown.
+	if p.failed != nil {
+		return p.failed
+	}
+	return savePolicy(path, p.grants)
+}
 
+// parsePolicy rejects ambiguous duplicate keys as well as null, oversized,
+// malformed and non-boolean grants. No partial map is published on error.
+func parsePolicy(data []byte) (map[string]map[string]bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, fmt.Errorf("policy requires an object")
+	}
+	grants := make(map[string]map[string]bool)
+	for dec.More() {
+		token, err = dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		owner, ok := token.(string)
+		if !ok || owner == "" || len(owner) > 512 {
+			return nil, fmt.Errorf("invalid policy owner")
+		}
+		if _, exists := grants[owner]; exists {
+			return nil, fmt.Errorf("duplicate policy owner")
+		}
+		token, err = dec.Token()
+		if err != nil || token != json.Delim('{') {
+			return nil, fmt.Errorf("policy owner requires an object")
+		}
+		operations := make(map[string]bool)
+		for dec.More() {
+			token, err = dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			operation, ok := token.(string)
+			if !ok || operation == "" || len(operation) > 2048 {
+				return nil, fmt.Errorf("invalid policy operation")
+			}
+			if _, exists := operations[operation]; exists {
+				return nil, fmt.Errorf("duplicate policy operation")
+			}
+			token, err = dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			allow, ok := token.(bool)
+			if !ok {
+				return nil, fmt.Errorf("policy grant requires a boolean")
+			}
+			operations[operation] = allow
+		}
+		token, err = dec.Token()
+		if err != nil || token != json.Delim('}') || len(operations) == 0 {
+			return nil, fmt.Errorf("invalid policy operations")
+		}
+		grants[owner] = operations
+	}
+	token, err = dec.Token()
+	if err != nil || token != json.Delim('}') {
+		return nil, fmt.Errorf("invalid policy object")
+	}
+	if _, err = dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("policy requires one object")
+	}
+	return grants, nil
+}
 func (p *Policy) Load(path string) error {
-	data, err := os.ReadFile(path)
+	data, err := ReadPrivateFile(path, 4<<20)
 	if err != nil {
 		return err
 	}
-	var grants map[string]map[string]bool
-	if err := json.Unmarshal(data, &grants); err != nil {
+	grants, err := parsePolicy(data)
+	if err != nil {
 		return err
 	}
-	for owner, operations := range grants {
-		if owner == "" || len(owner) > 512 || len(operations) == 0 {
-			return fmt.Errorf("invalid policy owner")
-		}
-		for operation := range operations {
-			if operation == "" || len(operation) > 256 {
-				return fmt.Errorf("invalid policy operation")
-			}
-		}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.grants = grants
+	p.digest = policyDigest(grants)
+	p.failed = nil
+	return nil
+}
+func (p *Policy) ConfigurePersistence(path string) error {
+	// Configuration is startup-only, before callers can mutate grants.
+	if err := p.Load(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	p.mu.Lock()
-	p.grants = grants
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	if err := savePolicy(path, p.grants); err != nil {
+		return err
+	}
+	p.path = path
 	return nil
 }

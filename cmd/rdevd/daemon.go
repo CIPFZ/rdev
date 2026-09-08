@@ -132,7 +132,7 @@ func runDaemon(args []string) error {
 	if err := service.ReloadConfig(cfg); err != nil {
 		return err
 	}
-	if err := service.LoadPolicy(policyPath); err != nil && !os.IsNotExist(err) {
+	if err := service.ConfigurePolicy(policyPath); err != nil {
 		return fmt.Errorf("policy load failed: %w", err)
 	}
 	policyLoaded = true

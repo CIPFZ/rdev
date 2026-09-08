@@ -256,8 +256,7 @@ func (s *Service) Grant(owner Owner, operation string) error {
 	if err := owner.Validate(); err != nil {
 		return err
 	}
-	s.policy.Grant(owner.Key(), operation)
-	return nil
+	return s.policy.Grant(owner.Key(), operation)
 }
 func (s *Service) GrantCapability(owner Owner, capability, operation string) error {
 	if err := owner.Validate(); err != nil {
@@ -266,15 +265,13 @@ func (s *Service) GrantCapability(owner Owner, capability, operation string) err
 	if capability == "" || operation == "" {
 		return errors.New("capability and operation required")
 	}
-	s.policy.GrantCapability(owner.Key(), capability, operation)
-	return nil
+	return s.policy.GrantCapability(owner.Key(), capability, operation)
 }
 func (s *Service) Revoke(owner Owner, operation string) error {
 	if err := owner.Validate(); err != nil {
 		return err
 	}
-	s.policy.Revoke(owner.Key(), operation)
-	return nil
+	return s.policy.Revoke(owner.Key(), operation)
 }
 func (s *Service) RevokeCapability(owner Owner, capability, operation string) error {
 	if err := owner.Validate(); err != nil {
@@ -283,8 +280,30 @@ func (s *Service) RevokeCapability(owner Owner, capability, operation string) er
 	if capability == "" || operation == "" {
 		return errors.New("capability and operation required")
 	}
-	s.policy.Revoke(owner.Key(), capabilityKey(capability, operation))
-	return nil
+	return s.policy.Revoke(owner.Key(), capabilityKey(capability, operation))
+}
+func (s *Service) ConfigurePolicy(path string) error { return s.policy.ConfigurePersistence(path) }
+func (s *Service) DecideRequest(owner Owner, operation, host string) Decision {
+	if err := owner.Validate(); err != nil {
+		return Decision{Reason: err.Error()}
+	}
+	return s.policy.DecideRequest(owner.Key(), operation, host)
+}
+func (s *Service) GrantHost(owner Owner, host, capability, operation string, revoke bool) error {
+	if err := owner.Validate(); err != nil {
+		return err
+	}
+	expected := CapabilityForOperation(operation)
+	if capability == "" {
+		capability = expected
+	}
+	if capability != expected {
+		return errors.New("capability does not match operation")
+	}
+	if revoke {
+		return s.policy.RevokeHost(owner.Key(), host, capability, operation)
+	}
+	return s.policy.GrantHost(owner.Key(), host, capability, operation)
 }
 func (s *Service) LoadPolicy(path string) error { return s.policy.Load(path) }
 func (s *Service) SavePolicy(path string) error { return s.policy.Save(path) }

@@ -259,3 +259,45 @@ Implementation commit: `2a61674dfeb852338f3b0eb08e354401220a7e40`
 The one-mutation observation covers this transport retry scenario. It does not
 prove broker crash/restart mutation recovery, detached job wait shutdown, or
 sustained quota fairness. Those gates remain open, as does independent review.
+
+## Durable scoped policy and stable admission decisions
+
+The policy follow-up adds exact-host grants, server-selected capability
+classification, a digest of each immutable decision snapshot, and durable
+administrative grant/revoke before acknowledgement. Existing operation-wide
+administrator grants remain operation-wide. A client-supplied capability can no
+longer select an unrelated policy entry. Policy load is bounded/private and
+rejects null, duplicate keys and malformed grant values instead of accepting a
+nil map or ambiguous duplicate authorization.
+
+`TestRemoteBrokerPolicyIsolation` uses real authenticated frontend processes,
+the daemon, OpenSSH and remote agents. An SSH startup barrier holds wire calls
+while their admission audit records capture a policy digest; an administrator
+revokes the pending owner's host grant. The queued call completes with the old
+digest and later calls are denied with the new digest. Both acknowledged grant
+and revoke survive actual daemon SIGKILL/restart, without a graceful-save path.
+A narrowly granted owner reaches only its permitted host alias; another project
+with the same client ID and an owner holding an unrelated capability are denied.
+Ungranted secret/job/Fleet operations are denied at the policy boundary; this is
+not proof of full secret/job isolation for partially authorized principals.
+A real target-directory obstruction makes atomic rename fail; the RPC reports
+failure and the old active snapshot remains intact. The final process counts
+verify one shared SSH child and one remote agent after crash recovery.
+
+A separate root review identified the distinct late directory-sync failure:
+the rename may already have committed even if durability cannot be confirmed.
+The implementation latches a fail-closed policy state and refuses shutdown save
+in that case. A fault-injection unit test performs the actual replacement and
+then reports an uncertain durability result; it verifies no stale grant remains
+usable and recovery reads the preserved replacement. This late-sync injection
+is a unit-level fault test, not an actual remote filesystem power-loss claim.
+
+Host-file edits still require daemon restart. Full secret resource grants,
+immutable operation/target approval binding, job ownership crash windows,
+request/operation/approval audit correlation and independent review remain open.
+
+The [initial real policy run](evidence/phase5/2026-09-08/policy-runtime-initial.log)
+and [final targeted tests](evidence/phase5/2026-09-08/policy-targeted.log) passed.
+Authorization now precedes job registry lookup, so an owner lacking the job
+capability receives the same policy denial independently of a supplied job ID.
+The final committed-source verification additionally exercises that negative.
