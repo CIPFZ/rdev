@@ -1,0 +1,3 @@
+ok  	github.com/CIPFZ/rdev/internal/client	1.569s
+ok  	github.com/CIPFZ/rdev/internal/broker	2.179s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	4.808s

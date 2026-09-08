@@ -246,3 +246,16 @@ SSH cancellation and grace evidence; full job wait/shutdown behavior, prolonged
 QoS pressure, and independent review remain separate unfinished work.
 
 [Targeted final-source tests](evidence/phase5/2026-09-08/lifecycle-targeted.log) passed for `internal/client`, `internal/broker`, and `cmd/rdevd`.
+
+## Committed-source verification: 2a61674
+
+Implementation commit: `2a61674dfeb852338f3b0eb08e354401220a7e40`
+(`fix: isolate broker reconnect cancellation and idle reclamation`).
+
+- [Full check and real lifecycle verification](evidence/phase5/2026-09-08/committed-check-2a61674.log): `make check remote-lifecycle` passed against the clean commit. Three retry/cancellation runs observed 10.255–10.630 ms from the cancel trigger to the broker's dispatch-error audit event, one survivor mutation, preserved foreground peer execution and preserved shared transport. The six-cycle lease run took 65.358 seconds; cleanup took 4617.027–4823.669 ms with 250 ms grace and a 5 s reaper tick. All six generations ended with zero SSH children and remote agents.
+- [Changed-package race tests](evidence/phase5/2026-09-08/committed-race-2a61674.log): `go test -race ./internal/client ./internal/broker ./cmd/rdevd -count=1` passed.
+- [Real daemon race integration](evidence/phase5/2026-09-08/remote-race-2a61674.log): the retry/cancellation test also passed with both the frontend test binary and actual daemon built using `-race`. Daemon SHA-256: `fde893d1dbdb633db48ca31d82cf5a436d2ca4cd4818d33008be62c9da30a07d`. Cancellation measurements were 10.508–10.771 ms; no race or other-owner interruption occurred.
+
+The one-mutation observation covers this transport retry scenario. It does not
+prove broker crash/restart mutation recovery, detached job wait shutdown, or
+sustained quota fairness. Those gates remain open, as does independent review.

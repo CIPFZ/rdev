@@ -72,3 +72,10 @@ committed-source `make check remote-session-benchmark` (three real SSH runs)
 and changed-package race checks. The runtime evidence links the logs and
 measurements; the remaining routing, policy, fairness and lifecycle gates
 retain their In progress status.
+
+Cancellation/reaping follow-up `2a61674dfeb852338f3b0eb08e354401220a7e40`
+passed committed-source `make check remote-lifecycle`, changed-package race,
+and a real SSH integration using a race-instrumented daemon. P5-05/P5-11 now
+have actual retry, other-owner foreground execution, normal-exit/SIGKILL lease,
+and idle-reclamation evidence. Detached job wait/shutdown, sustained QoS and
+independent review remain unfinished; no overall Complete claim is made.

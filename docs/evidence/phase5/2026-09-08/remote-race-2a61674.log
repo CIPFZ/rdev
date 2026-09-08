@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerRetryCancellation
+    remote_lifecycle_test.go:309: real SSH retry/cancellation: old_agent=763889 replacement_agent=763929 waiter_cancel_ms=10.538 retry_cancel_ms=10.508 foreground_cancel_ms=10.771 mutation_executions=1 survivor_exec=passed shared_transport_preserved=true
+--- PASS: TestRemoteBrokerRetryCancellation (4.55s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	4.568s
