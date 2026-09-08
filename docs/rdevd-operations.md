@@ -749,10 +749,50 @@ The archive rejects new versions at 256 versions / 1 MiB per owner and
 4096 versions / 16 MiB globally; serialized state is capped at 20 MiB. It never
 automatically drops old output protection. Safe archive retirement and extended
 retention/storage-failure/upgrade matrices remain acceptance work, along with
-shared secret file imports and explicit declarative-secret principal delegation.
+explicit declarative-secret principal delegation.
 
 `make remote-secrets` verifies actual CLI/MCP registration, owner/host/use-grant
 negatives, SSH environment hashes and redaction, expanded-byte accounting and
 cancel cleanup, version-bound approvals, detached job output after deletion and
 SIGKILL, mutation identity reuse, real storage obstruction, missing-state startup
 denial, target replacement/return retirement and low-sensitivity metadata.
+
+
+## Import a shared credential from a remote file
+
+`rdev secret set_from_file HOST NAME REMOTE_PATH` and MCP `rdev_secrets` with
+`action: "set_from_file"` read the selected remote file through the shared bulk
+connection. The submitted parameters include a name and path, without a value.
+Both `secret.set_from_file` (capability `secret`) and `read_file` (capability
+`file.read`) must be authorized for that principal and host in one policy
+snapshot. Set `RDEV_APPROVAL_TOKEN` for CLI, or `approval_token` for MCP.
+
+The administrator's approval request uses operation `secret.set_from_file` and
+`secret: {"name":"token","path":"~/credential"}`. Approval creation and token
+consumption each read a bounded source snapshot with the target principal's
+remote identity. The HMAC binds the path, validated value, prior credential
+version, owner and host/session target. Changing the path or effective value
+invalidates the approval without consuming the original token. After successful
+consumption the selected value is frozen before mutation admission. Source reads
+are separately scheduled/accounted as bulk work, including decoded payload bytes
+that never enter a frontend response, and respond to frontend
+cancellation; they do not close the shared base transport.
+
+Reads request at most 64 KiB plus one byte, reject missing, incomplete, oversized,
+binary, invalid UTF-8 or short values, and trim surrounding whitespace as the
+existing remote-secret loader does. Repeated import reads the raw validated
+source even when that value is already registered for output redaction. The value
+is never returned to CLI/MCP and never enters audit or mutation records; successful
+imports persist in the same private credential archive as inline registrations.
+A failed or canceled probe leaves the registry unchanged. As with inline set,
+`RDEV_OPERATION_ID`/MCP `operation_id` support crash-outcome queries without
+silently repeating an import.
+
+`make remote-secret-import` exercises actual CLI/MCP calls, split import/read
+permissions, missing/short/binary/64 KiB/oversized sources, path/content
+substitution, repeated raw reads, project isolation, a held real SSH source
+response canceled by its frontend, preservation of the other project's base
+agent, and daemon SIGKILL recovery. Full batch and committed validation are
+recorded in the Phase5 runtime document. Declarative principal delegation, secret
+archive retirement, mixed archive load, broader storage/upgrade cases and shared
+sync/session workflows remain open.

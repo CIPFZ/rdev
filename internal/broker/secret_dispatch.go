@@ -8,7 +8,7 @@ import (
 )
 
 func isSecretMutation(operation string) bool {
-	return operation == "secret.set" || operation == "secret.delete"
+	return operation == "secret.set" || operation == "secret.delete" || operation == "secret.set_from_file"
 }
 
 func (s *Service) SecretList(req Request) ([]SecretDescriptor, error) {

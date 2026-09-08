@@ -170,7 +170,7 @@ func CapabilityForOperation(operation string) string {
 		return "job"
 	case "sync.push", "sync.pull", "sync.delete":
 		return "sync"
-	case "secret.set", "secret.delete", "secret.list", "secret.use":
+	case "secret.set", "secret.delete", "secret.list", "secret.use", "secret.set_from_file":
 		return "secret"
 	case "fleet.plan", "fleet.execute", "fleet.approve":
 		return "fleet"
@@ -348,7 +348,7 @@ func (p *Policy) DecideWireRequest(owner, operation, host string, useSecrets boo
 	allowed := func(op, cap string) bool {
 		return grants[op] || grants[capabilityKey(cap, op)] || host != "" && grants[hostGrantKey(host, cap, op)]
 	}
-	return p.decision(allowed(operation, capability) && (!useSecrets || allowed("secret.use", "secret")), capability, host)
+	return p.decision(allowed(operation, capability) && (!useSecrets || allowed("secret.use", "secret")) && (operation != "secret.set_from_file" || allowed("read_file", "file.read")), capability, host)
 }
 func (s *Service) DecideBrokerRequest(req Request) Decision {
 	if err := req.Owner.Validate(); err != nil {

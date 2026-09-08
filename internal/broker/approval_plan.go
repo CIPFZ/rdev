@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,14 +23,15 @@ type ApprovalSpec struct {
 }
 
 type ApprovalPlan struct {
-	resolvedWire  *proto.Request
-	ApprovalID    string `json:"-"`
-	Owner         Owner  `json:"owner"`
-	Operation     string `json:"operation"`
-	Host          string `json:"host"`
-	TargetDigest  string `json:"target_digest"`
-	RequestDigest string `json:"request_digest"`
-	PolicyDigest  string `json:"policy_digest"`
+	resolvedWire   *proto.Request
+	resolvedSecret *SecretParams
+	ApprovalID     string `json:"-"`
+	Owner          Owner  `json:"owner"`
+	Operation      string `json:"operation"`
+	Host           string `json:"host"`
+	TargetDigest   string `json:"target_digest"`
+	RequestDigest  string `json:"request_digest"`
+	PolicyDigest   string `json:"policy_digest"`
 }
 
 func RequiresApproval(req Request) bool {
@@ -41,13 +43,16 @@ func RequiresApproval(req Request) bool {
 		}
 	}
 	switch req.Operation {
-	case "sync.push", "sync.delete", "secret.set", "secret.delete", "fleet.execute":
+	case "sync.push", "sync.delete", "secret.set", "secret.delete", "secret.set_from_file", "fleet.execute":
 		return true
 	}
 	return req.Risk
 }
 
 func (s *Service) PlanApproval(spec ApprovalSpec, decision Decision) (ApprovalPlan, error) {
+	return s.PlanApprovalContext(context.Background(), spec, decision)
+}
+func (s *Service) PlanApprovalContext(ctx context.Context, spec ApprovalSpec, decision Decision) (ApprovalPlan, error) {
 	if err := spec.Owner.Validate(); err != nil {
 		return ApprovalPlan{}, err
 	}
@@ -62,11 +67,34 @@ func (s *Service) PlanApproval(spec ApprovalSpec, decision Decision) (ApprovalPl
 		if err != nil {
 			return ApprovalPlan{}, errors.New("secret host unavailable")
 		}
+		var resolved *SecretParams
+		if spec.Operation == "secret.set_from_file" {
+			if err := ValidateRoute(Request{Operation: spec.Operation, Host: spec.Host, Secret: spec.Secret}); err != nil {
+				return ApprovalPlan{}, err
+			}
+			resolved = &SecretParams{Name: spec.Secret.Name, Path: spec.Secret.Path}
+			_, err := s.DispatchScheduled(ctx, spec.Host, spec.Owner.Key(), LaneBulk, func(readCtx context.Context) (*proto.Response, error) {
+				release, err := s.Pool.dispatchLease(readCtx, spec.Host, LaneBulk)
+				if err != nil {
+					return nil, err
+				}
+				defer release()
+				value, err := s.client.ReadPrincipalSecret(readCtx, spec.Host, target, spec.Owner.ClientID, spec.Owner.ProjectID, spec.Secret.Path)
+				if err == nil {
+					resolved.Value = value
+				}
+				return nil, err
+			})
+			if err != nil {
+				return ApprovalPlan{}, err
+			}
+			spec.Secret = resolved
+		}
 		digest, err := s.Secrets.Plan(spec.Owner.Key(), spec.Host, target, spec.Operation, spec.Secret)
 		if err != nil {
 			return ApprovalPlan{}, err
 		}
-		return ApprovalPlan{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, TargetDigest: target, RequestDigest: digest, PolicyDigest: decision.Digest}, nil
+		return ApprovalPlan{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, TargetDigest: target, RequestDigest: digest, PolicyDigest: decision.Digest, resolvedSecret: resolved}, nil
 	}
 	if spec.Secret != nil {
 		return ApprovalPlan{}, errors.New("unexpected secret approval parameters")
@@ -112,8 +140,11 @@ func (s *Service) PlanApproval(spec ApprovalSpec, decision Decision) (ApprovalPl
 }
 
 func (s *Service) IssueApproval(spec ApprovalSpec) (Approval, error) {
+	return s.IssueApprovalContext(context.Background(), spec)
+}
+func (s *Service) IssueApprovalContext(ctx context.Context, spec ApprovalSpec) (Approval, error) {
 	decision := s.DecideBrokerRequest(Request{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, Wire: spec.Wire})
-	plan, err := s.PlanApproval(spec, decision)
+	plan, err := s.PlanApprovalContext(ctx, spec, decision)
 	if err != nil {
 		return Approval{}, err
 	}
@@ -130,6 +161,7 @@ func (s *Service) IssueApproval(spec ApprovalSpec) (Approval, error) {
 	// solely to the request that eventually consumes the token.
 	storedPlan := plan
 	storedPlan.resolvedWire = nil
+	storedPlan.resolvedSecret = nil
 	approval.Plan = &storedPlan
 	s.approvalMu.Lock()
 	defer s.approvalMu.Unlock()
@@ -147,7 +179,10 @@ func (s *Service) IssueApproval(spec ApprovalSpec) (Approval, error) {
 }
 
 func (s *Service) AuthorizeApproval(req Request, decision Decision) (ApprovalPlan, error) {
-	plan, err := s.PlanApproval(ApprovalSpec{Owner: req.Owner, Operation: req.Operation, Host: req.Host, Wire: req.Wire, Secret: req.Secret}, decision)
+	return s.AuthorizeApprovalContext(context.Background(), req, decision)
+}
+func (s *Service) AuthorizeApprovalContext(ctx context.Context, req Request, decision Decision) (ApprovalPlan, error) {
+	plan, err := s.PlanApprovalContext(ctx, ApprovalSpec{Owner: req.Owner, Operation: req.Operation, Host: req.Host, Wire: req.Wire, Secret: req.Secret}, decision)
 	if err != nil {
 		return ApprovalPlan{}, err
 	}
@@ -172,12 +207,19 @@ func ApprovalReference(token string) string {
 // ApplyApprovedWire freezes the validated secret snapshot before admission.
 // Later rotation never changes the already approved command or its job digest.
 func ApplyApprovedWire(req *Request, plan ApprovalPlan) {
+	if plan.resolvedSecret != nil {
+		req.Secret = plan.resolvedSecret
+	}
 	if plan.resolvedWire != nil {
 		req.Wire = plan.resolvedWire
 	}
 }
 
 func (p ApprovalPlan) ExpandedRequestBytes() int64 {
+	if p.resolvedSecret != nil {
+		data, _ := json.Marshal(p.resolvedSecret)
+		return int64(len(data))
+	}
 	if p.resolvedWire == nil {
 		return 0
 	}

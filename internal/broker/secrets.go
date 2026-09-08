@@ -31,6 +31,7 @@ var errSecretUnavailable = errors.New("secret unavailable for this principal and
 var errSecretStorage = errors.New("secret storage unavailable; restart required")
 
 type SecretParams struct {
+	Path  string `json:"path,omitempty"`
 	Name  string `json:"name,omitempty"`
 	Value string `json:"value,omitempty"`
 }
@@ -84,14 +85,14 @@ func validSecretName(s string) bool {
 	return true
 }
 func validateSecretParams(op string, p *SecretParams) error {
-	if op != "secret.set" && op != "secret.delete" && op != "secret.list" {
+	if op != "secret.set" && op != "secret.delete" && op != "secret.list" && op != "secret.set_from_file" {
 		return errors.New("unsupported secret operation")
 	}
 	if p == nil {
 		return errors.New("secret parameters required")
 	}
 	if op == "secret.list" {
-		if p.Name != "" || p.Value != "" {
+		if p.Name != "" || p.Value != "" || p.Path != "" {
 			return errors.New("secret list does not accept a name or value")
 		}
 		return nil
@@ -99,7 +100,14 @@ func validateSecretParams(op string, p *SecretParams) error {
 	if !validSecretName(p.Name) {
 		return errors.New("invalid secret name")
 	}
-	if op == "secret.set" {
+	if op == "secret.set_from_file" {
+		if len(p.Path) == 0 || len(p.Path) > 4096 || strings.ContainsRune(p.Path, 0) {
+			return errors.New("invalid remote secret path")
+		}
+	} else if p.Path != "" {
+		return errors.New("unexpected secret source path")
+	}
+	if op == "secret.set" || op == "secret.set_from_file" {
 		if len(p.Value) < secrets.MinValueBytes || len(p.Value) > maxSecretValue || strings.ContainsRune(p.Value, 0) || !utf8.ValidString(p.Value) {
 			return errors.New("secret value must contain 6 to 65536 bytes without NUL")
 		}
@@ -274,7 +282,7 @@ func (r *SecretRegistry) Apply(owner, host, target, operation string, p *SecretP
 			next.Records[i].Active = false
 		}
 	}
-	if operation == "secret.set" {
+	if operation == "secret.set" || operation == "secret.set_from_file" {
 		version := make([]byte, 32)
 		if _, err := rand.Read(version); err != nil {
 			return errSecretStorage
@@ -290,7 +298,7 @@ func (r *SecretRegistry) Apply(owner, host, target, operation string, p *SecretP
 	if err := r.persist(path, next); err != nil {
 		return fail()
 	}
-	if operation == "secret.set" {
+	if operation == "secret.set" || operation == "secret.set_from_file" {
 		if err := r.protect(next.Records[len(next.Records)-1]); err != nil {
 			return fail()
 		}

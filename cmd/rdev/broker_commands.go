@@ -132,6 +132,11 @@ func brokerSecret(ctx context.Context, args []string) error {
 		if len(args) != 2 {
 			return errors.New("usage: rdev secret list HOST")
 		}
+	case "set_from_file":
+		if len(args) != 4 {
+			return errors.New("usage: rdev secret set_from_file HOST NAME REMOTE_PATH")
+		}
+		req.Secret.Name, req.Secret.Path = args[2], args[3]
 	case "set", "delete":
 		if len(args) != 3 {
 			return errors.New("usage: rdev secret set|delete HOST NAME")

@@ -384,6 +384,7 @@ func (s *Scheduler) scheduleLocked() {
 }
 func (s *Scheduler) run(item *scheduledItem) {
 	started := time.Now()
+	var observedPayload observe.BulkPayload
 	var resp *proto.Response
 	err := item.ctx.Err()
 	if err == nil {
@@ -391,19 +392,19 @@ func (s *Scheduler) run(item *scheduledItem) {
 		if s.pool != nil {
 			ctx = context.WithValue(ctx, hostPoolLeaseKey{}, hostPoolBinding{pool: s.pool, host: item.host})
 		}
-		resp, err = item.fn(ctx)
+		resp, err = item.fn(observe.WithBulkPayload(ctx, &observedPayload))
 	}
 	item.cancel()
 	if item.releaseHost != nil {
 		item.releaseHost()
 	}
 	s.mu.Lock()
-	if item.lane == LaneBulk && resp != nil {
-		var payload uint64
-		if resp.Read != nil {
+	payload, observed := observedPayload.Snapshot()
+	if item.lane == LaneBulk && (resp != nil || observed) {
+		if !observed && resp.Read != nil {
 			payload += uint64(len(resp.Read.Content))
 		}
-		if resp.Cat != nil && resp.Cat.BytesWritten > 0 {
+		if !observed && resp.Cat != nil && resp.Cat.BytesWritten > 0 {
 			payload += uint64(resp.Cat.BytesWritten)
 		}
 		st := s.statLocked(item.owner)

@@ -1456,3 +1456,49 @@ and [corrected runtime](evidence/phase5/2026-09-09/secrets-runtime-corrected.log
 Only passing final behavior is counted as evidence. Missing routes/delegation,
 archive retirement and load/storage/upgrade matrices, independent review and
 macOS runtime keep the overall Phase5/Multi Agent Gate In progress.
+
+
+## Remote shared secret file import implementation
+
+`secret.set_from_file` is backed by an actual principal-bound bulk source read.
+Both import and file-read permission are captured in one policy snapshot.
+Approval issuance and consumption each read the selected source; the private
+HMAC binds path, normalized validated value and prior random secret version.
+The value remains absent from approval records and frontend inputs/results;
+successful imports use the existing private persistent secret archive and durable
+local mutation identity. Frontend cancellation reaches both approval/source reads.
+
+The client read path preserves the remote hashed client/project identity,
+requires negotiated v3, caps reads at 64 KiB plus one byte, rejects incomplete,
+oversized/binary/short content, and suppresses prospective-value errors. Repeat
+imports bypass output redaction only inside this admitted path so a previously
+registered value is not replaced by its display marker before digest validation.
+
+Implementing-agent review found that an internal read returning no frontend
+response could bypass the existing payload admission meter. A count-only context
+observer now charges decoded source bytes, including data rejected by secret
+validation. Three real SSH runs verified the exact untrimmed source byte count
+and zero inherited payload for another project. Existing lane byte accounting
+still records the underlying protocol frames. The transparent test relay waits
+for normal EOF completion and only terminates the child on a broken output pipe.
+
+The targeted runtime uses real CLI/MCP processes and SSH sources for permission
+negatives, missing/short/binary/64 KiB/oversized boundaries, path/content changes
+without consuming a valid token, repeat import, project isolation, cancellation
+with a source response held, the same other-owner base PID, SIGKILL recovery and
+exclusion of source paths/values from flushed audit and mutation records.
+
+Full check, repository race and real secret/approval/retry/lease/mutation
+regressions passed before the payload-meter correction. Final changed-package
+race and a race daemon import/secret/approval suite then passed (11.640 seconds).
+The race artifact SHA-256 is
+`c13d95b783942cb5c16773d746d66093c1a89f7374f36f40e328f384dba796d4`.
+An additional final audit-flush assertion and committed-source validation follow.
+No independent external review is claimed. Declarative delegation, safe archive
+retirement, populated-archive load/storage/upgrade matrices, shared sync/session,
+macOS and independent review remain open; no additional Complete label is added.
+
+
+The final actual race-daemon import scenario, including an owner audit-query
+durability barrier and checks that import records exist without source paths or
+values, passed in 3.694 seconds. Committed-source full verification follows.

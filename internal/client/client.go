@@ -569,7 +569,11 @@ func (c *Client) loadHostSecrets(ctx context.Context, resolved session.ResolvedH
 // under the existing immutable identity lease so it can validate and register
 // the value before any caller-visible projection occurs.
 func (c *Client) doRawOnConnection(ctx context.Context, conn remoteConnection, request *proto.Request) (*proto.Response, error) {
-	if conn == nil || request == nil || c.callerIDErr != nil || c.callerID == "" {
+	return c.doRawOnConnectionAs(ctx, conn, request, c.callerID)
+}
+
+func (c *Client) doRawOnConnectionAs(ctx context.Context, conn remoteConnection, request *proto.Request, callerID string) (*proto.Response, error) {
+	if conn == nil || request == nil || c.callerIDErr != nil || c.callerID == "" || callerID == "" {
 		return nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
 	}
 	descriptor, err := proto.RequireOperation(request.Op)
@@ -587,7 +591,7 @@ func (c *Client) doRawOnConnection(ctx context.Context, conn remoteConnection, r
 			return nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
 		}
 		request.OperationID = operationID
-		request.ClientID = c.callerID
+		request.ClientID = callerID
 	} else {
 		request.OperationID = ""
 		request.ClientID = ""

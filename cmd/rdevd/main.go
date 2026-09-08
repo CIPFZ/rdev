@@ -290,7 +290,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				}
 			}
 		}
-		if req.Operation == "secret.set" || req.Operation == "secret.delete" {
+		if req.Operation == "secret.set" || req.Operation == "secret.delete" || req.Operation == "secret.set_from_file" {
 			if req.OperationID == "" {
 				req.OperationID, refErr = proto.NewOperationID()
 			}
@@ -306,7 +306,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				recordResult("request_rejected")
 				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "approval_spec required"})
 			} else {
-				approval, err := service.IssueApproval(*req.ApprovalSpec)
+				approval, err := service.IssueApprovalContext(requestCtx, *req.ApprovalSpec)
 				if err != nil {
 					recordResult("request_rejected")
 					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
@@ -321,7 +321,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		var approvedTarget string
 		var approvedPlan broker.ApprovalPlan
 		if broker.RequiresApproval(req) {
-			plan, err := service.AuthorizeApproval(req, decision)
+			plan, err := service.AuthorizeApprovalContext(requestCtx, req, decision)
 			if err != nil {
 				service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "approval_denied", Result: "approval_invalid"})
 				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
@@ -357,7 +357,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			endRequest()
 			continue
 		}
-		if req.Operation == "secret.set" || req.Operation == "secret.delete" {
+		if req.Operation == "secret.set" || req.Operation == "secret.delete" || req.Operation == "secret.set_from_file" {
 			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
 			mutation, err := service.DispatchSecretMutation(requestCtx, req, approvedPlan)
 			result := "completed"

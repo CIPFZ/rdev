@@ -10,13 +10,21 @@ import (
 // changes or transport acquisition. A grant cannot create an absent handler or
 // turn a host-limited administration grant into global authority.
 func ValidateRoute(req Request) error {
-	if req.Secret != nil && req.Operation != "secret.set" && req.Operation != "secret.delete" && req.Operation != "secret.list" {
+	if req.Secret != nil && req.Operation != "secret.set" && req.Operation != "secret.delete" && req.Operation != "secret.list" && req.Operation != "secret.set_from_file" {
 		return errors.New("unexpected secret parameters")
 	}
 	switch req.Operation {
-	case "secret.set", "secret.delete", "secret.list":
+	case "secret.set", "secret.delete", "secret.list", "secret.set_from_file":
 		if req.Wire != nil || req.Host == "" {
 			return errors.New("secret operation requires an exact host without wire parameters")
+		}
+		if req.Operation == "secret.set_from_file" {
+			if req.Secret == nil || req.Secret.Value != "" {
+				return errors.New("file import requires source parameters without an inline value")
+			}
+			validation := *req.Secret
+			validation.Value = "validation-only"
+			return validateSecretParams(req.Operation, &validation)
 		}
 		return validateSecretParams(req.Operation, req.Secret)
 	case "status", "pool.health", "audit.health", "audit_query":

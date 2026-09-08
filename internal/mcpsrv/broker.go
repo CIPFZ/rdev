@@ -282,7 +282,8 @@ func callBroker(ctx context.Context, socket string, owner broker.Owner, req brok
 
 func registerBrokerSecrets(s *mcp.Server, socket string, owner broker.Owner) {
 	type secretInput struct {
-		Action        string `json:"action" jsonschema:"set, delete or list"`
+		Action        string `json:"action" jsonschema:"set, set_from_file, delete or list"`
+		Path          string `json:"path,omitempty"`
 		Host          string `json:"host"`
 		Name          string `json:"name,omitempty"`
 		Value         string `json:"value,omitempty"`
@@ -293,11 +294,11 @@ func registerBrokerSecrets(s *mcp.Server, socket string, owner broker.Owner) {
 		Secrets  []broker.SecretDescriptor `json:"secrets,omitempty"`
 		Mutation *broker.MutationIntent    `json:"mutation,omitempty"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "rdev_secrets", Description: "Manage this principal's host-scoped credentials in rdevd. Values are never returned. Set/delete require exact approval; exec/job secret references require secret.use."}, func(ctx context.Context, _ *mcp.CallToolRequest, in secretInput) (*mcp.CallToolResult, secretOutput, error) {
-		if in.Action != "set" && in.Action != "delete" && in.Action != "list" {
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_secrets", Description: "Manage this principal's host-scoped credentials in rdevd. Values are never returned. Set/import/delete require exact approval; remote imports also require file-read permission. Credentials persist in private daemon state. Exec/job secret references require secret.use."}, func(ctx context.Context, _ *mcp.CallToolRequest, in secretInput) (*mcp.CallToolResult, secretOutput, error) {
+		if in.Action != "set" && in.Action != "delete" && in.Action != "list" && in.Action != "set_from_file" {
 			return nil, secretOutput{}, errors.New("unknown secret action")
 		}
-		r, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Host: in.Host, Operation: "secret." + in.Action, Secret: &broker.SecretParams{Name: in.Name, Value: in.Value}, Approval: in.ApprovalToken, OperationID: in.OperationID})
+		r, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Host: in.Host, Operation: "secret." + in.Action, Secret: &broker.SecretParams{Name: in.Name, Value: in.Value, Path: in.Path}, Approval: in.ApprovalToken, OperationID: in.OperationID})
 		if err != nil {
 			return nil, secretOutput{}, err
 		}
