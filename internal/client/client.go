@@ -47,6 +47,7 @@ type negotiatedConnection interface {
 }
 
 type pooledConnection struct {
+	bulk                  bool
 	conn                  remoteConnection
 	fingerprint           string
 	connectionFingerprint string
@@ -84,9 +85,10 @@ type Client struct {
 	dial   dialFunc
 	rsync  rsyncRunner
 
-	mu       sync.Mutex
-	conns    map[string]pooledConnection
-	security map[string]ConnectionSecurityStatus
+	mu        sync.Mutex
+	bulkConns map[string]*bulkConnection
+	conns     map[string]pooledConnection
+	security  map[string]ConnectionSecurityStatus
 	// dialing serializes connection setup per host. MCP dispatches tool calls
 	// concurrently, and without this several goroutines would bootstrap the same
 	// host at once, racing on the agent upload's temp file.
@@ -121,6 +123,15 @@ func (c *Client) ProtocolTargetIdentity(host string) (string, error) {
 }
 
 func (c *Client) DoProtocolApproved(ctx context.Context, host string, req *proto.Request, target string) (*proto.Response, error) {
+	return c.doProtocolLane(ctx, host, req, target, false)
+}
+
+// DoProtocolBulk uses an on-demand transport independent of control/exec. It
+// shares the base client's identity leases, secret store and retry semantics.
+func (c *Client) DoProtocolBulk(ctx context.Context, host string, req *proto.Request, target string) (*proto.Response, error) {
+	return c.doProtocolLane(ctx, host, req, target, true)
+}
+func (c *Client) doProtocolLane(ctx context.Context, host string, req *proto.Request, target string, bulk bool) (*proto.Response, error) {
 	if req == nil || req.ClientID == "" || req.ProjectID == "" {
 		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
@@ -132,7 +143,7 @@ func (c *Client) DoProtocolApproved(ctx context.Context, host string, req *proto
 	// hashing also produces a protocol-valid ID for arbitrary local owner names.
 	identity := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%d:%s", len(req.ClientID), req.ClientID, len(req.ProjectID), req.ProjectID)))
 	callerID := fmt.Sprintf("principal_%x", identity)
-	response, _, err := c.doBuiltForTarget(ctx, host, target, func(operationIdentity) (*builtRequest, error) {
+	response, _, err := c.doBuiltForLane(ctx, host, target, bulk, func(operationIdentity) (*builtRequest, error) {
 		if target != "" {
 			current, err := c.ProtocolTargetIdentity(host)
 			if err != nil || current != target {
@@ -166,6 +177,7 @@ func New(lookup AgentLookup) *Client {
 			return transport.Dial(ctx, host, lookup)
 		},
 		conns:             make(map[string]pooledConnection),
+		bulkConns:         make(map[string]*bulkConnection),
 		security:          make(map[string]ConnectionSecurityStatus),
 		dialing:           make(map[string]chan struct{}),
 		latestPublication: make(map[string]uint64),
@@ -241,6 +253,14 @@ func (c *Client) publishConnectionSecurityIfCurrent(name string, publication uin
 func (c *Client) detachConnection(name string, expected pooledConnection) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if expected.bulk {
+		entry, ok := c.bulkConns[name]
+		if !ok || entry.pooled.conn != expected.conn {
+			return false
+		}
+		delete(c.bulkConns, name)
+		return true
+	}
 	current, ok := c.conns[name]
 	if !ok || current.conn != expected.conn || current.publication != expected.publication {
 		return false
@@ -251,6 +271,9 @@ func (c *Client) detachConnection(name string, expected pooledConnection) bool {
 
 func (c *Client) closeDetachedConnection(name string, detached pooledConnection, status ConnectionSecurityStatus) {
 	_ = detached.conn.Close()
+	if detached.bulk {
+		return
+	}
 	c.publishConnectionSecurityIfCurrent(name, detached.publication, status)
 }
 
@@ -634,6 +657,9 @@ func (c *Client) doBuilt(ctx context.Context, hostName string, build func(operat
 }
 
 func (c *Client) doBuiltForTarget(ctx context.Context, hostName, target string, build func(operationIdentity) (*builtRequest, error)) (*proto.Response, map[string]string, error) {
+	return c.doBuiltForLane(ctx, hostName, target, false, build)
+}
+func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bulk bool, build func(operationIdentity) (*builtRequest, error)) (*proto.Response, map[string]string, error) {
 	if c.callerIDErr != nil || c.callerID == "" {
 		return nil, nil, proto.NewError(proto.CodeInternalFailure, "", proto.StateNotSent)
 	}
@@ -655,7 +681,11 @@ func (c *Client) doBuiltForTarget(ctx context.Context, hostName, target string, 
 	var operationName string
 	for attempt := 0; attempt < 2; attempt++ {
 		redactionSnapshot := c.Secrets.Snapshot()
-		pooled, st, release, err := c.leasedConnForTarget(ctx, hostName, target)
+		leaseConn := c.leasedConnForTarget
+		if bulk {
+			leaseConn = c.leasedBulkConn
+		}
+		pooled, st, release, err := leaseConn(ctx, hostName, target)
 		if err != nil {
 			if firstErr != nil {
 				return nil, nil, fmt.Errorf("%w (reconnect failed: %v)", firstErr, c.redactErrWith(redactionSnapshot, err))
@@ -2177,10 +2207,15 @@ func (c *Client) Disconnect(hostName string) bool {
 func (c *Client) disconnectWithStatus(hostName string, status ConnectionSecurityStatus) bool {
 	c.mu.Lock()
 	conn, ok := c.conns[hostName]
+	bulk := c.bulkConns[hostName]
+	delete(c.bulkConns, hostName)
 	c.mu.Unlock()
+	if bulk != nil {
+		_ = bulk.pooled.conn.Close()
+	}
 
 	if !ok {
-		return false
+		return bulk != nil
 	}
 	if status.State == "" {
 		status = ConnectionSecurityStatus{State: observe.SecurityCold, Generation: conn.generation}
@@ -2201,9 +2236,14 @@ func (c *Client) DetachConnections() func() {
 	c.mu.Lock()
 	conns := c.conns
 	c.conns = make(map[string]pooledConnection)
+	bulk := c.bulkConns
+	c.bulkConns = make(map[string]*bulkConnection)
 	c.mu.Unlock()
 
 	return func() {
+		for _, entry := range bulk {
+			_ = entry.pooled.conn.Close()
+		}
 		for name, conn := range conns {
 			c.closeDetachedConnection(name, conn, ConnectionSecurityStatus{
 				State: observe.SecurityCold, Generation: conn.generation,

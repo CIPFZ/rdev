@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -263,8 +264,17 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		if req.Wire != nil {
 			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
 		}
+		if req.Operation == "audit.health" {
+			health := service.Audit.SinkStatus()
+			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, AuditHealth: &health})
+			endRequest()
+			continue
+		}
 		if req.Operation == "audit_query" {
-			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key()), AuditIncomplete: service.Audit.HasLegacyRecords()})
+			flushCtx, flushCancel := context.WithTimeout(requestCtx, time.Second)
+			flushErr := service.Audit.Flush(flushCtx)
+			flushCancel()
+			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key()), AuditIncomplete: flushErr != nil || service.Audit.HasLegacyRecords() || service.Audit.SinkStatus().State == "degraded"})
 			endRequest()
 			continue
 		}
@@ -293,53 +303,34 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
-		quotaHost := req.Host
-		if err := service.Quota.AcquireHostContext(requestCtx, quotaHost, req.Owner.Key()); err != nil {
-			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "quota_rejected"})
-			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
-			endRequest()
-			continue
-		}
-		lane := broker.LaneControl
-		switch req.Operation {
-		case "exec", "job_start", "job_stop", "job_wait":
-			lane = broker.LaneExec
-		case "sync.push", "sync.pull", "write", "write_file":
-			lane = broker.LaneBulk
-		}
-		if err := service.Lanes.AcquireContext(requestCtx, lane); err != nil {
-			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
-			_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
-			endRequest()
-			continue
-		}
+		lane := broker.LaneForOperation(req.Operation)
 		if req.Wire != nil {
 			dispatch := func() (*proto.Response, error) {
-				return service.DispatchFair(requestCtx, req.Owner.Key(), lane, func() (*proto.Response, error) {
+				return service.DispatchScheduled(requestCtx, req.Host, req.Owner.Key(), lane, func(dispatchCtx context.Context) (*proto.Response, error) {
 					if approvedTarget != "" {
-						return service.DispatchApproved(requestCtx, req.Host, req.Wire, approvedTarget)
+						return service.DispatchApproved(dispatchCtx, req.Host, req.Wire, approvedTarget)
 					}
-					return service.Dispatch(requestCtx, req.Host, req.Wire)
+					return service.Dispatch(dispatchCtx, req.Host, req.Wire)
 				})
 			}
 			var wireResp *proto.Response
 			var err error
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
-				jobKey, _ := json.Marshal(req.Wire.Job)
-				wireResp, err = service.DispatchShared(requestCtx, req.Host+":"+string(jobKey), dispatch)
+				jobKey, _ := json.Marshal([]any{req.Owner, req.Host, req.Wire.Job})
+				wireResp, err = service.DispatchShared(requestCtx, string(jobKey), dispatch)
 			} else {
 				wireResp, err = dispatch()
 			}
 			if err != nil {
-				service.Lanes.Release(lane)
-				service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
-				service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "dispatch_error"})
+				result := "dispatch_error"
+				if errors.Is(err, broker.ErrQueueFull) {
+					result = "quota_rejected"
+				}
+				service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: result})
 				_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
 				endRequest()
 				continue
 			}
-			service.Lanes.Release(lane)
-			service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
 			service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "completed"})
 			if err := service.Jobs.RecordResponse(req.Host, req.Owner.Key(), req.Wire, wireResp); err != nil {
 				// Remote mutation completed but durable ownership state did not.
@@ -352,10 +343,13 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			endRequest()
 			continue
 		}
-		service.Lanes.Release(lane)
-		service.Quota.ReleaseHost(quotaHost, req.Owner.Key())
+		var scheduler *broker.SchedulerSnapshot
+		if req.Operation == "status" {
+			snapshot := service.Scheduler.Snapshot(req.Owner.Key())
+			scheduler = &snapshot
+		}
 		service.Audit.Append(broker.AuditEvent{RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "accepted"})
-		_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true})
+		_ = enc.Encode(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Scheduler: scheduler})
 		endRequest()
 	}
 }

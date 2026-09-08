@@ -8,6 +8,8 @@ import (
 )
 
 type Config struct {
+	BulkIdleTTL  time.Duration  `json:"bulk_idle_ttl,omitempty"`
+	QoS          QoSConfig      `json:"qos,omitempty"`
 	MaxHosts     int            `json:"max_hosts"`
 	IdleTTL      time.Duration  `json:"idle_ttl"`
 	OwnerWeights map[string]int `json:"owner_weights,omitempty"`
@@ -17,8 +19,14 @@ func (c Config) Validate() error {
 	if c.MaxHosts < 1 {
 		return errors.New("max_hosts must be positive")
 	}
+	if c.BulkIdleTTL < 0 {
+		return errors.New("bulk_idle_ttl must be nonnegative")
+	}
 	if c.IdleTTL <= 0 {
 		return errors.New("idle_ttl must be positive")
+	}
+	if err := c.QoS.validate(); err != nil {
+		return err
 	}
 	for owner, weight := range c.OwnerWeights {
 		if owner == "" || weight < 1 || weight > 100 {

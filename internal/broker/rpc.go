@@ -24,12 +24,14 @@ type Request struct {
 	Since           time.Time      `json:"since,omitempty"`
 }
 type Response struct {
-	ID              string          `json:"id"`
-	OK              bool            `json:"ok"`
-	Error           string          `json:"error,omitempty"`
-	Wire            *proto.Response `json:"wire,omitempty"`
-	Audit           []AuditEvent    `json:"audit,omitempty"`
-	Approval        *Approval       `json:"approval,omitempty"`
-	PolicyDigest    string          `json:"policy_digest,omitempty"`
-	AuditIncomplete bool            `json:"audit_incomplete,omitempty"`
+	AuditHealth     *AuditSinkStatus   `json:"audit_health,omitempty"`
+	Scheduler       *SchedulerSnapshot `json:"scheduler,omitempty"`
+	ID              string             `json:"id"`
+	OK              bool               `json:"ok"`
+	Error           string             `json:"error,omitempty"`
+	Wire            *proto.Response    `json:"wire,omitempty"`
+	Audit           []AuditEvent       `json:"audit,omitempty"`
+	Approval        *Approval          `json:"approval,omitempty"`
+	PolicyDigest    string             `json:"policy_digest,omitempty"`
+	AuditIncomplete bool               `json:"audit_incomplete,omitempty"`
 }

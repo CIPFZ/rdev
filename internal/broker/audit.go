@@ -1,11 +1,9 @@
 package broker
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"os"
 	"sync"
 	"time"
 
@@ -25,12 +23,11 @@ type AuditEvent struct {
 	Result        string    `json:"result,omitempty"`
 }
 type AuditLog struct {
-	mu       sync.RWMutex
-	max      int
-	events   []AuditEvent
-	file     *os.File
-	path     string
-	maxBytes int64
+	mu     sync.RWMutex
+	max    int
+	events []AuditEvent
+	sink   *auditSink
+	closed bool
 }
 
 func NewAuditLog(max int) *AuditLog {
@@ -41,46 +38,97 @@ func NewAuditLog(max int) *AuditLog {
 }
 
 func (a *AuditLog) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.file == nil {
-		return nil
-	}
-	err := a.file.Close()
-	a.file = nil
-	return err
-}
-
-// ConfigureFile enables append-only JSONL persistence with bounded rotation.
-func (a *AuditLog) ConfigureFile(path string, maxBytes int64) error {
-	if path == "" || maxBytes < 1 {
-		return os.ErrInvalid
-	}
-	// Restore the rotated segment before the active segment so a broker restart
-	// can answer queries spanning the rotation boundary.
-	rotated, _ := os.ReadFile(path + ".1")
-	prior, _ := os.ReadFile(path)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	loaded := make([]AuditEvent, 0)
-	for _, line := range bytes.Split(append(append([]byte{}, rotated...), prior...), []byte{'\n'}) {
-		var event AuditEvent
-		if len(line) > 0 && json.Unmarshal(line, &event) == nil {
-			loaded = append(loaded, event)
+	if !a.closed {
+		a.closed = true
+		if a.sink != nil {
+			close(a.sink.queue)
 		}
 	}
-	a.mu.Lock()
-	if len(loaded) > a.max {
-		loaded = loaded[len(loaded)-a.max:]
-	}
-	a.events = append(a.events, loaded...)
-	if a.file != nil {
-		_ = a.file.Close()
-	}
-	a.file, a.path, a.maxBytes = f, path, maxBytes
+	sink := a.sink
 	a.mu.Unlock()
+	if sink == nil {
+		return nil
+	}
+	select {
+	case <-sink.done:
+		return sink.err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Flush waits for an explicit audit durability barrier, not a request-path
+// requirement. Ordinary Append calls only update the bounded memory/queue.
+func (a *AuditLog) Flush(ctx context.Context) error {
+	ack := make(chan error, 1)
+	for {
+		a.mu.RLock()
+		if a.closed {
+			a.mu.RUnlock()
+			return ErrClosed
+		}
+		sink := a.sink
+		if sink == nil {
+			a.mu.RUnlock()
+			return nil
+		}
+		sent := false
+		select {
+		case sink.queue <- auditWrite{ack: ack}:
+			sent = true
+		default:
+		}
+		a.mu.RUnlock()
+		if sent {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case err := <-ack:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (a *AuditLog) SinkStatus() AuditSinkStatus {
+	a.mu.RLock()
+	sink := a.sink
+	a.mu.RUnlock()
+	if sink == nil {
+		return AuditSinkStatus{State: "disabled"}
+	}
+	return sink.status()
+}
+
+// ConfigureFile validates bounded private segments and recovers an interrupted
+// final record before starting the asynchronous writer. Reconfiguration is not
+// supported while a sink is running; daemon reload retains the existing sink.
+func (a *AuditLog) ConfigureFile(path string, maxBytes int64) error {
+	a.mu.Lock()
+	if a.sink != nil || a.closed {
+		a.mu.Unlock()
+		return ErrClosed
+	}
+	sink, events, err := newAuditSink(path, maxBytes, a.max)
+	if err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	a.events = append(a.events, events...)
+	if len(a.events) > a.max {
+		a.events = a.events[len(a.events)-a.max:]
+	}
+	a.sink = sink
+	a.mu.Unlock()
+	go sink.run()
 	return nil
 }
 func (a *AuditLog) Append(e AuditEvent) {
@@ -106,19 +154,17 @@ func (a *AuditLog) Append(e AuditEvent) {
 	if len(a.events) > a.max {
 		a.events = a.events[len(a.events)-a.max:]
 	}
-	if a.file != nil {
-		if data, err := json.Marshal(e); err == nil {
-			data = append(data, '\n')
-			if st, err := a.file.Stat(); err == nil && st.Size()+int64(len(data)) > a.maxBytes {
-				_ = a.file.Close()
-				_ = os.Rename(a.path, a.path+".1")
-				if f, openErr := os.OpenFile(a.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); openErr == nil {
-					a.file = f
-				}
-			}
-			if a.file != nil {
-				_, _ = a.file.Write(data)
-				_ = a.file.Sync()
+	if a.sink != nil {
+		if a.closed {
+			a.sink.dropped.Add(1)
+		} else {
+			a.sink.pending.Add(1)
+			select {
+			case a.sink.queue <- auditWrite{event: e}:
+				a.sink.accepted.Add(1)
+			default:
+				a.sink.pending.Add(-1)
+				a.sink.dropped.Add(1)
 			}
 		}
 	}
@@ -136,7 +182,7 @@ func auditOperation(operation string) string {
 		return operation
 	}
 	switch operation {
-	case "status", "doctor", "audit_query", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.use", "fleet.plan", "fleet.execute", "fleet.approve":
+	case "status", "doctor", "audit_query", "audit.health", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.use", "fleet.plan", "fleet.execute", "fleet.approve":
 		return operation
 	default:
 		return "unknown"

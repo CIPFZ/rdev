@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,11 +24,16 @@ func TestAuditLogPersistsAndRotatesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 	a := NewAuditLog(8)
-	if err := a.ConfigureFile(path, 80); err != nil {
+	if err := a.ConfigureFile(path, 1024); err != nil {
 		t.Fatal(err)
 	}
 	a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "exec", Result: "first"})
 	a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "exec", Result: "second"})
+	for i := 0; i < 12; i++ {
+		a.Append(AuditEvent{Owner: "owner", Operation: "exec"})
+	}
+	flushAudit(t, a)
+	defer a.Close()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
@@ -40,14 +46,19 @@ func TestAuditLogRecoversAfterRotation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 	a := NewAuditLog(32)
-	if err := a.ConfigureFile(path, 120); err != nil {
+	if err := a.ConfigureFile(path, 1024); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 12; i++ {
 		a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "exec", Result: "event-with-padding"})
 	}
+	flushAudit(t, a)
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
 	b := NewAuditLog(32)
-	if err := b.ConfigureFile(path, 120); err != nil {
+	defer b.Close()
+	if err := b.ConfigureFile(path, 1024); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.QueryOwner(time.Time{}, "owner"); len(got) == 0 {
@@ -110,7 +121,11 @@ func TestAuditLogLoadsHistoryAndScopesOwner(t *testing.T) {
 	now := time.Now()
 	first.Append(AuditEvent{At: now, Owner: "a", Operation: "exec"})
 	first.Append(AuditEvent{At: now, Owner: "b", Operation: "exec"})
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
 	second := NewAuditLog(8)
+	defer second.Close()
 	if err := second.ConfigureFile(path, 1<<20); err != nil {
 		t.Fatal(err)
 	}
@@ -123,17 +138,34 @@ func TestAuditLogRestartRestoresRotatedSegment(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 	a := NewAuditLog(32)
-	if err := a.ConfigureFile(path, 100); err != nil {
+	if err := a.ConfigureFile(path, 1024); err != nil {
 		t.Fatal(err)
 	}
 	a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "before", Result: "padding-xxxxxxxxxxxxxxxxxxxxxxxx"})
 	a.Append(AuditEvent{At: time.Now(), Owner: "owner", Operation: "after", Result: "padding-xxxxxxxxxxxxxxxxxxxxxxxx"})
+	for i := 0; i < 12; i++ {
+		a.Append(AuditEvent{Owner: "owner", Operation: "exec"})
+	}
+	flushAudit(t, a)
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
 	b := NewAuditLog(32)
-	if err := b.ConfigureFile(path, 100); err != nil {
+	defer b.Close()
+	if err := b.ConfigureFile(path, 1024); err != nil {
 		t.Fatal(err)
 	}
 	events := b.QueryOwner(time.Time{}, "owner")
 	if len(events) < 2 {
 		t.Fatalf("restart lost rotated history: got %d events", len(events))
+	}
+}
+
+func flushAudit(t *testing.T, a *AuditLog) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := a.Flush(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

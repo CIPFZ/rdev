@@ -1,0 +1,16 @@
+Diagnostic real-daemon profile before asynchronous audit; parent d2f6270 plus in-progress scheduler/bulk changes.
+Temporary init enabled CPU/mutex/block profiling only and was removed after building the diagnostic binary.
+This is aggregate mutex wait across goroutines, not request wall-clock duration.
+
+File: rdevd-qos-profiler
+Build ID: 86898c38f4cc62dc95644ea2d6e27c6dabb5bdc6
+Type: delay
+Time: 2026-09-08 22:27:48 CST
+Showing nodes accounting for 115.15s, 99.87% of 115.31s total
+Dropped 297 nodes (cum <= 0.58s)
+      flat  flat%   sum%        cum   cum%
+   115.15s 99.87% 99.87%    115.15s 99.87%  sync.(*Mutex).Unlock (inline)
+         0     0% 99.87%    115.15s 99.87%  github.com/CIPFZ/rdev/internal/broker.(*AuditLog).Append
+         0     0% 99.87%    115.15s 99.86%  main.runDaemon.gowrap5
+         0     0% 99.87%    115.15s 99.87%  main.serveConn
+         0     0% 99.87%    115.15s 99.86%  sync.(*RWMutex).Unlock

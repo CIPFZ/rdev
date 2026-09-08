@@ -209,6 +209,9 @@ func runDaemon(args []string) error {
 					log.Printf("rdevd: configuration reloaded")
 				}
 			case now := <-ticker.C:
+				if n := service.ReapBulkIdle(now); n > 0 {
+					log.Printf("rdevd: reaped %d idle bulk transports", n)
+				}
 				if service.ReapIdle(now) {
 					log.Printf("rdevd: reaped idle broker connections")
 				}

@@ -91,9 +91,9 @@ func TestServiceReloadConfigAppliesOwnerWeights(t *testing.T) {
 	if err := s.ReloadConfig(Config{MaxHosts: 1, IdleTTL: time.Second, OwnerWeights: map[string]int{"owner": 3}}); err != nil {
 		t.Fatal(err)
 	}
-	s.weightMu.RLock()
-	weight := s.weights["owner"]
-	s.weightMu.RUnlock()
+	s.Scheduler.mu.Lock()
+	weight := s.Scheduler.weights["owner"]
+	s.Scheduler.mu.Unlock()
 	if weight != 3 {
 		t.Fatalf("weight=%d", weight)
 	}
@@ -104,17 +104,12 @@ func TestServiceReloadConfigAppliesRuntimeLimits(t *testing.T) {
 	if err := s.ReloadConfig(Config{MaxHosts: 2, IdleTTL: 3 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Quota.AcquireHost(context.Background(), "h", "a"); err != nil {
-		t.Fatal(err)
+	if s.Scheduler.maxHosts != 2 {
+		t.Fatal("active-host bound not applied")
 	}
-	if err := s.Quota.AcquireHost(context.Background(), "h", "b"); err != nil {
-		t.Fatal(err)
+	if s.Scheduler.Snapshot("a").Limits.PerHost != 11 {
+		t.Fatal("max_hosts was confused with handler capacity")
 	}
-	if err := s.Quota.AcquireHost(context.Background(), "h", "c"); err != ErrQueueFull {
-		t.Fatalf("limit not applied: %v", err)
-	}
-	s.Quota.ReleaseHost("h", "a")
-	s.Quota.ReleaseHost("h", "b")
 	s.AttachClient()
 	s.DetachClient()
 	if !s.lease.Reapable(time.Now().Add(4 * time.Second)) {

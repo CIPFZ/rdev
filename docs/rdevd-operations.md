@@ -73,14 +73,55 @@ regular file, contain one JSON object, and contain only recognized fields. An
 explicit `-config` path must exist. Duration fields are nanoseconds:
 
 ```json
-{"max_hosts":12,"idle_ttl":300000000000,"owner_weights":{"agent-a\u0000project-a":2}}
+{"max_hosts":128,"idle_ttl":300000000000,"bulk_idle_ttl":30000000000,"qos":{"max_active":12,"per_host":11,"per_owner":4,"max_queued":256,"per_owner_queued":32,"bulk_bytes_per_second":8388608},"owner_weights":{"agent-a\u0000project-a":2}}
 ```
 
 SIGHUP parses and validates config and key before applying them. Invalid input
 retains the running configuration and key; restoring valid files and sending
 SIGHUP retries reload. Deleting a previously loaded config is a reload failure.
-Review of the existing quota/connection meaning of `max_hosts` remains open;
-do not interpret it as proof of the Phase5 host-capacity gate.
+`qos` controls execution and queue capacity separately from host count. Zero or
+omitted QoS fields use the values above. `max_hosts` currently bounds distinct
+hosts with active broker work; it no longer changes the per-host handler limit.
+Warm-pool capacity/LRU and fairness when a small active-host bound is saturated
+still need connection-manager integration, and are not covered by that setting.
+
+Admission is weighted by the authenticated `(client_id, project_id)` pair.
+Weights count dispatches, so a weight of three receives three turns per turn of
+a continuously backlogged weight-one owner; it is not a CPU-time entitlement.
+Queued work does not occupy handlers. The broker reserves two execution slots
+for control globally/per host and one per owner. A single owner can occupy only
+one of the two control workers. One eighth of global/per-owner queue capacity
+(at least one owner slot) is reserved for control. Reloaded weights apply to
+already queued requests; canceled entries and empty owner queues are removed.
+
+Large file reads/writes use one on-demand bulk transport per host, alongside the
+shared base agent for control/exec. Bulk uses the base client's identity lease
+and initialized secret store. `bulk_idle_ttl` defaults to 30 seconds, independent
+of connected frontends; the daemon checks idle transports every five seconds.
+Actual file payload bytes are charged to `bulk_bytes_per_second` globally, with
+one response-sized burst. The next bulk request waits without occupying a
+worker or a transport lease. This budget protects control latency from the CPU
+and allocation cost of large responses as well as network contention. It does
+not yet account for every sync/streaming route or constitute an OS bandwidth
+limit. `status` returns only the calling owner's scheduler counts, queue timing
+and bulk payload bytes; it does not reveal another owner's host or workload.
+
+Audit events enter a bounded 1024-entry asynchronous queue. A writer flushes at
+25 ms or 64 events, maintaining the current segment and one rotated segment,
+each bounded by 8 MiB. `audit_query` performs a one-second durability barrier,
+then returns the calling owner's in-memory history and an incomplete marker if
+flush/recovery failed. The administrator-only `audit.health` operation requires
+its own policy grant and exposes pending, accepted/written, dropped, rotation,
+recovery and error counters. Ordinary owners cannot query those global counts.
+Writes continue after a recoverable sink failure, while historical errors remain
+visible. Closed/overloaded sinks count dropped events instead of blocking RPCs.
+
+Audit shutdown drains the bounded queue with a five-second caller deadline.
+SIGKILL can lose records still in memory (normally the last 25 ms; longer under
+sink failure). An invalid/torn on-disk record is reported as a recovery omission;
+an incomplete active-file tail is truncated before appending. Detecting an
+unclean shutdown's lost in-memory tail, a long-duration rotation/restart soak,
+and durable end-to-end operation correlation remain open Phase5 requirements.
 
 ## Services and repeatable validation
 

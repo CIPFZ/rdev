@@ -177,8 +177,8 @@ func TestRemoteBrokerApprovalIsolation(t *testing.T) {
 	}
 	data, err = sshRun(remoteAgentPIDScript)
 	var pids []int
-	if err != nil || json.Unmarshal(data, &pids) != nil || len(pids) != 1 {
-		t.Fatal("shared remote agent count changed")
+	if err != nil || json.Unmarshal(data, &pids) != nil || len(pids) != 2 {
+		t.Fatal("expected one base agent and one dedicated bulk agent after approved file I/O")
 	}
 	t.Log("real SSH approval: Risk=false denied; issuer separated from executor; owner/host/path/content/append/operation substitutions denied without consuming valid approval; one append; replay/expiry/policy-change/crash denied; owner audit correlation and payload/token privacy verified")
 }

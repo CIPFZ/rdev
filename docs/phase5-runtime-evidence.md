@@ -380,3 +380,95 @@ Implementation commit: `915fb5e2f15d48ac078f44a417543517d5627d90`
 The pending independent review and remaining shared mutation routes keep P5-13
 In progress. Job mutation durability, fairness, dedicated bulk transport, audit
 sink recovery and launchd runtime requirements remain separate open gates.
+
+
+## Fair admission, dedicated bulk and asynchronous audit follow-up
+
+The scheduler now selects eligible work before atomically occupying global,
+per-host, per-owner and lane capacity. Queued/canceled callers consume no
+execution slots. Control has reserved execution and queue capacity; existing
+backlogs receive SIGHUP weight changes. Owner accounting is removed when idle,
+and history is bounded. The replacement removes the old single-wake channels
+and quota/lane-before-fair-queue path instead of leaving competing admission
+mechanisms. Job-wait coalescing now occurs before scheduler admission and its
+key uses an unambiguous owner/host/job-parameters tuple; full durable shared-job
+observation remains a separate task.
+
+Bulk file I/O opens one additional transport per host while retaining the base
+agent. It holds the same immutable identity lease and uses the initialized
+secret store, without another secret initialization. Idle bulk generations are
+detached atomically and closed outside the admission lock; stale cleanup cannot
+close a replacement or alter base security status. Read-only bulk reconnects
+never replace the base; ambiguous bulk writes are not transparently replayed.
+
+The actual remote workload first disproved the existing SLO: control p95 was
+3.45–3.72 times baseline. A dedicated transport alone still produced ratios
+3.68–4.29. A diagnostic build of the real daemon (CPU and mutex profiling only;
+no production dispatch replacements) measured 115.15 seconds of aggregate mutex
+wait in `AuditLog.Append`, 99.87% of sampled mutex wait. Synchronous file sync
+under the shared audit lock was the dominant serialization point. After moving
+that I/O to a bounded asynchronous writer, loaded p95 fell from about 31 ms to
+3.7 ms, but the improved 1.4 ms baseline still made the ratio exceed two. Large
+JSON responses also dominated CPU profiles. An explicit, configurable 8 MiB/s
+bulk payload budget now paces the next bulk admission without holding a worker
+or lease. The initial same-payload run passed at ratios 1.51 and 1.39; the test
+still fails above two and still requires continuously backlogged owners.
+
+Audit append retains bounded sanitized owner history and queues at most 1024
+records (plus a 64-record writer batch). Sink stalls/failures do not hold the
+request mutex. The file writer validates private bounded segments, repairs a
+torn active-file tail, rotates within two bounded segments, reports drops and
+errors, and retries after a recoverable rotation obstacle is removed. Explicit
+query/flush barriers expose durability failure. Global health counters require
+a separate `audit.health` grant; ordinary owners retain only scoped status and
+audit queries. No raw payload or credential field was added to telemetry.
+
+Separate source review and targeted tests cover worker activation, skipping an
+ineligible host, owner queue saturation, control reservation, weight reload,
+cancellation cleanup, byte pacing, bulk active/idle/cleanup races, base and
+secret preservation, no mutation replay, sink stalls, full queues, actual
+rotation-directory failures, private-file negatives and corrupted tails. A
+review also corrected a test that checked all-owner cleanup after waiting for
+only one owner's cancellation; it now waits for both actual active counts to
+reach zero. External independent review has not been performed.
+
+`make remote-qos` runs three real 20-process workloads. Each uses two separate
+project principals with the same client ID, nine bulk processes per owner, two
+control processes, 344064-byte integrity-checked SSH reads, a five-second
+baseline and two 25-second saturated windows. Weights reverse 3:1 -> 1:3 on the
+same live sessions. It verifies quotas, overload, no sampled starvation, exact
+owner status, SIGKILL of all nine processes for one owner, survivor progress,
+one base plus one bulk SSH process under load, bulk TTL cleanup preserving the
+base PID, audit rotation with no drops/errors, and global-health denial for an
+ordinary owner. Reported fairness counts are actual dispatch counters; latency
+samples are measured by the independent frontend processes.
+
+Remaining risks: this workload does not prove the complete long-exec/job-wait/
+status/sync matrix, all payload sizes or all secret/job/Fleet permissions.
+`max_hosts` is still an active-host bound rather than warm-pool LRU; saturation
+at a small bound and frontend ingress buffers need further work. Audit crash
+can lose queued in-memory records, and a short repeated workload is not a
+long-duration crash/rotation soak. Full operation IDs, detached-job crash/replay,
+bounded shutdown state, launchd runtime and independent external review remain.
+The Phase5 and Multi Agent records remain In progress.
+
+The [pre-commit repeated runtime log](evidence/phase5/2026-09-08/qos-runtime-precommit.log)
+passed all three 66-second runs (198.265 seconds total). The six control ratios
+were 1.423–1.519, with loaded p95 1.857–1.959 ms. Both owners were backlogged in
+all 150 sampled windows. Each run rotated one audit segment and persisted
+48798–48822 events with zero dropped events or sink errors. Each read contained
+344064 verified bytes; per-owner payload counters were roughly 203 MiB and
+233 MiB per run, including the survivor-only period. The
+[diagnostic contention profile](evidence/phase5/2026-09-08/qos-audit-contention-before.txt)
+records the preceding failure's audit-lock attribution. These are working-tree
+measurements; final committed-source commands and artifact identity follow.
+
+[Pre-commit regression](evidence/phase5/2026-09-08/qos-regression-precommit.log)
+passed `make check remote-approval remote-policy remote-session-benchmark
+remote-lifecycle`. This includes three actual approval runs using one base and
+one file-I/O bulk agent, three policy crash/isolation runs, three 20-process/
+500-call base-session runs, three retry/cancellation runs and six real idle
+lease cycles (65.368 seconds, final zero SSH/agent processes). All three session
+runs retained one base agent and 20 distinct remote principals. Changed-package
+race tests passed, followed by
+[20 repeated scheduler/audit/fair-queue race runs](evidence/phase5/2026-09-08/qos-race-repeat-precommit.log).

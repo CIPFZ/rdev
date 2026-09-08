@@ -1,10 +1,5 @@
 package broker
 
-import (
-	"context"
-	"sync"
-)
-
 type Lane string
 
 const (
@@ -13,52 +8,14 @@ const (
 	LaneBulk    Lane = "bulk"
 )
 
-// Lanes reserves capacity for control traffic while bounding exec and bulk.
-type Lanes struct {
-	mu     sync.Mutex
-	limits map[Lane]int
-	active map[Lane]int
-	notify chan struct{}
-}
-
-func NewLanes(control, exec, bulk int) *Lanes {
-	return &Lanes{limits: map[Lane]int{LaneControl: control, LaneExec: exec, LaneBulk: bulk}, active: make(map[Lane]int), notify: make(chan struct{}, 1)}
-}
-
-func (l *Lanes) Acquire(kind Lane) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.active[kind] >= l.limits[kind] {
-		return false
-	}
-	l.active[kind]++
-	return true
-}
-func (l *Lanes) AcquireContext(ctx context.Context, kind Lane) error {
-	for {
-		l.mu.Lock()
-		if l.active[kind] < l.limits[kind] {
-			l.active[kind]++
-			l.mu.Unlock()
-			return nil
-		}
-		l.mu.Unlock()
-		select {
-		case <-l.notify:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
-func (l *Lanes) Release(kind Lane) {
-	l.mu.Lock()
-	if l.active[kind] > 0 {
-		l.active[kind]--
-	}
-	l.mu.Unlock()
-	select {
-	case l.notify <- struct{}{}:
+// LaneForOperation is selected by the broker, never by the frontend.
+func LaneForOperation(operation string) Lane {
+	switch operation {
+	case "exec", "job_start", "job_wait":
+		return LaneExec
+	case "sync.push", "sync.pull", "write", "write_file", "read_file":
+		return LaneBulk
 	default:
+		return LaneControl
 	}
 }
-func (l *Lanes) Active(kind Lane) int { l.mu.Lock(); defer l.mu.Unlock(); return l.active[kind] }

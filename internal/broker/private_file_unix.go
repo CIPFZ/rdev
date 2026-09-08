@@ -31,3 +31,24 @@ func ReadPrivateFile(path string, limit int64) ([]byte, error) {
 	}
 	return data, err
 }
+
+// openPrivateAppend validates the opened inode, including when a path changes
+// between the initial check and open. It never follows a final symlink or blocks
+// opening a FIFO.
+func openPrivateAppend(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_APPEND|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0777 != 0600 || st.Uid != uint32(os.Getuid()) {
+		f.Close()
+		return nil, fmt.Errorf("audit requires a private regular file owned by the current user")
+	}
+	return f, nil
+}

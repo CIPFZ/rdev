@@ -17,7 +17,7 @@ COMMIT      := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
 STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-approval stress-broker
+.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-approval remote-qos stress-broker
 
 all: agents build
 
@@ -115,6 +115,9 @@ remote-policy: agents
 
 remote-approval: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerApprovalIsolation$$' -count=3 -timeout=2m -v
+
+remote-qos: agents
+	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerQoS$$' -count=3 -timeout=4m -v
 
 stress-broker: agents
 	$(GO) test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m

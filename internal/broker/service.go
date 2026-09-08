@@ -26,8 +26,7 @@ type Service struct {
 	policy           *Policy
 	lease            *Lease
 	closed           atomic.Bool
-	Quota            *Quota
-	Lanes            *Lanes
+	Scheduler        *Scheduler
 	Watches          *WatchHub
 	Audit            *AuditLog
 	config           *ConfigStore
@@ -38,9 +37,6 @@ type Service struct {
 	shared           map[string]*sharedDispatch
 	Jobs             *JobRegistry
 	Principals       PrincipalAuthority
-	fair             map[Lane]*fairDispatcher
-	weightMu         sync.RWMutex
-	weights          map[string]int
 	dispatchMu       sync.RWMutex
 	dispatchOverride func(context.Context, string, *proto.Request) (*proto.Response, error)
 }
@@ -51,57 +47,9 @@ type sharedDispatch struct {
 	err  error
 }
 
-type fairItem struct {
-	ctx    context.Context
-	fn     func() (*proto.Response, error)
-	result chan dispatchResult
-}
-type dispatchResult struct {
-	resp *proto.Response
-	err  error
-}
-type fairDispatcher struct {
-	queue *FairQueue
-	wake  chan struct{}
-	stop  chan struct{}
-	wg    sync.WaitGroup
-}
-
-func newFairDispatcher(workers int) *fairDispatcher {
-	f := &fairDispatcher{queue: NewFairQueue(), wake: make(chan struct{}, 1), stop: make(chan struct{})}
-	worker := func() {
-		defer f.wg.Done()
-		for {
-			select {
-			case <-f.wake:
-			case <-f.stop:
-				return
-			}
-			for {
-				value, ok := f.queue.Next()
-				if !ok {
-					break
-				}
-				item := value.(fairItem)
-				if err := item.ctx.Err(); err != nil {
-					item.result <- dispatchResult{err: err}
-					continue
-				}
-				resp, err := item.fn()
-				item.result <- dispatchResult{resp: resp, err: err}
-			}
-		}
-	}
-	for i := 0; i < workers; i++ {
-		f.wg.Add(1)
-		go worker()
-	}
-	return f
-}
-
 func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
-	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Quota: NewQuota(12, 4, 256), Lanes: NewLanes(2, 8, 1), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry(), fair: map[Lane]*fairDispatcher{LaneControl: newFairDispatcher(2), LaneExec: newFairDispatcher(8), LaneBulk: newFairDispatcher(1)}, weights: make(map[string]int)}
+	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[string]*sharedDispatch), Jobs: NewJobRegistry()}
 	s.SetReady(true)
 	return s
 }
@@ -121,6 +69,9 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 	if override != nil {
 		return override(ctx, host, req)
 	}
+	if LaneForOperation(req.Op) == LaneBulk {
+		return s.client.DoProtocolBulk(ctx, host, req, "")
+	}
 	return s.client.DoProtocol(ctx, host, req)
 }
 func (s *Service) DispatchApproved(ctx context.Context, host string, req *proto.Request, target string) (*proto.Response, error) {
@@ -137,6 +88,9 @@ func (s *Service) DispatchApproved(ctx context.Context, host string, req *proto.
 	if override != nil {
 		return override(ctx, host, req)
 	}
+	if LaneForOperation(req.Op) == LaneBulk {
+		return s.client.DoProtocolBulk(ctx, host, req, target)
+	}
 	return s.client.DoProtocolApproved(ctx, host, req, target)
 }
 func (s *Service) SetDispatcher(fn func(context.Context, string, *proto.Request) (*proto.Response, error)) {
@@ -144,40 +98,16 @@ func (s *Service) SetDispatcher(fn func(context.Context, string, *proto.Request)
 	s.dispatchOverride = fn
 	s.dispatchMu.Unlock()
 }
-func (s *Service) DispatchFair(ctx context.Context, owner string, lane Lane, fn func() (*proto.Response, error)) (*proto.Response, error) {
+func (s *Service) DispatchScheduled(ctx context.Context, host, owner string, lane Lane, fn func(context.Context) (*proto.Response, error)) (*proto.Response, error) {
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	f := s.fair[lane]
-	if f == nil {
-		return fn()
-	}
-	result := make(chan dispatchResult, 1)
-	s.weightMu.RLock()
-	weight := s.weights[owner]
-	s.weightMu.RUnlock()
-	f.queue.Enqueue(owner, fairItem{ctx: ctx, fn: fn, result: result}, weight)
-	select {
-	case f.wake <- struct{}{}:
-	default:
-	}
-	select {
-	case out := <-result:
-		return out.resp, out.err
-	case <-f.stop:
-		return nil, ErrClosed
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return s.Scheduler.Do(ctx, host, owner, lane, fn)
 }
-func (s *Service) SetOwnerWeight(owner string, weight int) {
-	if weight < 1 {
-		weight = 1
-	}
-	s.weightMu.Lock()
-	s.weights[owner] = weight
-	s.weightMu.Unlock()
+func (s *Service) DispatchFair(ctx context.Context, owner string, lane Lane, fn func() (*proto.Response, error)) (*proto.Response, error) {
+	return s.DispatchScheduled(ctx, "", owner, lane, func(context.Context) (*proto.Response, error) { return fn() })
 }
+func (s *Service) SetOwnerWeight(owner string, weight int) { s.Scheduler.SetOwnerWeight(owner, weight) }
 func (s *Service) SubscribeJob(key string) (<-chan any, func()) {
 	return s.Watches.Subscribe(key)
 }
@@ -237,14 +167,8 @@ func (s *Service) ReloadConfig(c Config) error {
 	if err := s.config.Reload(c); err != nil {
 		return err
 	}
-	s.Quota.SetHostLimit(c.MaxHosts)
+	s.Scheduler.Configure(c.QoS, c.MaxHosts, c.OwnerWeights)
 	s.lease.SetGrace(c.IdleTTL)
-	s.weightMu.Lock()
-	s.weights = make(map[string]int, len(c.OwnerWeights))
-	for owner, weight := range c.OwnerWeights {
-		s.weights[owner] = weight
-	}
-	s.weightMu.Unlock()
 	return nil
 }
 func (s *Service) AttachClient() bool {
@@ -258,6 +182,14 @@ func (s *Service) DetachClient()               { s.lease.Detach() }
 func (s *Service) Reapable(now time.Time) bool { return s.lease.Reapable(now) }
 func (s *Service) ReapIdle(now time.Time) bool {
 	return s.lease.Reap(now, s.client.DetachConnections)
+}
+
+func (s *Service) ReapBulkIdle(now time.Time) int {
+	ttl := s.config.Get().BulkIdleTTL
+	if ttl == 0 {
+		ttl = 30 * time.Second
+	}
+	return s.client.ReapBulkIdle(now, ttl)
 }
 
 func (s *Service) Decide(owner Owner, operation string) Decision {
@@ -369,20 +301,7 @@ func (s *Service) Close(ctx context.Context) error {
 		return ErrClosed
 	}
 	_ = s.Drain(ctx)
-	for _, f := range s.fair {
-		close(f.stop)
-	}
-	done := make(chan struct{})
-	go func() {
-		for _, f := range s.fair {
-			f.wg.Wait()
-		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-	}
+	err := s.Scheduler.Close(ctx)
 	s.client.Close()
-	return nil
+	return err
 }

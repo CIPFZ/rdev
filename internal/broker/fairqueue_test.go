@@ -40,3 +40,22 @@ func TestFairQueueWeightedOwners(t *testing.T) {
 		t.Fatalf("weighted counts heavy=%d light=%d", heavy, light)
 	}
 }
+
+func TestFairQueueRemovesCanceledOwnersAndSkipsBlockedHead(t *testing.T) {
+	q := NewFairQueue()
+	q.Enqueue("a", "blocked", 3)
+	q.Enqueue("a", "eligible", 3)
+	q.Enqueue("b", "other", 1)
+	if v, ok := q.NextEligible(func(v any) bool { return v != "blocked" }); !ok || v != "eligible" {
+		t.Fatal(v, ok)
+	}
+	if n := q.RemoveIf(func(v any) bool { return v == "blocked" }); n != 1 {
+		t.Fatal(n)
+	}
+	if v, ok := q.Next(); !ok || v != "other" {
+		t.Fatal(v, ok)
+	}
+	if len(q.order)+len(q.queues)+len(q.weight)+len(q.credits) != 0 {
+		t.Fatal("empty owner metadata retained")
+	}
+}
