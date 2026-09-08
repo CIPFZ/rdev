@@ -9,14 +9,65 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 func testMutation(owner, id string) MutationIntent {
 	return MutationIntent{Owner: owner, OperationID: id, Operation: proto.OpExec, Host: "h", RequestDigest: strings.Repeat("a", 64), TargetDigest: strings.Repeat("b", 64), PolicyDigest: strings.Repeat("c", 64), ApprovalID: strings.Repeat("d", 64)}
+}
+
+func TestConcurrentMutationJobResolutionSharesDurableOutcome(t *testing.T) {
+	s := NewService(nil)
+	defer s.Close(context.Background())
+	if err := s.Client().Hosts.Add(transport.Host{Name: "h", Addr: "u@h"}); err != nil {
+		t.Fatal(err)
+	}
+	m := testMutation("a\x00p", "op_concurrent_resolution")
+	m.Operation = proto.OpJobStart
+	m.JobID, _ = proto.JobIDForOperation(proto.PrincipalID("a", "p"), m.OperationID)
+	m.JobDigest = strings.Repeat("e", 64)
+	m.TargetDigest, _ = s.Client().ProtocolTargetIdentity("h")
+	if err := s.Mutations.ConfigurePersistence(filepath.Join(t.TempDir(), "intents")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Mutations.Prepare(m); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"dispatched", "ambiguous"} {
+		if err := s.Mutations.Transition(m.Owner, m.OperationID, state, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	s.Mutations.persist = func(path string, records []MutationIntent) error {
+		once.Do(func() { close(entered); <-release })
+		return saveMutations(path, records)
+	}
+	info := &proto.JobInfo{ID: m.JobID, StartOperationID: m.OperationID, StartPrincipalID: proto.PrincipalID("a", "p"), StartDigest: m.JobDigest}
+	results := make(chan error, 32)
+	go func() { results <- s.ResolveMutationJob("h", m.Owner, info) }()
+	<-entered
+	for range 31 {
+		go func() { results <- s.ResolveMutationJob("h", m.Owner, info) }()
+	}
+	// Hold publication while other readers capture the same ambiguous state.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for range 32 {
+		if err := <-results; err != nil {
+			t.Fatal("concurrent recovery rejected the shared successful outcome", err)
+		}
+	}
+	got, err := s.Mutations.Get(m.Owner, m.OperationID)
+	if err != nil || got.State != "completed" || !got.RemoteOK {
+		t.Fatal("concurrent resolution did not persist outcome")
+	}
 }
 
 func TestMutationOwnerRetentionNeverEvictsReplayProtection(t *testing.T) {

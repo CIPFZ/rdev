@@ -170,7 +170,17 @@ func (s *Service) ResolveMutationJob(host, owner string, info *proto.JobInfo) er
 	if !mutationMatchesJob(m, info) {
 		return errors.New("recovered job identity conflicts with mutation intent")
 	}
-	return s.Mutations.Transition(owner, m.OperationID, "completed", true)
+	if err := s.Mutations.Transition(owner, m.OperationID, "completed", true); err != nil {
+		// Concurrent status/wait callers can all observe the same ambiguous
+		// snapshot. The first durable resolution also satisfies its peers;
+		// never turn that successful commit into a spurious client failure.
+		current, getErr := s.Mutations.Get(owner, m.OperationID)
+		if getErr == nil && current.State == "completed" && current.RemoteOK && sameMutationBinding(current, m) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Service) RecoverMutationJobs(ctx context.Context) error {

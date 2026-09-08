@@ -161,6 +161,30 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 	if err := os.Remove(gate + ".unavailable"); err != nil {
 		t.Fatal(err)
 	}
+	// Several independent clients can discover the same ambiguous start at
+	// once. Hold the first real remote status response until all are submitted.
+	recoverOp := "op_runtime_concurrent_status"
+	hold(recoverOp)
+	var observers []*lifecycleProcess
+	pids := make(map[int]bool)
+	for range 20 {
+		observer := startLifecycleProcess(t, d, a, &proto.Request{Op: proto.OpJobStatus, OperationID: recoverOp, Job: &proto.JobParams{ID: jobID}}, false)
+		observers = append(observers, observer)
+		pids[observer.cmd.Process.Pid] = true
+	}
+	awaitHeld(recoverOp)
+	if len(pids) != 20 {
+		t.Fatal("recovery clients were not independent processes")
+	}
+	if err := os.Remove(gate); err != nil {
+		t.Fatal(err)
+	}
+	for _, observer := range observers {
+		result := observer.result(t)
+		if result.Job == nil || result.Job.Info == nil || result.Job.Info.ID != jobID || result.Job.Info.StartOperationID != jobOp {
+			t.Fatal("concurrent recovery returned another job")
+		}
+	}
 	info := require(a, &proto.Request{Op: proto.OpJobStatus, Job: &proto.JobParams{ID: jobID}}).Info
 	if info == nil || info.ID != jobID || info.StartOperationID != jobOp || info.State != proto.JobRunning {
 		t.Fatal("unacknowledged job not rediscovered")
@@ -312,6 +336,7 @@ func TestRemoteBrokerMutationCrashRecovery(t *testing.T) {
 	t.Logf("real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=%d; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot", info.PID)
 	t.Log("real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only")
 	t.Logf("SIGTERM with remote mutation response held: bounded shutdown=%s; restart preserves ambiguity and refuses duplicate append", shutdownElapsed)
+	t.Log("20 independent status clients concurrently resolved the same durable job start without spurious transition failures")
 }
 
 func verifyMutationFrontends(t *testing.T, d *runtimeDaemon, owner, other broker.Owner, namespace, recoveredID string) {

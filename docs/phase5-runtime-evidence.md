@@ -732,3 +732,23 @@ transition can receive an unnecessary transition error. A targeted regression
 reproduces it in this commit; the following correction handles that race.
 This does not invalidate the above single-resolver measurements or make the
 unfinished event/resource/platform/review gates Complete.
+
+
+## Concurrent resolution correction
+
+After reading an ambiguous intent, multiple status/wait calls can each validate
+the same remote job identity. The first persists completed successfully; the
+previous implementation returned invalid transition to its peers. The correction
+rereads after a transition error and accepts only an already-completed successful
+record with exactly the same immutable binding. Storage uncertainty, different
+bindings and other errors still fail closed. No extra remote mutation or durable
+write is performed for followers.
+
+`TestConcurrentMutationJobResolutionSharesDurableOutcome` holds the first durable
+publication while 32 callers resolve it. It reproduced the old failure and passed
+ten race runs after the fix. The real remote mutation test now holds a status
+response while twenty independent frontend processes submit the same owned job
+status, then verifies successful recovery for every process. Its initial isolated
+worktree run passed all crash/append/CLI/MCP/shutdown checks in 11.844 seconds.
+Committed-source commands and results follow below. This is implementing-agent
+review; independent external review remains pending.

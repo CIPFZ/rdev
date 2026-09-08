@@ -195,3 +195,12 @@ SIGTERM runs exited in 7.017–7.018 seconds; control p95 ratios were 1.255–1.
 Logs and artifact hashes are linked from the runtime evidence. Concurrent
 resolution received an additional follow-up finding; event history, identity
 retirement, shared routes and platform/review requirements remain In progress.
+
+
+The concurrent job-resolution follow-up accepts the already-durable matching
+success when another caller wins the transition. The regression reproduces the
+old error, passes ten 32-caller race runs after the fix, and extends the real
+mutation scenario to twenty independent status processes released from a remote
+response barrier. This corrects concurrent recovery without changing owner/
+target/digest checks or enabling mutation replay. Full validation is recorded
+in the runtime evidence; overall Phase5 remains In progress.
