@@ -377,3 +377,13 @@ The same client ID in another project retains separate totals. Full batch and
 committed-artifact evidence are tracked in the runtime record. Dial/failure
 reasons, remaining shared routes, mixed load, macOS and independent review remain
 open; Phase5 and Multi Agent Gate are In progress.
+
+
+Lane implementation `a8dbe3d` passed committed-source full check, three actual
+byte-ledger/CLI/MCP scenarios, three 20-process QoS runs at 1.229–1.663 times
+baseline, stress, readiness and Linux systemd recovery. The audit sinks wrote
+146314 records, rotated three times and reported zero drops/errors. Full race,
+actual daemon race and retry/lease/wait/mutation regressions passed before commit.
+The runtime record links passing logs, diagnostic failures and artifact hashes.
+Dial/failure reasons, shared routes, mixed workload, macOS and independent review
+remain unfinished; no additional Complete label is applied.

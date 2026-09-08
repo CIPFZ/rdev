@@ -1217,3 +1217,24 @@ race-daemon byte-ledger test passed in 12.13 seconds; its daemon SHA-256 was
 `d84d42bd0d7146985e3834eb6108d63674b9b3cf829cb234f5eedbed916219fa`.
 Committed-artifact QoS, stress/readiness/service checks and archived logs follow
 after completion. This remains implementing-agent review.
+
+
+## Committed lane traffic validation: a8dbe3d
+
+Implementation `a8dbe3dd60e1d7c9936626c3ce44354b78603897` was pushed to
+`origin/main`. Committed-source `make check remote-lane-traffic remote-qos
+stress-broker smoke-rdevd remote-phase5-runtime` exited successfully with the
+previously documented Go/SSH settings.
+
+- [Committed log](evidence/phase5/2026-09-09/committed-lane-a8dbe3d.log): full check, three independent byte-ledger/CLI/MCP scenarios, three real 20-process QoS runs, stress, readiness and actual Linux service lifecycle passed.
+- Control p95 ratios were 1.6634/1.6299, 1.2689/1.2290 and 1.3411/1.3246, each below the unchanged two-times threshold. Three sinks wrote 146314 audit records with three rotations and zero reported drops/errors. This covers the existing remote file-I/O workload, not full mixed sync/job pressure.
+- Remote daemon SHA-256: `06226ed99474660c9d2680bf40f7d5e2a66ba828d36a3b1585a1ee01625c66f1`. Systemd user install/enable/start/reload/SIGKILL recovery/stop/start passed, PID `1082387 -> 1082461`.
+- Final-code [full check and lifecycle/wait/mutation regressions](evidence/phase5/2026-09-09/lane-full-check-runtime.log), [full race](evidence/phase5/2026-09-09/lane-full-race.log), [actual race daemon](evidence/phase5/2026-09-09/lane-remote-race.log), [targeted race](evidence/phase5/2026-09-09/lane-targeted-race-fixed.log) and [initial corrected wire ledger](evidence/phase5/2026-09-09/lane-runtime-fixed.log) passed.
+- The [initial runtime failure](evidence/phase5/2026-09-09/lane-runtime-initial.log), [CLI binary diagnostic](evidence/phase5/2026-09-09/lane-runtime-diagnostic.log) and [invalid canceled-terminal fixture timeout](evidence/phase5/2026-09-09/lane-pipe-diagnostic.log) remain separate diagnostics, not acceptance passes. The fixture corrections preserved production protocol and CLI validation.
+
+All three authenticated application lanes now have actual byte-for-byte runtime
+projection evidence through normal requests, retry and cancellation. Counters
+exclude bootstrap/ciphertext/unattributable frames and reset with bounded owner
+history; they are not durable billing totals. Dial/failure reasons, full shared
+secret/sync/session routes, mixed workload, macOS and independent external review
+remain open. Phase5 and the Multi Agent Gate remain In progress.

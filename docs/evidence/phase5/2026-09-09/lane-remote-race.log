@@ -1,0 +1,7 @@
+=== RUN   TestRemoteBrokerLaneTraffic
+    remote_traffic_test.go:244: project alpha independent SSH byte ledger matched CLI traffic: map[bulk:{SentBytes:616 ReceivedBytes:263110} control:{SentBytes:214 ReceivedBytes:736} exec:{SentBytes:868 ReceivedBytes:172128}]
+    remote_traffic_test.go:244: project beta independent SSH byte ledger matched CLI traffic: map[bulk:{SentBytes:300 ReceivedBytes:2067} control:{SentBytes:213 ReceivedBytes:736} exec:{SentBytes:0 ReceivedBytes:0}]
+    remote_traffic_test.go:261: real daemon/CLI/MCP/SSH: three lanes, binary/base64 and streaming bytes, dropped-terminal retry, frontend SIGKILL and late cancel frames matched independent byte-only recorder; exact project isolation and default denial passed
+--- PASS: TestRemoteBrokerLaneTraffic (12.13s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	12.132s
