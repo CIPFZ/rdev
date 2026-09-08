@@ -178,7 +178,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 		}
 		if req.Risk {
 			if err := service.ConsumeApproval(req.Approval, req.Owner.Key(), req.Operation, req.Target); err != nil {
-				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "approval_denied", Result: err.Error()})
+				service.Audit.Append(broker.AuditEvent{At: time.Now(), Owner: req.Owner.Key(), Operation: req.Operation, Decision: "approval_denied", Result: "approval_invalid"})
 				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
 				endRequest()
 				continue
@@ -237,7 +237,7 @@ func serveConn(conn net.Conn, service *broker.Service) {
 			continue
 		}
 		if req.Operation == "audit_query" {
-			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key())})
+			_ = enc.Encode(broker.Response{ID: req.ID, OK: true, Audit: service.Audit.QueryOwner(req.Since, req.Owner.Key()), AuditIncomplete: service.Audit.HasLegacyRecords()})
 			endRequest()
 			continue
 		}

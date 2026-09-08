@@ -101,3 +101,37 @@ On `020230b43e0ac6e74322728e72b7c7c02fee206e`, with a clean worktree:
 
 These checks validate the scope of this batch. They do not replace the missing
 remote session, fairness, mutation or audit-soak evidence listed above.
+
+
+## Audit identity and sink privacy follow-up
+
+The audit follow-up fixes a runtime authorization defect: `Owner.Key()` uses
+NUL between client and project, but the old writer converted it to a space
+while the query compared the original key. Queries therefore lost their own
+events, and converting queries the same way would have conflated owners such
+as `(a b,c)` and `(a,b c)`.
+
+New schema-1 records store `sha256:<digest>` of the exact owner key and query
+only that identity. Events without a supplied timestamp now receive one at the
+sink, so policy-denied events are queryable. Operation, decision and result
+fields use fixed allowlists rather than storing arbitrary input after trying
+to redact a few marker strings. The real daemon test sends an unprefixed secret
+canary as an unknown operation and verifies it never reaches the audit file.
+
+[Targeted audit runtime log](evidence/phase5/2026-09-08/audit-runtime.log) covers
+the two colliding display identities, allowed and denied requests, separate
+owner queries before and after actual process restart, and the omission marker
+for pre-existing ambiguous legacy records. Unit negatives also cover arbitrary
+text in every audit field. A remote run of the same process suite passed; the
+committed-source verification below identifies the final artifact.
+
+A separate review checked exact-key hashing, schema separation on reload,
+zero-time handling, fixed field vocabulary, and denial of ambiguous legacy
+attribution. Old schema-0 records remain in their retained disk segments for
+administrator inspection. They are not guessed into a principal's query;
+`audit_incomplete=true` signals their omission. No external reviewer approval
+is claimed while the independent-agent authorization question is pending.
+
+P5-14 remains In progress: this corrects owner isolation and low-sensitivity
+fields but does not prove long-running rotation/recovery, audit sink failure
+behavior, or end-to-end request/policy/approval correlation.

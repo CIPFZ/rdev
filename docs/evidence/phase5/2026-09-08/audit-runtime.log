@@ -1,0 +1,25 @@
+=== RUN   TestDaemonRuntimeLifecycle
+=== RUN   TestDaemonRuntimeLifecycle/audit_owner_query_restart
+    runtime_integration_test.go:340: real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded
+--- PASS: TestDaemonRuntimeLifecycle (0.43s)
+    --- PASS: TestDaemonRuntimeLifecycle/audit_owner_query_restart (0.06s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	0.437s
+=== RUN   TestAuditLogRotatesAndQueries
+--- PASS: TestAuditLogRotatesAndQueries (0.00s)
+=== RUN   TestAuditLogPersistsAndRotatesFile
+--- PASS: TestAuditLogPersistsAndRotatesFile (0.02s)
+=== RUN   TestAuditLogRecoversAfterRotation
+--- PASS: TestAuditLogRecoversAfterRotation (0.04s)
+=== RUN   TestAuditLogSanitizesFields
+--- PASS: TestAuditLogSanitizesFields (0.00s)
+=== RUN   TestAuditOwnerKeysDoNotCollideAfterSanitization
+--- PASS: TestAuditOwnerKeysDoNotCollideAfterSanitization (0.00s)
+=== RUN   TestAuditDoesNotPersistArbitraryClientText
+--- PASS: TestAuditDoesNotPersistArbitraryClientText (0.00s)
+=== RUN   TestAuditLogLoadsHistoryAndScopesOwner
+--- PASS: TestAuditLogLoadsHistoryAndScopesOwner (0.01s)
+=== RUN   TestAuditLogRestartRestoresRotatedSegment
+--- PASS: TestAuditLogRestartRestoresRotatedSegment (0.01s)
+PASS
+ok  	github.com/CIPFZ/rdev/internal/broker	0.078s

@@ -112,3 +112,16 @@ unit, verifies enable/start/reload/crash recovery/stop/start, then disables and
 removes it. `remote-phase5-runtime` also uploads a compiled test executable and
 runs the actual daemon principal/startup/crash tests, so remote Go is unnecessary.
 It requires Linux amd64, Python 3, and a running systemd user manager.
+
+
+## Audit identity compatibility
+
+New audit records use schema 1 and an opaque SHA-256 fingerprint of the exact
+client/project owner key. Owner query RPCs return only that fingerprint's
+records. Operation and result fields are fixed codes; arbitrary request text,
+secret values and outputs are excluded. Legacy schema-0 records used lossy
+owner display strings. They remain on disk subject to normal retention, but
+are omitted from principal queries with `audit_incomplete=true`, because their
+ownership cannot safely be reconstructed. Administrators can inspect the old
+segments locally. Long-running rotation and sink failure acceptance remain
+open in the Phase5 record.

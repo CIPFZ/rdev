@@ -277,6 +277,68 @@ func TestDaemonRuntimeLifecycle(t *testing.T) {
 		}
 		t.Log("real daemon: private socket, duplicate-start readiness, SIGKILL stale-socket recovery and SIGTERM cleanup passed")
 	})
+	t.Run("audit_owner_query_restart", func(t *testing.T) {
+		d := newRuntimeDaemon(t, bin)
+		legacy, err := json.Marshal(broker.AuditEvent{At: time.Now(), Owner: "a b c", Operation: "status", Result: "accepted"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(d.socket+".audit", append(legacy, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// These two owners previously collapsed to the same sanitized string.
+		owners := []broker.Owner{{ClientID: "a b", ProjectID: "c"}, {ClientID: "a", ProjectID: "b c"}}
+		policy := broker.NewPolicy()
+		for _, owner := range owners {
+			policy.Grant(owner.Key(), "status")
+			policy.Grant(owner.Key(), "audit_query")
+		}
+		if err := policy.Save(d.socket + ".policy"); err != nil {
+			t.Fatal(err)
+		}
+		d.start()
+		const canary = "private-audit-canary-without-redaction-prefix"
+		for _, owner := range owners {
+			w := d.dial(owner, d.token(owner, "1h"), true)
+			if !w.call(t, owner, "status").OK {
+				t.Fatal("status failed")
+			}
+			if w.call(t, owner, canary).OK {
+				t.Fatal("unknown operation admitted")
+			}
+			w.Close()
+		}
+		check := func() {
+			for _, owner := range owners {
+				w := d.dial(owner, d.token(owner, "1h"), true)
+				response := w.call(t, owner, "audit_query")
+				if !response.OK || len(response.Audit) != 2 {
+					t.Fatalf("audit history missing or broadened: ok=%v count=%d", response.OK, len(response.Audit))
+				}
+				if !response.AuditIncomplete {
+					t.Fatal("ambiguous legacy identity omitted without an explicit marker")
+				}
+				for _, event := range response.Audit {
+					if event.Schema != 1 || event.Owner != broker.AuditOwnerID(owner.Key()) || event.At.IsZero() {
+						t.Fatal("audit owner or timestamp mismatch")
+					}
+				}
+				w.Close()
+			}
+		}
+		check()
+		d.stop(syscall.SIGTERM)
+		d.start()
+		check()
+		data, err := os.ReadFile(d.socket + ".audit")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), canary) {
+			t.Fatal("untrusted operation text leaked into audit file")
+		}
+		t.Log("real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded")
+	})
 	t.Run("startup_fail_closed", func(t *testing.T) {
 		for _, kind := range []string{"missing_key", "weak_key", "public_key", "symlink_key", "bad_config", "null_config", "unknown_config_field", "bad_policy", "bad_jobs"} {
 			t.Run(kind, func(t *testing.T) {

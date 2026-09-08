@@ -2,14 +2,18 @@ package broker
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 type AuditEvent struct {
+	Schema    int       `json:"schema,omitempty"`
 	At        time.Time `json:"at"`
 	Owner     string    `json:"owner,omitempty"`
 	Operation string    `json:"operation,omitempty"`
@@ -76,10 +80,17 @@ func (a *AuditLog) ConfigureFile(path string, maxBytes int64) error {
 	return nil
 }
 func (a *AuditLog) Append(e AuditEvent) {
-	e.Owner = auditField(e.Owner)
-	e.Operation = auditField(e.Operation)
-	e.Decision = auditField(e.Decision)
-	e.Result = auditField(e.Result)
+	// Owner.Key contains NUL as an unambiguous separator. Sanitizing that key
+	// both broke queries and conflated distinct principal/project pairs. Keep a
+	// stable hash of the original bytes; never authorize by a display string.
+	e.Schema = 1
+	e.Owner = AuditOwnerID(e.Owner)
+	e.Operation = auditOperation(e.Operation)
+	e.Decision = auditCode(e.Decision)
+	e.Result = auditCode(e.Result)
+	if e.At.IsZero() {
+		e.At = time.Now()
+	}
 	e.At = e.At.UTC()
 	a.mu.Lock()
 	a.events = append(a.events, e)
@@ -105,34 +116,33 @@ func (a *AuditLog) Append(e AuditEvent) {
 	a.mu.Unlock()
 }
 
-func auditField(value string) string {
-	value = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, value)
-	if len(value) > 512 {
-		value = value[:512]
-	}
-	for _, marker := range []string{"secret=", "token="} {
-		searchFrom := 0
-		for searchFrom < len(value) {
-			relative := strings.Index(value[searchFrom:], marker)
-			if relative < 0 {
-				break
-			}
-			start := searchFrom + relative
-			end := start + len(marker)
-			for end < len(value) && value[end] != ' ' && value[end] != ',' && value[end] != ';' {
-				end++
-			}
-			value = value[:start] + marker + "[REDACTED]" + value[end:]
-			searchFrom = start + len(marker) + len("[REDACTED]")
-		}
-	}
-	return value
+// AuditOwnerID is an opaque correlation identity, not a credential.
+func AuditOwnerID(owner string) string {
+	sum := sha256.Sum256([]byte(owner))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
+
+func auditOperation(operation string) string {
+	if _, err := proto.RequireOperation(operation); err == nil {
+		return operation
+	}
+	switch operation {
+	case "status", "doctor", "audit_query", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.use", "fleet.plan", "fleet.execute", "fleet.approve":
+		return operation
+	default:
+		return "unknown"
+	}
+}
+
+func auditCode(code string) string {
+	switch code {
+	case "", "allow", "deny", "granted", "denied", "denied by default", "approval_denied", "approval_required", "approval_invalid", "accepted", "completed", "dispatch_error", "quota_rejected", "policy_updated", "recovery_missing", "recovery_unreachable", "state_persist_failed":
+		return code
+	default:
+		return "unknown"
+	}
+}
+
 func (a *AuditLog) Query(since time.Time) []AuditEvent {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -149,10 +159,26 @@ func (a *AuditLog) QueryOwner(since time.Time, owner string) []AuditEvent {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	out := make([]AuditEvent, 0)
+	identity := AuditOwnerID(owner)
 	for _, event := range a.events {
-		if event.Owner == owner && event.At.After(since) {
+		// Legacy records used lossy display identities. They remain on disk for
+		// administrator inspection but cannot safely be assigned to a principal.
+		if event.Schema == 1 && event.Owner == identity && event.At.After(since) {
 			out = append(out, event)
 		}
 	}
 	return out
+}
+
+// Legacy display identities cannot be reversed into exact owner keys. Expose
+// an omission marker without returning another principal's content or counts.
+func (a *AuditLog) HasLegacyRecords() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, event := range a.events {
+		if event.Schema != 1 {
+			return true
+		}
+	}
+	return false
 }
