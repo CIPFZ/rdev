@@ -105,12 +105,14 @@ func main() {
 			brokerErr = brokerServe(context.Background())
 		case "job":
 			brokerErr = brokerJob(context.Background(), os.Args[2:])
+		case "mutation":
+			brokerErr = brokerMutation(context.Background(), os.Args[2:])
 		}
 		if brokerErr != nil {
 			fmt.Fprintln(os.Stderr, brokerErr)
 			os.Exit(1)
 		}
-		if os.Args[1] == "serve" || os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm")) {
+		if os.Args[1] == "mutation" || os.Args[1] == "serve" || os.Args[1] == "ping" || os.Args[1] == "exec" || os.Args[1] == "read" || os.Args[1] == "write" || os.Args[1] == "capability" || (os.Args[1] == "job" && len(os.Args) > 2 && (os.Args[2] == "start" || os.Args[2] == "list" || os.Args[2] == "status" || os.Args[2] == "logs" || os.Args[2] == "stop" || os.Args[2] == "wait" || os.Args[2] == "rm")) {
 			return
 		}
 	}
@@ -175,6 +177,29 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func brokerMutation(ctx context.Context, args []string) error {
+	if len(args) != 2 || args[0] != "status" || proto.ValidateOperationID(args[1]) != nil {
+		return errors.New("usage: rdev mutation status <operation-id>")
+	}
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	r, err := c.DoContext(ctx, broker.Request{Operation: "mutation.status", MutationID: args[1]})
+	if err != nil {
+		return err
+	}
+	if !r.OK {
+		return errors.New(r.Error)
+	}
+	if r.Mutation == nil {
+		return errors.New("broker returned no mutation state")
+	}
+	return json.NewEncoder(os.Stdout).Encode(r.Mutation)
 }
 
 func brokerPing(ctx context.Context, args []string) error {

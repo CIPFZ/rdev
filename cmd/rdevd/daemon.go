@@ -154,9 +154,16 @@ func runDaemon(args []string) error {
 		return fmt.Errorf("job registry load failed: %w", err)
 	}
 	jobsLoaded = true
+	if err := service.Mutations.ConfigurePersistence(*socket + ".mutations"); err != nil {
+		return fmt.Errorf("mutation registry load failed: %w", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, 30*time.Second)
+	if err := service.RecoverMutationJobs(recoveryCtx); err != nil {
+		cancelRecovery()
+		return fmt.Errorf("mutation recovery failed: %w", err)
+	}
 	service.RecoverJobs(recoveryCtx)
 	cancelRecovery()
 	if ctx.Err() != nil {

@@ -610,6 +610,8 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 			err = proto.NewError(proto.CodeInvalidRequest, request.OperationID, proto.StateNotSent)
 		} else if request.Op == proto.OpJobWait {
 			response.Job, err = jobWaitContext(ctx, waits, request.Job, state)
+		} else if request.Op == proto.OpJobStart {
+			response.Job, err = jobStartRequest(request, state)
 		} else {
 			response.Job, err = doJob(request.Op, request.Job, state)
 		}

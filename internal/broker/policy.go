@@ -156,6 +156,8 @@ func validateHostGrant(host, capability, operation string) error {
 // substitute an unrelated granted capability for the operation being executed.
 func CapabilityForOperation(operation string) string {
 	switch operation {
+	case "mutation.status":
+		return "mutation.read"
 	case "exec":
 		return "exec"
 	case "read_file", "list":

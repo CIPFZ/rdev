@@ -640,3 +640,74 @@ replay digests`).
 This closes the discovered digest omission. It does not add durable operation
 IDs, broker mutation intents or persistent remote deduplication. P5-10/P5-16
 and the crash/replay gate remain In progress.
+
+
+## Durable mutation intents and pre-acknowledgment recovery
+
+The broker now persists an owner-scoped mutation intent before queue admission
+and a possibly-executed boundary before remote I/O. Its private schema-1 snapshot
+stores only identity/binding/outcome metadata, never request bodies or raw output.
+Failed pre-rename writes preserve the active snapshot; uncertain directory sync
+fails closed. Restart converts prepared intents to not_sent and dispatched
+intents to ambiguous. Stable operation IDs remain reserved for every outcome.
+
+Job starts additionally reserve an owner-bound job ID before dispatch and persist
+a remote identity tombstone before launching a supervisor. A new remote agent
+can recover matching metadata after cache loss but cannot start a missing or
+removed replay. Original owner, host/session digest, job ID, operation ID and
+request digest must all match for recovery. A pending start cannot race job_rm.
+
+A separate post-implementation code review found and fixed these boundaries:
+
+- A second agent's not_sent rejection cannot prove the first attempt did not
+  execute. Mutating retries retain ambiguity unless durable recovery succeeds.
+- Correlated first-attempt remote rejections and terminal handler failures must
+  be recorded distinctly, so failed start reservations can be cleaned without
+  weakening protection of actually ambiguous starts.
+- Strict snapshot parsing now bounds nesting to 32 in addition to byte/count
+  limits and duplicate/null/unknown-field checks. One owner's retention limit
+  does not evict replay identities or alter another owner's per-owner budget.
+- Audit correlation uses a hashed operation_ref; raw caller-selected operation
+  IDs and payloads are excluded from the audit.
+
+This is a second code-review pass by the implementing agent, not independent
+external review. That acceptance requirement remains open.
+
+`make remote-mutation` uses actual OpenSSH, production daemon and remote agent,
+independent frontend processes and a wrapper holding selected terminal responses.
+The wrapper changes response delivery only; it cannot replace remote execution.
+The targeted assertions are:
+
+1. A detached job writes once before the broker receives its start ACK; SIGKILL
+   and an SSH-unavailable restart retain intent and ownership. Connectivity
+   restoration finds the same supervisor and resolves only the original owner.
+2. Same-ID replay and changed-command substitution are refused. A new remote
+   agent recovers matching metadata, while a deleted job's tombstone refuses
+   execution. Completed intents do not resurrect removed job ownership.
+3. An append executes once before SIGKILL. Restart retains ambiguity, and replay
+   cannot append again. A real intent-file rename failure sends no mutation.
+4. Real CLI and MCP stdio processes propagate explicit operation IDs, query
+   recovered outcomes, reject other projects and prevent duplicate appends.
+5. Definitive pre-admission rejection and handler failure permit owner-only
+   reservation cleanup without permitting the old ID to execute later.
+6. SIGTERM with an already-executed write's terminal response held preserves
+   ambiguity and refuses a duplicate after restart. Audit queries prove owner
+   isolation, hashed operation correlation and absence of raw IDs/payloads.
+
+The new SIGTERM injection initially failed all three normal runs and the actual
+race daemon: shutdown exceeded the existing 12-second process bound. Full check
+and full repository race had passed that implementation. Investigation found
+that Service.Close spent its entire ten-second context on graceful drain before
+starting cancellation and transport cleanup. It now reserves half the remaining
+budget (at most five seconds) for grace, cancels the scheduler, bounds transport
+teardown and waits for request outcome publication within the original context.
+The initial fixed runs exited in about seven seconds, with ambiguous state
+preserved. Committed-source verification below provides final measurements.
+
+Remaining limits: identities are retained without eviction (8192 global, 1024
+per owner; broker snapshot also 8 MiB), and safe retirement is not implemented.
+Generic uncertain mutations have no stored raw output or automatic application
+reconciliation. Tests cover process crashes, not physical remote-host power loss;
+remote job metadata remains atomically published rather than power-loss tested.
+Durable event replay, remaining shared routes, full workload/upgrade/failure
+matrices, macOS launchd and external independent review remain incomplete.

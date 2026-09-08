@@ -63,6 +63,12 @@ func withoutEnvValue(env []string, key string) []string {
 }
 
 func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	if p.DurableStart {
+		return nil, errDurableStartNeedsIdentity
+	}
+	return jobStartWithIdentity(p, state, nil, false)
+}
+func jobStartWithIdentity(p *proto.JobParams, state string, identity *jobStartIdentity, replay bool) (*proto.JobResult, error) {
 	if p.Spec == nil || len(p.Spec.Argv) == 0 {
 		return nil, invalidRequestError("job spec with argv required")
 	}
@@ -80,17 +86,33 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	// publishes meta.json.
 	var effective proto.ResourceEnvelope
 	var id, dir string
+	reserved := false
 	err := withJobLock(filepath.Join(state, "jobs", ".admission"), func() error {
 		var err error
+		if identity != nil {
+			reserved, err = reserveJobStart(state, *identity, !replay)
+			if err != nil {
+				return err
+			}
+			id, dir = identity.JobID, jobDir(state, identity.JobID)
+			if reserved {
+				return nil
+			}
+		}
 		effective, err = enforceJobEnvelope(p, state)
 		if err != nil {
 			return limitExceededError(err.Error())
 		}
 		for attempt := 0; attempt < 32; attempt++ {
-			id = jobIDGenerator()
+			if identity == nil {
+				id = jobIDGenerator()
+			}
 			dir = jobDir(state, id)
 			if err := os.Mkdir(dir, 0o755); err != nil {
 				if errors.Is(err, os.ErrExist) {
+					if identity != nil {
+						return proto.NewError(proto.CodeAmbiguousOutcome, identity.OperationID, proto.StatePossiblyExecuted)
+					}
 					continue
 				}
 				return err
@@ -108,11 +130,17 @@ func jobStart(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	}
 	var result *proto.JobResult
 	err = withJobLock(dir, func() error {
-		result, err = startJobTransaction(p, id, dir, effective)
+		if reserved {
+			result, err = recoveredJobStart(dir, identity)
+			return err
+		}
+		result, err = startJobTransaction(p, id, dir, effective, identity)
 		return err
 	})
 	if err != nil {
-		removeJobLock(dir)
+		if identity == nil {
+			removeJobLock(dir)
+		}
 		return nil, err
 	}
 	return result, nil
@@ -130,7 +158,7 @@ var writeJobMeta = func(path string, v any) error { return writeJSON(path, v) }
 // visible job record is committed until meta.json is atomically published. If
 // any post-Start step fails, the whole process group is killed and reaped before
 // the directory is removed, so metadata failures cannot strand a runnable job.
-func startJobTransaction(p *proto.JobParams, id, dir string, effective proto.ResourceEnvelope) (*proto.JobResult, error) {
+func startJobTransaction(p *proto.JobParams, id, dir string, effective proto.ResourceEnvelope, identity *jobStartIdentity) (*proto.JobResult, error) {
 	cmd, err := buildCmd(p.Spec)
 	if err != nil {
 		os.RemoveAll(dir)
@@ -180,7 +208,7 @@ func startJobTransaction(p *proto.JobParams, id, dir string, effective proto.Res
 		os.RemoveAll(dir)
 		return nil, processStartError(err)
 	}
-	identity, err := processIdentity(cmd.Process.Pid)
+	processToken, err := processIdentity(cmd.Process.Pid)
 	if err != nil {
 		_ = rollbackStartedJob(cmd, dir)
 		stdout.Close()
@@ -196,11 +224,14 @@ func startJobTransaction(p *proto.JobParams, id, dir string, effective proto.Res
 		Argv:               p.Spec.Argv,
 		Cwd:                p.Spec.Cwd,
 		PID:                cmd.Process.Pid,
-		ProcessIdentity:    identity,
+		ProcessIdentity:    processToken,
 		StartedAt:          time.Now().UTC().Format(time.RFC3339Nano),
 		StoragePolicy:      policy.PerJob,
 		RequestedResources: resourceOrZero(p.Resources),
 		EffectiveResources: effective,
+	}
+	if identity != nil {
+		meta.StartOperationID, meta.StartPrincipalID, meta.StartDigest = identity.OperationID, identity.PrincipalID, identity.Digest
 	}
 	if err := writeJobMeta(filepath.Join(dir, "meta.json"), meta); err != nil {
 		rbErr := rollbackStartedJob(cmd, dir)

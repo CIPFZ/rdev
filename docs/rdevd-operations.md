@@ -300,8 +300,8 @@ removal succeeded but the broker reports a persistence failure, repair the local
 storage and obtain a new approval for the exact same job removal. The owned
 Missing result completes durable cleanup. An uncertain directory-sync failure
 requires restarting the broker to load the authoritative snapshot; unrelated
-control requests remain available. Never blindly repeat a failed job start: the
-pre-acknowledgement crash window still needs durable mutation intent recovery.
+control requests remain available. Use the recorded mutation operation ID to query an uncertain job start; the
+recovery workflow below preserves its identity across broker restart.
 
 Shared job listing requires an agent advertising `job_filter_ids`; an older
 agent receives no scoped request and the client reports unsupported_feature.
@@ -324,3 +324,73 @@ event replay remains unfinished. Modern remote supervisors relay job_stop TERM
 to the command group and persist output before exiting, preserving tail-on-exit.
 Forced KILL and old supervisors can still lose in-memory output; their existing
 stop semantics are retained.
+
+
+## Durable mutation outcomes
+
+In shared mode, set `RDEV_OPERATION_ID` to a valid unique operation ID before a
+CLI mutation when the invoking process must recover after its own crash. MCP
+exec/write/job start/stop/rm tools accept `operation_id` per call. Without an
+explicit ID, the broker frontend generates one and includes it in transport
+errors; persist an explicit ID in the caller before submitting critical work.
+IDs are opaque labels, not a place for credentials or command text.
+
+With the original client/project credentials and a `mutation.status` policy grant
+(server capability `mutation.read`), query without submitting another mutation:
+
+```sh
+RDEV_BROKER_SOCKET=/private/rdevd.sock rdev mutation status op_example_123
+```
+
+The broker MCP tool is `rdev_mutation_status` with `operation_id`. Other projects
+cannot query the record, even if granted the same operation capability. The
+response includes the original operation, host, digests, optional job ID and:
+
+| State | Meaning |
+|---|---|
+| `prepared` | Intent durable; remote dispatch has not begun |
+| `dispatched` | Remote I/O may have started; no durable terminal outcome yet |
+| `not_sent` | No dispatch, or a correlated remote pre-admission rejection |
+| `completed` | Terminal outcome recorded; `remote_ok` distinguishes success from a handler failure |
+| `ambiguous` | Execution may have happened; do not repeat the side effect |
+
+Every recorded ID remains reserved, including rejected and failed operations.
+Repeating it returns the recorded state; changing its host/parameters returns an
+identity conflict. A fresh approval does not bypass this protection. For an
+ambiguous job start, query the returned job ID with the original owner. Matching
+remote start identity resolves the intent and permits management of the existing
+job. During an outage, ownership is retained. An unresolved start cannot be
+removed until identity is verified; an ambiguous generic exec/write requires
+application-specific inspection because raw output is not stored in the intent.
+
+The broker's 0600 `.mutations` snapshot is schema 1, bounded to 8 MiB, 8192
+records globally and 1024 per owner. Startup rejects malformed/duplicate/null/
+future/private-mode violations and nesting over 32; invalid files are preserved.
+`prepared` becomes `not_sent`, and `dispatched` becomes `ambiguous` on restart.
+A failure before rename leaves the old active snapshot. Uncertain directory sync
+fails closed until restart. The audit uses a SHA-256 `operation_ref` to correlate
+these records without logging caller-selected IDs or request contents.
+
+Shared job starts require the negotiated `durable_job_start` agent feature. The
+remote private `job-start-intents` directory stores fsynced identity tombstones
+before any supervisor launches. A new agent may recover matching metadata but
+will never start a missing or removed replay. Job removal and GC retain these
+tombstones. The same global/per-principal count bounds apply. These limits fail
+closed; automatic retirement is not implemented. Do not delete the broker
+snapshot or remote tombstones to reset the limits: that would discard replay
+protection. Identity retirement remains a Phase5 operational gap.
+
+`make remote-mutation RDEV_SSH_CONFIG=/path/to/ssh/config` exercises real SSH,
+SIGKILL before broker acknowledgment, SSH-outage restart, job identity recovery,
+append-once proof, rename failure before dispatch, actual CLI/MCP processes,
+owner isolation, definitive rejection cleanup and SIGTERM with a held remote
+terminal response. The test intercepts only selected responses in an OpenSSH
+wrapper; remote commands and agent behavior are production code. It proves
+process-crash semantics, not storage survival after a remote machine power loss.
+
+On shutdown, the broker uses up to five seconds (half the remaining shutdown
+budget) for graceful requests, then cancels scheduled work, closes transports
+and waits for durable outcome publication within the original ten-second
+context. A held remote response becomes ambiguous; no shutdown path replays it.
+An uninterruptible filesystem operation and physical power-loss durability still
+require broader failure testing.

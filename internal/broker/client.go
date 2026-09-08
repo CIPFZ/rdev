@@ -53,7 +53,7 @@ func (c *Client) Do(req Request) (Response, error) {
 // DoContext sends one request and tears down this local broker connection when
 // ctx is canceled. The remote transport remains owned by rdevd and is not
 // affected by cancellation of this frontend connection.
-func (c *Client) DoContext(ctx context.Context, req Request) (Response, error) {
+func (c *Client) DoContext(ctx context.Context, req Request) (result Response, callErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -71,6 +71,28 @@ func (c *Client) DoContext(ctx context.Context, req Request) (Response, error) {
 	}
 	if req.Approval == "" {
 		req.Approval = os.Getenv("RDEV_APPROVAL_TOKEN")
+	}
+	if IsWireMutation(req) {
+		wire := *req.Wire
+		if wire.OperationID == "" {
+			wire.OperationID = os.Getenv("RDEV_OPERATION_ID")
+		}
+		if wire.OperationID == "" {
+			id, err := proto.NewOperationID()
+			if err != nil {
+				return Response{}, err
+			}
+			wire.OperationID = id
+		}
+		if proto.ValidateOperationID(wire.OperationID) != nil {
+			return Response{}, fmt.Errorf("invalid mutation operation ID")
+		}
+		req.Wire = &wire
+		defer func() {
+			if callErr != nil {
+				callErr = fmt.Errorf("mutation %s: %w", wire.OperationID, callErr)
+			}
+		}()
 	}
 	if err := req.Owner.Validate(); err != nil {
 		return Response{}, err
@@ -98,6 +120,9 @@ func (c *Client) DoContext(ctx context.Context, req Request) (Response, error) {
 			return Response{}, ctx.Err()
 		}
 		return Response{}, err
+	}
+	if !response.OK && response.Mutation != nil {
+		response.Error = fmt.Sprintf("mutation %s [%s]: %s", response.Mutation.OperationID, response.Mutation.State, response.Error)
 	}
 	return response, nil
 }

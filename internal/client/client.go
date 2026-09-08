@@ -138,11 +138,13 @@ func (c *Client) doProtocolLane(ctx context.Context, host string, req *proto.Req
 	if _, err := proto.RequireOperation(req.Op); err != nil {
 		return nil, err
 	}
+	if req.OperationID != "" && proto.ValidateOperationID(req.OperationID) != nil {
+		return nil, proto.NewError(proto.CodeInvalidRequest, req.OperationID, proto.StateNotSent)
+	}
 	// A shared Client must not collapse every principal into c.callerID. Length
 	// framing preserves both fields even when owner strings contain separators;
 	// hashing also produces a protocol-valid ID for arbitrary local owner names.
-	identity := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%d:%s", len(req.ClientID), req.ClientID, len(req.ProjectID), req.ProjectID)))
-	callerID := fmt.Sprintf("principal_%x", identity)
+	callerID := proto.PrincipalID(req.ClientID, req.ProjectID)
 	response, _, err := c.doBuiltForLane(ctx, host, target, bulk, func(operationIdentity) (*builtRequest, error) {
 		if target != "" {
 			current, err := c.ProtocolTargetIdentity(host)
@@ -151,7 +153,7 @@ func (c *Client) doProtocolLane(ctx context.Context, host string, req *proto.Req
 			}
 		}
 		copy := *req
-		return &builtRequest{Request: &copy, CallerID: callerID}, nil
+		return &builtRequest{Request: &copy, CallerID: callerID, StableOperationID: req.OperationID}, nil
 	})
 	return response, err
 }
@@ -629,7 +631,8 @@ type builtRequest struct {
 	Request *proto.Request
 	Echo    map[string]string
 	// Set only by the authenticated broker-facing entrypoint.
-	CallerID string
+	CallerID          string
+	StableOperationID string
 }
 
 // do sends a request according to the retry policy in proto's shared operation
@@ -714,6 +717,9 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
 		}
 		if attempt == 0 {
+			if built.StableOperationID != "" {
+				operationID = built.StableOperationID
+			}
 			operationName = built.Request.Op
 			var descriptorErr error
 			descriptor, descriptorErr = proto.RequireOperation(operationName)
@@ -734,7 +740,7 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			if deadlineSupported && built.Request.DeadlineUnixMilli != 0 && (deadlineUnixMilli == 0 || built.Request.DeadlineUnixMilli < deadlineUnixMilli) {
 				deadlineUnixMilli = built.Request.DeadlineUnixMilli
 			}
-		} else if built.Request.Op != operationName {
+		} else if built.Request.Op != operationName || built.StableOperationID != "" && built.StableOperationID != operationID {
 			release()
 			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
 		}
@@ -750,6 +756,13 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 		if built.Request.Op == proto.OpJobList && built.Request.Job != nil && built.Request.Job.FilterIDs {
 			negotiated, ok := pooled.conn.(negotiatedConnection)
 			if !ok || negotiated.NegotiatedVersion() < 3 || !negotiated.SupportsFeature(proto.FeatureJobFilterIDs) {
+				release()
+				return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+			}
+		}
+		if built.Request.Op == proto.OpJobStart && built.Request.Job != nil && built.Request.Job.DurableStart {
+			negotiated, ok := pooled.conn.(negotiatedConnection)
+			if !ok || negotiated.NegotiatedVersion() < 3 || !negotiated.SupportsFeature(proto.FeatureDurableJobStart) {
 				release()
 				return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
 			}
@@ -807,6 +820,12 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			c.Hosts.RecordRequestEvent(observe.RequestCompleted)
 			return safeResp, safeEcho, nil
 		}
+		if attempt > 0 && descriptor.Class == proto.ClassMutating {
+			// A fresh agent rejecting the replay says nothing about whether the
+			// first agent executed it. Only successful durable recovery resolves
+			// that uncertainty; never expose the later rejection as not_sent.
+			return nil, safeEcho, proto.NewError(proto.CodeAmbiguousOutcome, operationID, proto.StatePossiblyExecuted)
+		}
 		// A remote-reported error is a real answer, not a broken pipe. Context
 		// cancellation is handled by protocol-level cancel in the transport and
 		// must never be converted into a transparent replay here.
@@ -827,6 +846,11 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			// Read-only and explicitly idempotent operations may reconnect once.
 			continue
 		case proto.RetryDeduplicated:
+			if built.Request.Op == proto.OpJobStart && built.Request.Job != nil && built.Request.Job.DurableStart {
+				// A durable replay may recover only a matching remote tombstone.
+				// Missing or removed records are ambiguous and cannot launch again.
+				continue
+			}
 			// A transport failure tears down this per-SSH-channel agent process.
 			// Its in-memory dedupe cache therefore cannot prove that a mutation
 			// did not already execute. Preserve the stable operation identity for

@@ -142,7 +142,8 @@ func TestCLIUsesSharedBrokerService(t *testing.T) {
 	startCmd.Env = append(os.Environ(), "RDEV_BROKER_SOCKET="+socket, "RDEV_CLIENT_ID=cli-allowed", "RDEV_PROJECT_ID=phase5")
 	approve(startCmd, &proto.Request{Op: proto.OpJobStart, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"echo", "background"}, LoginShell: true}}})
 	startOut, startErr := startCmd.CombinedOutput()
-	if startErr != nil || !strings.Contains(string(startOut), "job-2") {
+	var started proto.JobInfo
+	if startErr != nil || json.Unmarshal(startOut, &started) != nil || started.StartOperationID == "" || started.ID == "" {
 		t.Fatalf("broker job start failed: err=%v output=%q", startErr, startOut)
 	}
 	logsCmd := exec.Command(cli, "job", "logs", "remote-that-is-not-an-ssh-host", "job-1")
@@ -247,7 +248,16 @@ func runCLIBrokerDaemon(t *testing.T) {
 			return &proto.Response{OK: true, Job: &proto.JobResult{Info: &proto.JobInfo{ID: "job-1"}}}, nil
 		}
 		if req.Op == proto.OpJobStart {
-			return &proto.Response{OK: true, Job: &proto.JobResult{Info: &proto.JobInfo{ID: "job-2"}}}, nil
+			principal := proto.PrincipalID(req.ClientID, req.ProjectID)
+			id, err := proto.JobIDForOperation(principal, req.OperationID)
+			if err != nil {
+				return nil, err
+			}
+			digest, err := proto.DurableJobDigest(req)
+			if err != nil {
+				return nil, err
+			}
+			return &proto.Response{OK: true, Job: &proto.JobResult{Info: &proto.JobInfo{ID: id, StartOperationID: req.OperationID, StartPrincipalID: principal, StartDigest: digest}}}, nil
 		}
 		if req.Op == proto.OpJobLogs {
 			return &proto.Response{OK: true, Job: &proto.JobResult{Logs: "broker-logs"}}, nil

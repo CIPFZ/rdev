@@ -1077,7 +1077,9 @@ Phase 3 完成记录：
 SSH 不可用启动、reload 和远端删除/本地持久化失败后保留 owner；`bd03436`
 验证 20 个真实进程合并 wait、断开重连、跨项目拒绝、TERM 输出保留和 observation
 shutdown；`20b4615` 修复并实测 replay digest 的 state/capability 参数遗漏。
-这些测试尚未覆盖 pre-ACK mutation intent、持久事件 replay、完整混合负载、
+后续 `make remote-mutation` 增加真实 pre-ACK job/append 崩溃、稳定 operation ID、
+远端 durable tombstone、CLI/MCP 恢复查询及跨项目拒绝。这些测试尚未覆盖
+安全 identity retirement、持久事件 replay、完整混合负载、
 launchd 和独立外部 review，所以上述未勾选 Gate 保持未完成。详细提交及日志见
 `docs/phase5-acceptance.md` 和 `docs/phase5-runtime-evidence.md`。
 

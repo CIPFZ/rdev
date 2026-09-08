@@ -11,6 +11,7 @@ import (
 )
 
 type AuditEvent struct {
+	OperationRef  string    `json:"operation_ref,omitempty"`
 	RequestDigest string    `json:"request_digest,omitempty"`
 	TargetDigest  string    `json:"target_digest,omitempty"`
 	ApprovalID    string    `json:"approval_id,omitempty"`
@@ -136,7 +137,7 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
 	e.Schema = 1
-	for _, field := range []*string{&e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID} {
+	for _, field := range []*string{&e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID, &e.OperationRef} {
 		if digest, err := hex.DecodeString(*field); err != nil || len(digest) != sha256.Size {
 			*field = ""
 		}
@@ -182,7 +183,7 @@ func auditOperation(operation string) string {
 		return operation
 	}
 	switch operation {
-	case "status", "doctor", "audit_query", "audit.health", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.use", "fleet.plan", "fleet.execute", "fleet.approve":
+	case "status", "doctor", "audit_query", "audit.health", "mutation.status", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.use", "fleet.plan", "fleet.execute", "fleet.approve":
 		return operation
 	default:
 		return "unknown"

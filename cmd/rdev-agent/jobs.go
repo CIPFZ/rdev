@@ -62,13 +62,16 @@ func doJob(op string, p *proto.JobParams, state string) (*proto.JobResult, error
 // jobMeta is the on-disk record. It is the single source of truth: a fresh
 // agent process reconstructs everything by reading these files.
 type jobMeta struct {
-	SignalRelay   bool     `json:"signal_relay,omitempty"`
-	SchemaVersion int      `json:"schema_version"`
-	ID            string   `json:"id"`
-	Label         string   `json:"label,omitempty"`
-	Argv          []string `json:"argv"`
-	Cwd           string   `json:"cwd,omitempty"`
-	PID           int      `json:"pid"`
+	StartOperationID string   `json:"start_operation_id,omitempty"`
+	StartPrincipalID string   `json:"start_principal_id,omitempty"`
+	StartDigest      string   `json:"start_digest,omitempty"`
+	SignalRelay      bool     `json:"signal_relay,omitempty"`
+	SchemaVersion    int      `json:"schema_version"`
+	ID               string   `json:"id"`
+	Label            string   `json:"label,omitempty"`
+	Argv             []string `json:"argv"`
+	Cwd              string   `json:"cwd,omitempty"`
+	PID              int      `json:"pid"`
 	// ProcessIdentity is an immutable kernel-provided start token for PID. A
 	// PID alone is reusable; this token is checked before every signal.
 	ProcessIdentity    string                 `json:"process_identity,omitempty"`
@@ -168,6 +171,7 @@ func jobStatus(id, state string) (*proto.JobInfo, error) {
 //     lost in that case, but the job is still observable and stoppable.
 func metaToInfo(m *jobMeta, dir string) *proto.JobInfo {
 	info := &proto.JobInfo{
+		StartOperationID: m.StartOperationID, StartPrincipalID: m.StartPrincipalID, StartDigest: m.StartDigest,
 		ID:        m.ID,
 		Label:     m.Label,
 		Argv:      m.Argv,

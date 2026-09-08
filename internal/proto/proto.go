@@ -166,6 +166,9 @@ type WriteParams struct {
 
 // JobParams covers the job lifecycle ops.
 type JobParams struct {
+	// DurableStart is set by a broker that recorded an owner-bound start intent.
+	// The agent derives its reserved job ID from ClientID and OperationID.
+	DurableStart bool `json:"durable_start,omitempty"`
 	// FilterIDs limits job_list to exactly IDs before counting/limiting. With
 	// this flag, an empty set returns no records. Requires job_filter_ids.
 	FilterIDs bool `json:"filter_ids,omitempty"`
@@ -452,13 +455,16 @@ type WriteResult struct {
 
 // JobInfo is the persisted record of one job.
 type JobInfo struct {
-	OperationID string         `json:"operation_id,omitempty"`
-	Terminal    bool           `json:"terminal"`
-	Execution   ExecutionState `json:"execution_state"`
-	ID          string         `json:"id"`
-	Label       string         `json:"label,omitempty"`
-	Argv        []string       `json:"argv"`
-	Cwd         string         `json:"cwd,omitempty"`
+	StartOperationID string         `json:"start_operation_id,omitempty"`
+	StartPrincipalID string         `json:"start_principal_id,omitempty"`
+	StartDigest      string         `json:"start_digest,omitempty"`
+	OperationID      string         `json:"operation_id,omitempty"`
+	Terminal         bool           `json:"terminal"`
+	Execution        ExecutionState `json:"execution_state"`
+	ID               string         `json:"id"`
+	Label            string         `json:"label,omitempty"`
+	Argv             []string       `json:"argv"`
+	Cwd              string         `json:"cwd,omitempty"`
 	// PID is the supervisor process, which is also the job's process group id.
 	PID   int    `json:"pid"`
 	State string `json:"state"`

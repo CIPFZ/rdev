@@ -175,6 +175,7 @@ func decodeJSONValue(raw []byte) (any, bool) {
 // ---------- exec ----------
 
 type ExecIn struct {
+	OperationID   string   `json:"operation_id,omitempty" jsonschema:"Stable mutation identity for recovery in shared broker mode"`
 	ApprovalToken string   `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
 	Host          string   `json:"host" jsonschema:"Host alias or ssh destination such as user@1.2.3.4:2222"`
 	Argv          []string `json:"argv" jsonschema:"Command and arguments as separate array elements. Never a shell string: argv is exec'd directly so quotes and $(...) are passed through literally. Use argv ['sh','-c','a | b'] only when you genuinely need a pipeline."`
@@ -264,6 +265,7 @@ func toExecOut(res *client.ExecResult) ExecOut {
 // ---------- jobs ----------
 
 type JobStartIn struct {
+	OperationID   string            `json:"operation_id,omitempty" jsonschema:"Stable mutation identity for recovery in shared broker mode"`
 	ApprovalToken string            `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
 	Host          string            `json:"host"`
 	Argv          []string          `json:"argv" jsonschema:"Command and arguments as separate array elements."`
@@ -347,6 +349,7 @@ type JobLogsOut struct {
 }
 
 type JobStopIn struct {
+	OperationID   string `json:"operation_id,omitempty" jsonschema:"Stable mutation identity for recovery in shared broker mode"`
 	ApprovalToken string `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
 	Host          string `json:"host"`
 	ID            string `json:"id"`
@@ -385,6 +388,7 @@ type JobWaitOut struct {
 }
 
 type JobRmIn struct {
+	OperationID   string `json:"operation_id,omitempty" jsonschema:"Stable mutation identity for recovery in shared broker mode"`
 	ApprovalToken string `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
 	Host          string `json:"host"`
 	ID            string `json:"id,omitempty" jsonschema:"Remove this one job. Omit to sweep using the filters below."`
@@ -605,6 +609,7 @@ type ReadOut struct {
 }
 
 type WriteIn struct {
+	OperationID   string `json:"operation_id,omitempty" jsonschema:"Stable mutation identity for recovery in shared broker mode"`
 	ApprovalToken string `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
 	Host          string `json:"host"`
 	Path          string `json:"path"`

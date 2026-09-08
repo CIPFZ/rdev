@@ -38,6 +38,7 @@ type Service struct {
 	observationCtx   context.Context
 	stopObservations context.CancelFunc
 	Jobs             *JobRegistry
+	Mutations        *MutationRegistry
 	Principals       PrincipalAuthority
 	dispatchMu       sync.RWMutex
 	dispatchOverride func(context.Context, string, *proto.Request) (*proto.Response, error)
@@ -64,6 +65,7 @@ func NewService(lookup client.AgentLookup) *Service {
 	observationCtx, stopObservations := context.WithCancel(context.Background())
 	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[sharedKey]*sharedDispatch), Jobs: NewJobRegistry(), observationCtx: observationCtx, stopObservations: stopObservations}
 	s.SetReady(true)
+	s.Mutations = NewMutationRegistry()
 	return s
 }
 
@@ -363,8 +365,28 @@ func (s *Service) Close(ctx context.Context) error {
 		return ErrClosed
 	}
 	s.stopObservations()
-	_ = s.Drain(ctx)
-	err := s.Scheduler.Close(ctx)
-	s.client.Close()
-	return err
+	// Reserve time for cancellation, transport teardown and durable outcome
+	// publication. Giving Drain the entire shutdown deadline leaves no budget
+	// for those steps when a remote terminal response is stuck.
+	grace := 5 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		grace = min(grace, max(time.Duration(0), time.Until(deadline)/2))
+	}
+	graceCtx, cancel := context.WithTimeout(ctx, grace)
+	_ = s.Drain(graceCtx)
+	cancel()
+	schedulerErr := s.Scheduler.Close(ctx)
+	transportDone := make(chan struct{})
+	go func() {
+		s.client.Close()
+		close(transportDone)
+	}()
+	select {
+	case <-transportDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	// Scheduler completion precedes the caller's durable mutation transition.
+	// Wait for EndRequest too, so shutdown does not race that final commit.
+	return errors.Join(schedulerErr, s.Drain(ctx))
 }

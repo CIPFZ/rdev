@@ -446,6 +446,21 @@ func (r *JobRegistry) RecordResponse(host, owner string, req *proto.Request, res
 		if resp.Job.Info == nil || resp.Job.Info.ID == "" {
 			return fmt.Errorf("job_start response missing job identity")
 		}
+		if req.Job != nil && req.Job.DurableStart {
+			principal := proto.PrincipalID(req.ClientID, req.ProjectID)
+			id, err := proto.JobIDForOperation(principal, req.OperationID)
+			if err != nil {
+				return err
+			}
+			digest, err := proto.DurableJobDigest(req)
+			if err != nil {
+				return err
+			}
+			info := resp.Job.Info
+			if info.ID != id || info.StartOperationID != req.OperationID || info.StartPrincipalID != principal || info.StartDigest != digest {
+				return errors.New("remote job start identity mismatch")
+			}
+		}
 		return r.Put(JobRef{ID: resp.Job.Info.ID, Host: host, Owner: owner})
 	case proto.OpJobRm:
 		if req.Job == nil || req.Job.ID == "" {

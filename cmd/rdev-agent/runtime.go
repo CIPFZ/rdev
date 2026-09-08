@@ -113,7 +113,8 @@ func (c *operationCache) begin(req *proto.Request, cancel context.CancelFunc) be
 		}
 		return beginResult{record: record, join: true}
 	}
-	if req.Replay && descriptor.Class == proto.ClassMutating {
+	durableStart := req.Op == proto.OpJobStart && req.Job != nil && req.Job.DurableStart
+	if req.Replay && descriptor.Class == proto.ClassMutating && !durableStart {
 		return beginResult{envelope: proto.NewError(proto.CodeAmbiguousOutcome, req.OperationID, proto.StatePossiblyExecuted)}
 	}
 	if len(c.records) >= c.capacity {
