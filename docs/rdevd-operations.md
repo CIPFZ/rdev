@@ -794,5 +794,19 @@ substitution, repeated raw reads, project isolation, a held real SSH source
 response canceled by its frontend, preservation of the other project's base
 agent, and daemon SIGKILL recovery. Full batch and committed validation are
 recorded in the Phase5 runtime document. Declarative principal delegation, secret
-archive retirement, mixed archive load, broader storage/upgrade cases and shared
-sync/session workflows remain open.
+archive retirement, wider archive capacity/mixed-load cases, broader storage/
+upgrade cases and shared sync/session workflows remain open.
+
+
+`make remote-secret-qos` provisions 512 historical versions through authenticated,
+separately approved RPCs (two projects, 256 versions each), verifies all retired
+values remain redacted before and after SIGKILL, then runs the real 20-process
+SSH bulk/control scenario three times. It keeps the existing 2x control p95 SLO,
+weighted fairness and three-second no-progress assertions, owner SIGKILL checks
+and bulk idle TTL checks. This covers a populated archive with fixed short
+synthetic credentials; the global 4096-version/16 MiB limit, concurrent archive
+mutation under load and mixed exec/job/sync remain separate acceptance cases.
+Redaction caches immutable escaped-value plans across calls and in-flight
+snapshots, and skips full matching only when a conservative compacted-value trie
+proves no registered value could occur. Rotation/deletion invalidate the live
+plan while old snapshots retain their original protection.

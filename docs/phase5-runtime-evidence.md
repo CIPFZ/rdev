@@ -1534,3 +1534,54 @@ The initial compile failure is retained as diagnostic history and is not counted
 as passing evidence. Implementing-agent review does not replace independent
 review. Declarative delegation, archive retirement/load/storage/upgrade cases,
 shared sync/session, macOS runtime and independent review remain unfinished.
+
+
+## Populated secret archive and redaction cost
+
+`make remote-secret-qos` adds a 512-version archive to the existing real
+20-process SSH QoS scenario. Separate administrator/executor RPCs provision two
+projects at their 256-version retention limits. Two values remain active and
+510 are retired; all 512 output occurrences must be redacted both before and
+after SIGKILL. Workload owners remain distinct from credential owners, so the
+existing initially empty owner counters and cross-project isolation checks stay
+meaningful. The final fixture includes whitespace-only accepted values as well
+as quoted/Unicode/newline credentials.
+
+The first run failed the existing three-second no-progress assertion. The Store
+reconstructed escaped forms and sorted them for every string, and its wrapped
+matcher copied the whole output even when no value matched. The fix caches an
+immutable plan shared with in-flight snapshots, uses a conservative compacted
+candidate trie, and only allocates wrapped replacements after a match. Removing
+ASCII whitespace from both a value and output is a necessary condition for an
+exact/wrapped occurrence; the filter does not replace the existing longest-first
+and escaped-value semantics. Whitespace-only patterns use a separate minimum
+run check, so one accepted whitespace credential cannot disable every owner's
+fast path. Every Store mutation invalidates the live cache.
+
+Implementing-agent review checked all value mutation paths, snapshot lifetime,
+concurrent publication, whole-value/quoted/Unicode/whitespace matching and the
+separation of exact secret authority from global output protection. New tests
+exercise cache invalidation, batch/declarative updates, deletion, host generation
+retirement, old snapshots and concurrent rotation. This is not independent review.
+
+The first corrected normal runtime passed with control p95 ratios 1.185–1.203.
+Full check, core-secret/import/approval repeats and full repository race passed
+before the final whitespace-only guard; final changed-package race also passed.
+The final actual race daemon passed import/core-secret scenarios. Its initial
+25-second QoS window had 43 lower-weight admissions (required minimum 50), with
+continuous per-second progress. `RDEV_QOS_WINDOW=40s` increases only observation
+duration; minimum samples, 3-second starvation threshold, 10% fairness tolerance
+and 2x control p95 SLO remain unchanged. That race run passed 203:68 and 68:203
+admissions, all 40 backlog observations per phase and p95 ratios 1.405–1.408 in
+125.098 seconds. Audit wrote 56940 / accepted 56941 records with two rotations,
+zero drops/errors and one pending self-health event. The explicit unclean-recovery
+flag remains set after the deliberate SIGKILL; zero errors does not imply crash
+tail completeness.
+
+Race daemon SHA-256:
+`14cf6eb585bb4b84ca1eb1eaa4c1355ade475eb7459978a55403c81735f99766`.
+`GORACE=atexit_sleep_ms=0` avoids an exit delay on administrator subprocesses;
+race detection remains enabled. Default measurement windows remain 25 seconds;
+committed normal repeats and evidence archives follow. Global archive capacity,
+concurrent archive mutation, mixed exec/job/sync, retirement/storage/upgrade cases,
+macOS and independent review remain open. No new Complete label is claimed.

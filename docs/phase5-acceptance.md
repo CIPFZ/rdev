@@ -484,3 +484,28 @@ the previous value and the other project's base transport. Source paths/values
 are absent from flushed audit/mutation records. No new Complete label is claimed:
 populated credential archive pressure, declarative delegation, remaining shared
 routes, retirement/storage/upgrade matrices, macOS and independent review remain.
+
+
+## Populated secret archive QoS follow-up
+
+A real 512-version archive (two exact projects, 256 versions each) exposed
+three-second owner starvation in the original redaction path. Every version was
+registered through a separately approved daemon mutation. An immutable cached
+redaction plan, conservative candidate filter and allocation-free unmatched
+wrapped scan remove the repeated rule construction and whole-output copies.
+The normal corrected run met the unchanged control SLO at 1.185–1.203 times
+baseline. This initial run preceded the final whitespace-only credential guard.
+
+The final fixture includes accepted whitespace-only values. Changed-package race
+passed. The actual race daemon passed core-secret/import scenarios; its initial
+25-second QoS window collected only 43 admissions for the lower-weight owner
+(the minimum is 50), while every owner progressed each second. A longer
+40-second observation kept all thresholds unchanged and passed 203:68 then
+68:203 admissions, all 40 backlog samples per phase and control p95 ratios
+1.405–1.408. All 512 values remained redacted before and after SIGKILL. Audit
+reported the injected unclean recovery explicitly, with zero sink errors/drops.
+
+Committed-source default-window repeats follow. P5-06/P5-07/P5-08/P5-14 and the
+Multi Agent Gate retain In progress status. The global 4096-version/16 MiB
+capacity, concurrent secret mutation, mixed exec/job/sync, archive retirement,
+macOS and independent review remain open.

@@ -110,6 +110,7 @@ type Store struct {
 	mu          sync.RWMutex
 	values      map[Key]entry
 	onRedaction func(uint64)
+	redaction   *redactionPlan // immutable; invalidated only by value mutations
 }
 
 func New() *Store {
@@ -128,6 +129,7 @@ func (s *Store) Snapshot() *Store {
 		out.values[key] = value
 	}
 	out.onRedaction = s.onRedaction
+	out.redaction = s.redaction
 	return out
 }
 
@@ -142,6 +144,7 @@ func (s *Store) Set(key Key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.values[key] = entry{value: value, source: SourceManual}
+	s.redaction = nil
 	return nil
 }
 
@@ -170,6 +173,7 @@ func (s *Store) setBatch(values map[Key]string, source Source) error {
 	for key, value := range values {
 		s.values[key] = entry{value: value, source: source}
 	}
+	s.redaction = nil
 	return nil
 }
 
@@ -253,6 +257,7 @@ func (s *Store) Delete(key Key) bool {
 	defer s.mu.Unlock()
 	_, ok := s.values[key]
 	delete(s.values, key)
+	s.redaction = nil
 	return ok
 }
 
@@ -267,6 +272,9 @@ func (s *Store) DeleteHost(alias string) int {
 			delete(s.values, key)
 			removed++
 		}
+	}
+	if removed != 0 {
+		s.redaction = nil
 	}
 	return removed
 }
@@ -286,6 +294,9 @@ func (s *Store) DeleteStaleHost(scope Scope, keep HostIdentity) int {
 			delete(s.values, key)
 			removed++
 		}
+	}
+	if removed != 0 {
+		s.redaction = nil
 	}
 	return removed
 }
@@ -320,37 +331,30 @@ func (s *Store) Redact(text string) string {
 	if text == "" {
 		return text
 	}
-	s.mu.RLock()
-	pairs := make([][2]string, 0, len(s.values)*3)
-	for key, entry := range s.values {
-		val := entry.value
-		placeholder := "<redacted:" + key.Name + ">"
-		// Errors commonly quote remote stderr or malformed frames with %q.
-		// Redaction happens later in client/MCP/CLI code, after that quoting has
-		// converted quotes, slashes, and newlines. Match both the original and
-		// escaped spellings so quoting cannot become a disclosure bypass.
-		for _, form := range escapedForms(val) {
-			pairs = append(pairs, [2]string{form, placeholder})
+	plan, hook := s.redactionSnapshot()
+	if len(plan.pairs) == 0 {
+		return text
+	}
+	// Every exact or whitespace-wrapped match must also occur after removing
+	// ASCII whitespace from both strings. This conservative one-pass trie
+	// filter skips per-secret scans for ordinary output. Whitespace-only
+	// credentials require a sufficiently long whitespace run. Neither check
+	// replaces the authoritative matcher below.
+	if !hasWhitespaceRun(text, plan.whitespaceMinLen) {
+		if plan.filter == nil {
+			return text
+		}
+		compact := withoutSpace(text)
+		if len(plan.filter.Replace(compact)) == len(compact) {
+			return text
 		}
 	}
-	hook := s.onRedaction
-	s.mu.RUnlock()
-
-	sort.Slice(pairs, func(i, j int) bool {
-		if len(pairs[i][0]) != len(pairs[j][0]) {
-			return len(pairs[i][0]) > len(pairs[j][0])
-		}
-		if pairs[i][0] != pairs[j][0] {
-			return pairs[i][0] < pairs[j][0]
-		}
-		return pairs[i][1] < pairs[j][1]
-	})
 	// Whitespace-tolerant matching only matters for text that contains whitespace,
 	// and Redact runs over every byte of every command's output. One check here
 	// skips the scan for the common single-line case.
 	hasSpace := strings.ContainsAny(text, " \t\n\r\v\f")
 	original := text
-	for _, p := range pairs {
+	for _, p := range plan.pairs {
 		text = strings.ReplaceAll(text, p[0], p[1])
 		if hasSpace && len(p[0]) >= wrapTolerantMinLen {
 			text = replaceWrapped(text, p[0], p[1])
@@ -360,6 +364,96 @@ func (s *Store) Redact(text string) string {
 		hook(1)
 	}
 	return text
+}
+
+type redactionPlan struct {
+	pairs            [][2]string
+	filter           *strings.Replacer
+	whitespaceMinLen int
+}
+
+// The plan contains only immutable data and is shared by in-flight snapshots.
+// Rebuild once after a mutation, never once per field or response. No filesystem
+// or transport work runs while this lock is held.
+func (s *Store) redactionSnapshot() (*redactionPlan, func(uint64)) {
+	s.mu.RLock()
+	plan, hook := s.redaction, s.onRedaction
+	s.mu.RUnlock()
+	if plan != nil {
+		return plan, hook
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.redaction == nil {
+		plan = &redactionPlan{}
+		for key, entry := range s.values {
+			// Quoted diagnostics can contain Go/JSON spellings instead of the
+			// original bytes. Retain every existing escaped form in the plan.
+			for _, form := range escapedForms(entry.value) {
+				plan.pairs = append(plan.pairs, [2]string{form, "<redacted:" + key.Name + ">"})
+			}
+		}
+		sort.Slice(plan.pairs, func(i, j int) bool {
+			a, b := plan.pairs[i], plan.pairs[j]
+			if len(a[0]) != len(b[0]) {
+				return len(a[0]) > len(b[0])
+			}
+			if a[0] != b[0] {
+				return a[0] < b[0]
+			}
+			return a[1] < b[1]
+		})
+		filter := make([]string, 0, len(plan.pairs)*2)
+		for _, pair := range plan.pairs {
+			compact := withoutSpace(pair[0])
+			if compact == "" {
+				if plan.whitespaceMinLen == 0 || len(pair[0]) < plan.whitespaceMinLen {
+					plan.whitespaceMinLen = len(pair[0])
+				}
+				continue
+			}
+			filter = append(filter, compact, "")
+		}
+		if len(filter) != 0 {
+			plan.filter = strings.NewReplacer(filter...)
+		}
+		s.redaction = plan
+	}
+	return s.redaction, s.onRedaction
+}
+
+func hasWhitespaceRun(text string, minimum int) bool {
+	if minimum == 0 {
+		return false
+	}
+	run := 0
+	for i := 0; i < len(text); i++ {
+		if isSpaceByte(text[i]) {
+			run++
+			if run >= minimum {
+				return true
+			}
+		} else {
+			run = 0
+		}
+	}
+	return false
+}
+
+func withoutSpace(text string) string {
+	first := strings.IndexAny(text, " \t\n\r\v\f")
+	if first < 0 {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	b.WriteString(text[:first])
+	for i := first; i < len(text); i++ {
+		if !isSpaceByte(text[i]) {
+			b.WriteByte(text[i])
+		}
+	}
+	return b.String()
 }
 
 func escapedForms(value string) []string {
@@ -528,23 +622,26 @@ func replaceWrapped(text, value, placeholder string) string {
 		return text
 	}
 	var b strings.Builder
-	i := 0
-	for i < len(text) {
-		// Cheap gate: nearly every position fails here without further work.
-		if text[i] != value[0] {
-			b.WriteByte(text[i])
-			i++
-			continue
+	previous := 0
+	for i := 0; i < len(text); {
+		index := strings.IndexByte(text[i:], value[0])
+		if index < 0 {
+			break
 		}
+		i += index
 		end, ok := matchSkippingSpace(text, i, value)
 		if !ok {
-			b.WriteByte(text[i])
 			i++
 			continue
 		}
+		b.WriteString(text[previous:i])
 		b.WriteString(placeholder)
-		i = end
+		i, previous = end, end
 	}
+	if previous == 0 {
+		return text
+	}
+	b.WriteString(text[previous:])
 	return b.String()
 }
 

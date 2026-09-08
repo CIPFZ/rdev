@@ -39,9 +39,28 @@ type qosChild struct {
 // remote file reads. Timing windows measure completions with a continuously
 // queued backlog; weights are changed by SIGHUP while the workload stays live.
 func TestRemoteBrokerQoS(t *testing.T) {
+	runRemoteBrokerQoS(t, false)
+}
+
+func TestRemoteBrokerQoSWithSecrets(t *testing.T) {
+	runRemoteBrokerQoS(t, true)
+}
+
+func runRemoteBrokerQoS(t *testing.T, populatedSecrets bool) {
 	if os.Getenv("RDEV_QOS_HELPER") == "1" {
 		runQoSClient(t)
 		return
+	}
+	// Race instrumentation can need a longer observation to collect the
+	// same minimum 50 admissions. Only longer windows are accepted; the
+	// per-second starvation check, fairness tolerance and latency SLO stay fixed.
+	windowDuration := 25 * time.Second
+	if value := os.Getenv("RDEV_QOS_WINDOW"); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed < 25*time.Second || parsed > 40*time.Second {
+			t.Fatal("RDEV_QOS_WINDOW must be between 25s and 40s")
+		}
+		windowDuration = parsed
 	}
 	d, namespace, sshRun := newRemoteRuntime(t)
 	a := broker.Owner{ClientID: "qos-shared-client", ProjectID: "project-a"}
@@ -58,6 +77,10 @@ func TestRemoteBrokerQoS(t *testing.T) {
 		if err := p.Grant(owner.Key(), "status"); err != nil {
 			t.Fatal(err)
 		}
+	}
+	var secretOwners []broker.Owner
+	if populatedSecrets {
+		secretOwners = qosSecretOwners(t, p)
 	}
 	healthAdmin := broker.Owner{ClientID: "qos-health-admin", ProjectID: "operations"}
 	if err := p.Grant(healthAdmin.Key(), "audit.health"); err != nil {
@@ -84,6 +107,9 @@ func TestRemoteBrokerQoS(t *testing.T) {
 		t.Fatalf("fixture: %v %s", err, out)
 	}
 	d.start()
+	if populatedSecrets {
+		provisionQoSSecrets(t, d, secretOwners, namespace, sshRun)
+	}
 	wires := make(map[string]*runtimeWire)
 	tokens := make(map[string]string)
 	for _, owner := range owners {
@@ -198,7 +224,7 @@ func TestRemoteBrokerQoS(t *testing.T) {
 	phase("weight-3-1")
 	awaitRuntime(t, 10*time.Second, "two independent owner backlogs", func() bool { return snapshots(a).Queued >= 5 && snapshots(b).Queued >= 5 })
 	t.Log("sustained real SSH phase: weights 3:1, two backlogged owners, 18 bulk processes and two control processes")
-	first := sampleWindow("weight-3-1", 25*time.Second)
+	first := sampleWindow("weight-3-1", windowDuration)
 	if first.Ratio < 2.7 || first.Ratio > 3.3 {
 		t.Fatalf("weighted remote fairness outside 10%%: %+v", first)
 	}
@@ -212,7 +238,7 @@ func TestRemoteBrokerQoS(t *testing.T) {
 	// and queued requests must continue without a restart or reconnect.
 	phase("weight-1-3")
 	time.Sleep(time.Second)
-	second := sampleWindow("weight-1-3", 25*time.Second)
+	second := sampleWindow("weight-1-3", windowDuration)
 	if second.Ratio < .30 || second.Ratio > .37 {
 		t.Fatalf("live reload did not reverse weighted remote service: %+v", second)
 	}
@@ -309,7 +335,7 @@ func TestRemoteBrokerQoS(t *testing.T) {
 			t.Fatal("audit retention exceeded its segment budget")
 		}
 	}
-	report, _ := json.Marshal(map[string]any{"audit_sink": health, "processes": len(pids), "bulk_processes": 18, "control_processes": 2, "windows": windows, "control_latency": latency, "same_base_agent": true, "dedicated_bulk_transport": true, "bulk_idle_ttl_ms": 1000, "bulk_idle_reaped": true, "owner_sigkill_recovery": true, "bytes_per_read": len(fixture), "owner_a_payload_bytes": snapshots(a).BulkPayloadBytes, "owner_b_payload_bytes": snapshots(b).BulkPayloadBytes})
+	report, _ := json.Marshal(map[string]any{"weight_window_ms": windowDuration.Milliseconds(), "populated_secret_versions": len(secretOwners) * 256, "audit_sink": health, "processes": len(pids), "bulk_processes": 18, "control_processes": 2, "windows": windows, "control_latency": latency, "same_base_agent": true, "dedicated_bulk_transport": true, "bulk_idle_ttl_ms": 1000, "bulk_idle_reaped": true, "owner_sigkill_recovery": true, "bytes_per_read": len(fixture), "owner_a_payload_bytes": snapshots(a).BulkPayloadBytes, "owner_b_payload_bytes": snapshots(b).BulkPayloadBytes})
 	t.Logf("real remote QoS evidence: %s", report)
 }
 
