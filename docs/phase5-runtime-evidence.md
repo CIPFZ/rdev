@@ -1585,3 +1585,48 @@ race detection remains enabled. Default measurement windows remain 25 seconds;
 committed normal repeats and evidence archives follow. Global archive capacity,
 concurrent archive mutation, mixed exec/job/sync, retirement/storage/upgrade cases,
 macOS and independent review remain open. No new Complete label is claimed.
+
+
+## Committed populated secret archive validation (`1481edc`)
+
+[Committed full check and runtime log](evidence/phase5/2026-09-09/committed-secret-load-1481edc.log)
+records passing `make check remote-secret-qos remote-qos remote-secrets
+remote-secret-import stress-broker smoke-rdevd remote-phase5-runtime` on the
+fixed clean commit. The original session launched this command; its preserved
+complete log was recovered and audited when work resumed in session
+`01a0840d-fd5b-7b31-97a6-3327e815e2a5`. No test process remained active, and the
+log ends with successful actual Linux systemd recovery.
+
+All three populated-archive runs used the default 25-second weight windows,
+512 retained versions and 20 independent processes. Control p95 ratios were
+1.172–1.403, each owner progressed in every sample (maximum observed gap
+1.013 seconds), and both 3:1 and reversed 1:3 fairness assertions passed.
+All historical values remained redacted across the injected SIGKILL. Bulk idle
+reclamation and original base-agent preservation passed in each run. These
+three sinks accepted 141095 and wrote 141092 events, with six rotations and
+zero reported errors/drops; each measurement left one self-health event pending.
+The explicit unclean-recovery indicators record the intentional crash and do
+not establish a complete crash tail.
+
+Three empty-archive regression runs also passed, with p95 ratios 1.200–1.391,
+146274 accepted / 146271 written events, six rotations and zero errors/drops.
+Core secret and file-import scenarios each passed three repeats. Stress ran
+100 twenty-client tests. Local readiness and remote credential/lifecycle tests
+passed. Linux systemd installation, enable, start, reload, SIGKILL recovery,
+stop and start passed (PID `1169081 -> 1169143`).
+
+Remote daemon artifact SHA-256:
+`704fb2d1c2e1e925fb896d1bbaed0feede6e66c5b61639b5da4cbd653c917c72`.
+
+Supporting logs: [initial starvation reproduction](evidence/phase5/2026-09-09/secret-load-reproduction.log),
+[initial unit checks](evidence/phase5/2026-09-09/secret-load-initial-unit.log),
+[corrected initial runtime](evidence/phase5/2026-09-09/secret-load-corrected-runtime.log),
+[check and secret regressions](evidence/phase5/2026-09-09/secret-load-check-regression.log),
+[full race before the whitespace guard](evidence/phase5/2026-09-09/secret-load-full-race.log),
+[final changed-package race](evidence/phase5/2026-09-09/secret-load-final-race.log),
+[initial race runtime with insufficient admission samples](evidence/phase5/2026-09-09/secret-load-remote-race.log),
+[passing 40-second race runtime](evidence/phase5/2026-09-09/secret-load-remote-race-40s.log), and
+[redaction benchmark](evidence/phase5/2026-09-09/secret-load-benchmark.log).
+The failing runs remain diagnostic evidence, not acceptance. Global archive
+capacity, concurrent mutation, mixed exec/job/sync, archive retirement,
+storage/upgrade coverage, macOS runtime and independent review remain open.
