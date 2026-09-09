@@ -87,7 +87,9 @@ func saveFleetBytes(path string, data []byte) error {
 
 // Any write error freezes new admission. Queries retain the last acknowledged
 // snapshot; restart reads the authoritative file, including a possible rename.
-func (f *FleetStore) commit(next map[string]FleetPlan) error {
+func (f *FleetStore) commit(next map[string]FleetPlan) error { return f.commitSnapshot(next, false) }
+func (f *FleetStore) admit(next map[string]FleetPlan) error  { return f.commitSnapshot(next, true) }
+func (f *FleetStore) commitSnapshot(next map[string]FleetPlan, admission bool) error {
 	if f.failed {
 		return ErrFleetStorage
 	}
@@ -104,6 +106,18 @@ func (f *FleetStore) commit(next map[string]FleetPlan) error {
 	}
 	if len(b) > FleetMaxBytes {
 		return errors.New("fleet storage budget reached")
+	}
+	// Admission reserves the worst-case bounded metadata growth of every
+	// retained HostRun (job identity, result, retry and approval references).
+	// Execution/control commits may use that reserve up to the hard byte limit.
+	if admission {
+		reserved := 0
+		for _, p := range next {
+			reserved += 4096 + len(p.Runs)*2048
+		}
+		if len(b) > FleetMaxBytes-reserved {
+			return errors.New("fleet lifecycle storage reserve reached")
+		}
 	}
 	if f.path != "" {
 		if err = f.persist(f.path, b); err != nil {

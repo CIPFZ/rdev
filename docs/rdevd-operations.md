@@ -349,7 +349,9 @@ ambiguous; control commands return 0 for admission. MCP `rdev_fleet` takes
 `{plan?, plans?, approval?, inventory?}`. Raw argv/env execution data remains in
 private state, while audit records only identity/digest/decision/result links.
 Results contain metadata, not raw job logs. Fleet storage is bounded to 64 plans,
-8 per owner and 16 MiB. Terminal history is eligible after seven days; a retry
+8 per owner and 16 MiB. New plans reserve 4096 bytes per plan plus 2048
+per HostRun for later approval/result/cancel metadata; control and recovery can
+use that reserve. Terminal history is eligible after seven days; a retry
 chain is reclaimed together only after every related plan is terminal and past
 that horizon. Active, ambiguous and still-needed recovery records are retained. Storage pressure rejects new plans; recorded queries and
 reconciliation remain available. Disk errors freeze new admission until storage

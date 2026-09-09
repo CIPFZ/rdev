@@ -180,7 +180,7 @@ func (s *Service) createFleetPlan(owner Owner, spec FleetSpec) (FleetPlan, error
 		return FleetPlan{}, err
 	}
 	next[id] = p
-	if err = f.commit(next); err != nil {
+	if err = f.admit(next); err != nil {
 		return FleetPlan{}, err
 	}
 	s.fleetAudit(p, nil, "planned")
@@ -297,7 +297,7 @@ func (s *Service) fleetRetry(owner Owner, id string, ids []string) (FleetPlan, e
 	}
 	next[id] = parent
 	next[child.PlanID] = child
-	if err = f.commit(next); err != nil {
+	if err = f.admit(next); err != nil {
 		return FleetPlan{}, err
 	}
 	s.fleetAudit(child, nil, "retry_planned")
