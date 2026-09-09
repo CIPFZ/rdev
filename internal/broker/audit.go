@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
@@ -11,6 +12,8 @@ import (
 )
 
 type AuditEvent struct {
+	DigestScope   string    `json:"digest_scope,omitempty"`
+	TargetScope   string    `json:"target_scope,omitempty"`
 	RequestRef    string    `json:"request_ref,omitempty"`
 	OperationRef  string    `json:"operation_ref,omitempty"`
 	RequestDigest string    `json:"request_digest,omitempty"`
@@ -25,18 +28,24 @@ type AuditEvent struct {
 	Result        string    `json:"result,omitempty"`
 }
 type AuditLog struct {
-	mu     sync.RWMutex
-	max    int
-	events []AuditEvent
-	sink   *auditSink
-	closed bool
+	digestKey *[32]byte // immutable, private to this broker instance; nil fails closed
+	mu        sync.RWMutex
+	max       int
+	events    []AuditEvent
+	sink      *auditSink
+	closed    bool
 }
 
 func NewAuditLog(max int) *AuditLog {
 	if max < 1 {
 		max = 256
 	}
-	return &AuditLog{max: max}
+	a := &AuditLog{max: max}
+	key := new([32]byte)
+	if _, err := rand.Read(key[:]); err == nil {
+		a.digestKey = key
+	}
+	return a
 }
 
 func (a *AuditLog) Close() error {
@@ -150,6 +159,12 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
 	e.Schema = 1
+	if e.DigestScope != "broker_instance" && e.DigestScope != "approval" {
+		e.DigestScope = ""
+	}
+	if e.TargetScope != "submitted" && e.TargetScope != "configured" && e.TargetScope != "approval" {
+		e.TargetScope = ""
+	}
 	for _, field := range []*string{&e.RequestRef, &e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID, &e.OperationRef} {
 		if digest, err := hex.DecodeString(*field); err != nil || len(digest) != sha256.Size {
 			*field = ""

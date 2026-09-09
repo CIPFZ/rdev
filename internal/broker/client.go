@@ -20,7 +20,10 @@ type Client struct {
 	seq   uint64
 }
 
-func DialClient(ctx context.Context, socket string, owner Owner) (*Client, error) {
+func DialClient(ctx context.Context, socket string, owner Owner) (client *Client, callErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := owner.Validate(); err != nil {
 		return nil, err
 	}
@@ -28,6 +31,28 @@ func DialClient(ctx context.Context, socket string, owner Owner) (*Client, error
 	if err != nil {
 		return nil, err
 	}
+	// DialContext stops governing the connection after connect. Keep cancellation
+	// active through both hello writes and reads, including a broker that has
+	// opened its socket but has not finished startup recovery.
+	stopWatch, watchDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
+	}()
+	defer func() {
+		close(stopWatch)
+		<-watchDone
+		// Never let a late handshake watcher close a successfully returned
+		// connection after ownership has passed to the caller.
+		if err := ctx.Err(); err != nil {
+			_ = conn.Close()
+			client, callErr = nil, err
+		}
+	}()
 	hello := proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion, ClientID: owner.ClientID, ProjectID: owner.ProjectID}
 	hello.PrincipalToken = os.Getenv("RDEV_PRINCIPAL_TOKEN")
 	if err := json.NewEncoder(conn).Encode(hello); err != nil {
@@ -42,6 +67,10 @@ func DialClient(ctx context.Context, socket string, owner Owner) (*Client, error
 	if !response.OK {
 		_ = conn.Close()
 		return nil, fmt.Errorf("broker handshake rejected: %s", response.Error)
+	}
+	if err := proto.ValidateBrokerHello(hello, proto.BrokerHello{Version: response.Version, MinVersion: response.MinVersion}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("broker handshake rejected: %w", err)
 	}
 	return &Client{conn: conn, owner: owner}, nil
 }
