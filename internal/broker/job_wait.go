@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -239,13 +240,15 @@ func (s *Service) observeJob(o *jobObservation) {
 		finishLocked(err)
 		s.sharedMu.Unlock()
 	}
-	for initial := true; ; initial = false {
+	initial := true
+	for {
 		s.sharedMu.Lock()
 		if !time.Now().Before(o.until) {
 			finishLocked(nil)
 			s.sharedMu.Unlock()
 			return
 		}
+		until := o.until
 		s.sharedMu.Unlock()
 		op := proto.OpJobWait
 		params := &proto.JobParams{ID: o.key.id, WaitTimeoutSec: 1, TailOnExit: maxJobWaitTail}
@@ -256,7 +259,23 @@ func (s *Service) observeJob(o *jobObservation) {
 		request := &proto.Request{Op: op, ClientID: o.owner.ClientID, ProjectID: o.owner.ProjectID, Job: params}
 		// The initial snapshot is part of wait work too: it must not consume
 		// the caller's reserved control slot or bypass its wait/exec quota.
-		response, err := s.DispatchScheduled(s.observationCtx, o.key.host, o.key.owner, LaneExec, func(ctx context.Context) (*proto.Response, error) {
+		callCtx, cancel := context.WithDeadline(s.observationCtx, until)
+		// Scheduler cancellation can return before an already-running callback.
+		// Join that attempt before retrying an extended horizon, or disarm a
+		// callback that has not entered remote I/O yet. There must never be two
+		// remote observations of this job during a deadline/extension race.
+		var attemptMu sync.Mutex
+		entered, abandoned := false, false
+		attemptDone := make(chan struct{})
+		response, err := s.DispatchScheduled(callCtx, o.key.host, o.key.owner, LaneExec, func(ctx context.Context) (*proto.Response, error) {
+			attemptMu.Lock()
+			if abandoned {
+				attemptMu.Unlock()
+				return nil, ctx.Err()
+			}
+			entered = true
+			attemptMu.Unlock()
+			defer close(attemptDone)
 			// Reserve the actual protocol hard response ceiling during decode. Once
 			// validated, only the encoded retained snapshot remains charged.
 			release, err := s.Ingress.Hold(o.key.owner, proto.AbsoluteResponseFrameBytes)
@@ -276,7 +295,27 @@ func (s *Service) observeJob(o *jobObservation) {
 			}
 			return response, nil
 		})
+		cancel()
+		attemptMu.Lock()
+		abandoned = true
+		join := entered
+		attemptMu.Unlock()
+		if join {
+			<-attemptDone
+		}
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && s.observationCtx.Err() == nil {
+				s.sharedMu.Lock()
+				extended := o.until.After(until)
+				if !extended {
+					finishLocked(nil)
+				}
+				s.sharedMu.Unlock()
+				if extended {
+					continue
+				}
+				return
+			}
 			finish(err)
 			return
 		}
@@ -310,6 +349,7 @@ func (s *Service) observeJob(o *jobObservation) {
 			s.Watches.Publish(o.key.owner+"\x00"+o.key.host+"\x00"+o.key.id, "observation_complete")
 			return
 		}
+		initial = false
 	}
 }
 

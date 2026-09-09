@@ -354,3 +354,126 @@ func TestJobWaitDoesNotJoinOrContinueOnChangedHostTarget(t *testing.T) {
 		return s.SharedWaitStatus(owner.Key()) == (SharedWaitStatus{}) && s.Ingress.Snapshot(owner.Key()).Bytes == 0
 	})
 }
+
+func TestJobWaitHorizonReleasesQueuedObservation(t *testing.T) {
+	s, owner, _ := newTestJobWaitService(t, "one")
+	if err := s.ReloadConfig(Config{MaxHosts: 1, MaxWarmHosts: 16, IdleTTL: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	holdCtx, release := context.WithCancel(t.Context())
+	defer release()
+	entered := make(chan struct{})
+	holdDone := make(chan struct{})
+	go func() {
+		defer close(holdDone)
+		_, _ = s.DispatchScheduled(holdCtx, "occupied-host", "occupant", LaneExec, func(ctx context.Context) (*proto.Response, error) {
+			close(entered)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+	}()
+	<-entered
+	pending := startJobWait(s, t.Context(), owner, &proto.JobParams{ID: "one", WaitTimeoutSec: 1}, 0)
+	if got := getJobWait(t, pending); got.err == nil {
+		t.Fatal("queued wait returned a successful missing snapshot")
+	}
+	expiry := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(expiry) && s.SharedWaitStatus(owner.Key()).Observers != 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := s.SharedWaitStatus(owner.Key()); got != (SharedWaitStatus{}) {
+		t.Fatal("expired observation retained its queue/lease", got)
+	}
+	if got := s.Ingress.Snapshot(owner.Key()); got.Bytes != 0 {
+		t.Fatal("expired observation retained ingress", got)
+	}
+	if got := s.Scheduler.Snapshot(owner.Key()); got.Active+got.Queued != 0 {
+		t.Fatal("expired observation still scheduled", got)
+	}
+	if s.Scheduler.Snapshot("occupant").Active != 1 {
+		t.Fatal("expiry canceled another owner")
+	}
+	release()
+	<-holdDone
+}
+
+func TestJobWaitExtendedHorizonJoinsCanceledAttemptBeforeRetry(t *testing.T) {
+	s, owner, _ := newTestJobWaitService(t, "one")
+	firstEntered, firstCanceled := make(chan struct{}), make(chan struct{})
+	allowCleanup, secondEntered, finish := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	calls, active, peak := 0, 0, 0
+	s.SetDispatcher(func(ctx context.Context, _ string, req *proto.Request) (*proto.Response, error) {
+		result := &proto.JobResult{Info: &proto.JobInfo{ID: "one", PID: 123, State: proto.JobRunning}}
+		if req.Op == proto.OpJobWait {
+			mu.Lock()
+			calls++
+			n := calls
+			active++
+			peak = max(peak, active)
+			mu.Unlock()
+			defer func() { mu.Lock(); active--; mu.Unlock() }()
+			if n == 1 {
+				close(firstEntered)
+				<-ctx.Done()
+				close(firstCanceled)
+				<-allowCleanup
+				return nil, ctx.Err()
+			}
+			if n != 2 {
+				t.Error("unexpected duplicate retry", n)
+			}
+			close(secondEntered)
+			select {
+			case <-finish:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			result.Info.State = proto.JobExited
+		}
+		return &proto.Response{OK: true, Terminal: true, OperationID: "op_extended_wait", Job: result}, nil
+	})
+	short := startJobWait(s, t.Context(), owner, &proto.JobParams{ID: "one", WaitTimeoutSec: 1}, 0)
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first wait did not start")
+	}
+	long := startJobWait(s, t.Context(), owner, &proto.JobParams{ID: "one", WaitTimeoutSec: 3}, 0)
+	awaitJobWait(t, func() bool { return s.SharedWaitStatus(owner.Key()).Subscribers == 2 })
+	got := getJobWait(t, short)
+	if got.err != nil || got.response == nil || !got.response.Job.TimedOut {
+		t.Fatal("short subscriber outcome", got)
+	}
+	select {
+	case <-firstCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("old RPC ignored its horizon")
+	}
+	select {
+	case <-secondEntered:
+		t.Fatal("extended observer overlapped old canceled RPC")
+	default:
+	}
+	select {
+	case got := <-long:
+		t.Fatal("old horizon terminated extended subscriber", got)
+	default:
+	}
+	close(allowCleanup)
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("extended observer did not resume")
+	}
+	close(finish)
+	got = getJobWait(t, long)
+	if got.err != nil || got.response == nil || got.response.Job.TimedOut || got.response.Job.Info.State != proto.JobExited {
+		t.Fatal("extended subscriber lost terminal result", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 || peak != 1 {
+		t.Fatal("extended observation was not serial", calls, peak)
+	}
+}
