@@ -894,7 +894,7 @@ Batch A 新增的负向与竞态覆盖包括：项目配置未批准/摘要变�
 
 第一轮独立验证已在隔离的 Ubuntu amd64 目录中通过真实 SSH bootstrap、exec、read/write 与 rsync，并由本地 Claude Code 通过 rdev MCP 完成一次只读远端调用；精确测试目录已清理且二次确认无目录、symlink 或进程残留。第二轮发现 GNU `stat` 空文件类型文本回归后已改为 numeric metadata + `test -f` + fd/inode 绑定。最终代码 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 已由独立 review 将两个 bootstrap 顺序窗口均判定为 fixed；独立测试通过全量门禁、两个边界测试各 100 轮，以及 Ubuntu 首次 bootstrap、最小 exec 和双重清理验证。rdev 当前没有原生 `IdentityFile`/`IdentitiesOnly` 字段，测试使用隔离 SSH wrapper 注入认证参数，此能力纳入 P4-01/P6 支持验收。
 
-独立验证同时确认：底层/MCP 可安全同步裸 `-leading-local`，但 CLI parser 不能直接表达该 operand（`./-leading-local` 可用）；当时输出被截断时 CLI 不展示、本地 context cancel 不传播到远端进程。这三项分别进入 P6-09、P3-12 和既有 P3-04；后两项现已由 Phase 3 完成，前一项仍保留在 Phase 6。
+独立验证同时确认：底层/MCP 可安全同步裸 `-leading-local`，但 CLI parser 不能直接表达该 operand（`./-leading-local` 可用）；当时输出被截断时 CLI 不展示、本地 context cancel 不传播到远端进程。这三项分别进入 P6-09、P3-12 和既有 P3-04；后两项现已由 Phase 3 完成，前一项现已由 Phase 6 的 `--` operand 支持及四入口真实同步验证完成。
 
 Batch A 已验收：最终代码 SHA 为 `c9a796cc8ea57aee2afbca13671d27b360baaee5`；本地与独立验证的 `gofmt`、`make clean && make all`、`go test ./...`、`go test -race ./...`、`go vet ./...` 和 `make check-agents` 全部通过，独立针对性复验也通过两个 bootstrap 边界测试各 100 轮及 Ubuntu 实机链路。此结论只验收 Phase 0–1 当前批次，不把尚缺的 P0-02/P0-06/P0-07/P0-09/P0-10 伪装成已完成。维护者审查归档见 [`docs/security/phase0-1-codex-security-review.md`](security/phase0-1-codex-security-review.md)。
 
@@ -1080,24 +1080,24 @@ Phase5 已按用户确认的范围完成。逐项验收和可复现证据统一�
 
 ### Phase 6：CLI、兼容性、文档和发布收口
 
-实现已集成；最终源码验证与独立评审收口见 [Phase6 验收表](phase6-acceptance.md)。
+P6-01～P6-09 已完成（2026-09-09）：最终源码 `044f395` 的本地检查、全仓 race、真实 CLI/官方 MCP SDK/SSH、Linux 生命周期、独立混合负载及在线发布 gate 均通过，独立评审已收口。逐项证据见 [Phase6 验收表](phase6-acceptance.md)。macOS runtime 尚未验证，继续按用户确认延期。
 入口契约采用现有 parser 严格化，exec/wait/new-job wall 的 0 分别选择
 60/300/3600 秒有界默认；新 job 通过 feature 协商拒绝不能强制运行时限的旧 agent。
 共享 host/session 编辑与声明式 secret 委派保留明确边界，state 管理补齐现有管理员路由。
 
 覆盖：ENG-012、ENG-013、ENG-014、ENG-016、ENG-023、ENG-036。
 
-| Task | 内容 | 依赖 | 验收条件 |
-| --- | --- | --- | --- |
-| P6-01 | 替换或严格化 CLI flag parser | Phase 5 | 未知 flag、非法数字、重复冲突参数明确失败 |
-| P6-02 | 修复 stdin 错误传播 | 无 | 非 EOF 错误返回非零状态且不执行部分写入 |
-| P6-03 | 统一 CLI/MCP timeout 契约 | Phase 3 | 默认值、0 和显式无限的含义一致并有文档 |
-| P6-04 | 使用 `net.SplitHostPort` 等方式支持 IPv6 | P4-01 | IPv4、IPv6、alias、user@host 全部覆盖 |
-| P6-05 | 修正文档协议名称和能力保证，明确共享前端兼容边界 | 全部 | README 与实际 wire protocol、权限、脱敏和连接语义一致；明确 shared host/session 编辑与 state/declarative-secret 前端的范围及不支持行为 |
-| P6-06 | 在线依赖审计和发布检查 | 全部 | `govulncheck`/依赖审计、SBOM、构建 provenance 纳入 release gate |
-| P6-07 | 把支持矩阵与 runtime capability 投影到 CLI/MCP | P0-08、P4-17 | unsupported/experimental 能力在调用前可发现，不靠运行失败猜测 |
-| P6-08 | 为错误 code、config、state 和 protocol 发布兼容文档 | P3-09、P4-14 | N/N-1 行为、迁移和 breaking change 有机器可读版本说明 |
-| P6-09 | CLI parser 支持 `--` 后的裸 leading-dash operand | P6-01 | `sync ... -- -leading-local remote` 与 MCP/底层行为一致 |
+| Task | 状态 | 内容 | 依赖 | 验收条件 |
+| --- | --- | --- | --- | --- |
+| P6-01 | Complete | 替换或严格化 CLI flag parser | Phase 5 | 未知 flag、非法数字、重复冲突参数明确失败 |
+| P6-02 | Complete | 修复 stdin 错误传播 | 无 | 非 EOF 错误返回非零状态且不执行部分写入 |
+| P6-03 | Complete | 统一 CLI/MCP timeout 契约 | Phase 3 | 默认值、0 和显式无限的含义一致并有文档 |
+| P6-04 | Complete | 使用 `net.SplitHostPort` 等方式支持 IPv6 | P4-01 | IPv4、IPv6、alias、user@host 全部覆盖 |
+| P6-05 | Complete | 修正文档协议名称和能力保证，明确共享前端兼容边界 | 全部 | README 与实际 wire protocol、权限、脱敏和连接语义一致；明确 shared host/session 编辑与 state/declarative-secret 前端的范围及不支持行为 |
+| P6-06 | Complete | 在线依赖审计和发布检查 | 全部 | `govulncheck`/依赖审计、SBOM、构建 provenance 纳入 release gate |
+| P6-07 | Complete | 把支持矩阵与 runtime capability 投影到 CLI/MCP | P0-08、P4-17 | unsupported/experimental 能力在调用前可发现，不靠运行失败猜测 |
+| P6-08 | Complete | 为错误 code、config、state 和 protocol 发布兼容文档 | P3-09、P4-14 | N/N-1 行为、迁移和 breaking change 有机器可读版本说明 |
+| P6-09 | Complete | CLI parser 支持 `--` 后的裸 leading-dash operand | P6-01 | `sync ... -- -leading-local remote` 与 MCP/底层行为一致 |
 
 ### Phase 7：Fleet inventory 与安全批量编排
 

@@ -1,0 +1,516 @@
+{
+  "schema_version": 1,
+  "handoff": "de967044dc0cc76be9a1239d2881797934dc49f9",
+  "phase5_production": "29b5f08a2aa929ae589690a235417bb8623cef17",
+  "production": "aca675ae01f5dcfb99147005cc9daee076ea988d",
+  "validation_and_build": "044f3957958af0e654168da1e629d2b95749d1a9",
+  "production_note": "044f395 changes only the remote sync test fixture; all production sources are identical to aca675a. Later closure changes only documentation/evidence.",
+  "environment": {
+    "local_platform": "linux/amd64",
+    "remote_alias": "service-deploy",
+    "ssh_config": "/data/tmp/rdev-validation/ssh/config",
+    "go_launcher": "/data/tmp/rdev-toolchain/go/bin/go",
+    "go_version": "go1.26.8",
+    "GOCACHE": "/data/tmp/rdev-gocache",
+    "GOMODCACHE": "/data/tmp/rdev-gomodcache"
+  },
+  "checks": [
+    {
+      "name": "check",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "make GO=/data/tmp/rdev-toolchain/go/bin/go all daemon check",
+      "raw_log": "/data/tmp/rdev-validation/phase6-final-check-044f395.log",
+      "raw_log_sha256": "d4baac53e615c24a1d83ad7f62d40b604b33bad310695adb649d454730d55de1"
+    },
+    {
+      "name": "full_repository_race",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "/data/tmp/rdev-toolchain/go/bin/go test -race ./... -count=1",
+      "raw_log": "/data/tmp/rdev-validation/phase6-final-race-044f395.log",
+      "raw_log_sha256": "a29848ab0faa4f13021d11050fd878ca6eb462d8061851e8e112ca4234e40b36"
+    },
+    {
+      "name": "four_actual_frontends",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config RDEV_TEST_CLI_BINARY=/data/workspace/rdev/bin/rdev RDEV_TEST_DAEMON_BINARY=/data/workspace/rdev/bin/rdevd /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemotePhase6FrontendContracts$' -count=1 -timeout=3m -v",
+      "raw_log": "/data/tmp/rdev-validation/phase6-final-four-entry-isolated.log",
+      "raw_log_sha256": "df176984480ea728743bcf5c14664347a2ea86c05156f376394671cb421194d1",
+      "binary_source": "aca675ae01f5dcfb99147005cc9daee076ea988d"
+    },
+    {
+      "name": "local_ipv6_ssh_and_sync",
+      "source": "aca675ae01f5dcfb99147005cc9daee076ea988d",
+      "result": "passed",
+      "command": "RDEV_RUN_IPV6=1 /data/tmp/rdev-toolchain/go/bin/go test ./internal/client -run '^TestLocalIPv6SSHAndSync$' -count=1 -v",
+      "raw_log": "/data/tmp/rdev-validation/phase6-final-ipv6-aca675a.log",
+      "raw_log_sha256": "885aa7207b7cd9dc5f6dd1994617bcc5e18b5e64fd4af7ddd9b0cf8d3f199b06"
+    },
+    {
+      "name": "phase5_regression_individual_results",
+      "source": "aca675ae01f5dcfb99147005cc9daee076ea988d",
+      "result": "selected individual tests passed",
+      "tests": [
+        "TestRemoteBrokerApprovalIsolation",
+        "TestRemoteBrokerAuditRoutes",
+        "TestRemoteBrokerFrontendBoundary",
+        "TestRemoteBrokerJobRecovery",
+        "TestRemoteBrokerRetryCancellation",
+        "TestRemoteBrokerLeaseLifecycle",
+        "TestRemoteBrokerSecrets",
+        "TestRemoteSupportAndStateFrontends",
+        "TestRemoteBrokerPreparedSync",
+        "TestRemoteBrokerSharedWait"
+      ],
+      "command": "RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config RDEV_TEST_CLI_BINARY=/data/workspace/rdev/bin/rdev RDEV_TEST_DAEMON_BINARY=/data/workspace/rdev/bin/rdevd /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^(TestRemoteBrokerApprovalIsolation|TestRemoteBrokerAuditRoutes|TestRemoteBrokerFrontendBoundary|TestRemoteBrokerJobRecovery|TestRemoteBrokerRetryCancellation|TestRemoteBrokerLeaseLifecycle|TestRemoteBrokerSecrets|TestRemoteSupportAndStateFrontends|TestRemoteBrokerPreparedSync|TestRemoteBrokerSharedWait|TestRemotePhase6FrontendContracts)$' -count=1 -timeout=10m -v",
+      "raw_log": "/data/tmp/rdev-validation/phase6-final-runtime-aca675a.log",
+      "raw_log_sha256": "1e24f95ac481a91b506486a8a3b54ad31ae7e7e3f87a0f6eda5dac528908e361",
+      "aggregate_note": "Aggregate failed only at the broker frontend sync fixture. 044f395 isolates the target from changing agent state without relaxing snapshot protection; four actual frontends and retained sync passed afterward."
+    },
+    {
+      "name": "previous_daemon_agent_upgrade",
+      "source": "aca675ae01f5dcfb99147005cc9daee076ea988d",
+      "result": "passed",
+      "command": "RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config RDEV_TEST_CLI_BINARY=/data/workspace/rdev/bin/rdev RDEV_TEST_DAEMON_BINARY=/data/workspace/rdev/bin/rdevd RDEV_TEST_PREDECESSOR_DAEMON_BINARY=/data/tmp/rdev-validation/phase6-predecessor-29b5f08/rdevd RDEV_TEST_PREDECESSOR_AGENT_DIR=/data/tmp/rdev-validation/phase6-predecessor-29b5f08/agents RDEV_TEST_CURRENT_AGENT_DIR=/data/workspace/rdev/cmd/rdev/agents /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerJobUpgrade$' -count=1 -timeout=3m -v",
+      "raw_log": "/data/tmp/rdev-validation/phase6-upgrade-29b5f08-aca675a.log",
+      "raw_log_sha256": "0e9684fee6918bdc2a580da9722edc5f0e91c5f8f21916a0282bf56f813b504f",
+      "predecessor": "29b5f08a2aa929ae589690a235417bb8623cef17",
+      "cases": [
+        "SIGTERM",
+        "SIGKILL"
+      ],
+      "guarantees": [
+        "original supervisors and output preserved",
+        "two-project ownership retained",
+        "commands each executed once",
+        "new base agent executable verified"
+      ]
+    },
+    {
+      "name": "actual_frontends_and_shared_runtime_race",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config GORACE='log_path=/data/tmp/rdev-validation/phase6-race-reports-044f395/race halt_on_error=1 atexit_sleep_ms=0' RDEV_TEST_CLI_BINARY=/data/tmp/rdev-validation/rdev-race-044f395 RDEV_TEST_DAEMON_BINARY=/data/tmp/rdev-validation/rdevd-race-044f395 /data/tmp/rdev-toolchain/go/bin/go test -race ./cmd/rdevd -run '^(TestRemotePhase6FrontendContracts|TestRemoteSupportAndStateFrontends|TestRemoteBrokerRetryCancellation|TestRemoteBrokerSharedWait|TestRemoteBrokerPreparedSync)$' -count=1 -timeout=5m -v",
+      "raw_log": "/data/tmp/rdev-validation/phase6-frontend-runtime-race-044f395.log",
+      "raw_log_sha256": "1e803f8153ebcbab8cdc0069a8788726744ca3f6e0fedea1692c8247567279d1",
+      "instrumentation": "local test processes, actual CLI/MCP and daemon; remote agent uninstrumented",
+      "waiters": 20,
+      "cancel_ms": {
+        "waiter": 21.563,
+        "retry": 33.889,
+        "foreground": 47.54
+      },
+      "shared_wait_shutdown_ms": 17.731515
+    },
+    {
+      "name": "linux_service_lifecycle",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "RDEV_REMOTE_RUNTIME=1 RDEV_REMOTE_SERVICE=1 RDEV_REMOTE_SSH=service-deploy RDEV_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config RDEV_GO=/data/tmp/rdev-toolchain/go/bin/go sh scripts/remote-rdevd-smoke.sh",
+      "raw_log": "/data/tmp/rdev-validation/phase6-linux-service-044f395.log",
+      "raw_log_sha256": "951dffcd935ddfd56315e51177d9cdca30d70d1ec1912b90b9203bbbe5218e15"
+    },
+    {
+      "name": "mixed",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config RDEV_TEST_CLI_BINARY=/data/workspace/rdev/bin/rdev RDEV_TEST_DAEMON_BINARY=/data/workspace/rdev/bin/rdevd /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerMixedWorkload$' -count=1 -timeout=3m -v",
+      "raw_log": "/data/tmp/rdev-validation/phase6-mixed-044f395.log",
+      "raw_log_sha256": "001f87291508368b394b01e8058aaa7cb904a79cebb618c24f89a0aad2821115",
+      "metrics": {
+        "bulk_bytes_per_second": 2097152,
+        "cli_mcp_exact_sync_traffic": true,
+        "control.ping": {
+          "baseline_p95_ms": 1.336323,
+          "bulk_p95_ms": 1.439005,
+          "ratio": 1.0768392072874597,
+          "samples": 566
+        },
+        "control.status": {
+          "baseline_p95_ms": 0.223639,
+          "bulk_p95_ms": 0.260949,
+          "ratio": 1.1668313666221006,
+          "samples": 566
+        },
+        "exec-0_cancellation_completions": 7,
+        "exec-0_loaded_completions": 12,
+        "exec-1_cancellation_completions": 7,
+        "exec-1_loaded_completions": 13,
+        "idle_bulk_reclaimed": true,
+        "job-control.job_status": {
+          "baseline_p95_ms": 1.558217,
+          "bulk_p95_ms": 1.544342,
+          "ratio": 0.9910955919490033,
+          "samples": 371
+        },
+        "job-control.ping": {
+          "baseline_p95_ms": 1.385174,
+          "bulk_p95_ms": 1.448021,
+          "ratio": 1.0453711952433413,
+          "samples": 370
+        },
+        "job-control.status": {
+          "baseline_p95_ms": 0.219991,
+          "bulk_p95_ms": 0.255629,
+          "ratio": 1.1619975362628472,
+          "samples": 370
+        },
+        "loaded_seconds": 12.581494658,
+        "measurement_processes": 7,
+        "mixed_sync_sigkill_isolated": true,
+        "peak_owner_active": 2,
+        "peak_owner_queued": 1,
+        "peak_sync_reservation_bytes": 25165824,
+        "same_base_agent": true,
+        "source_bytes_each": 12582912,
+        "sync-a_payload_bytes": 13238272,
+        "sync-b_payload_bytes": 25165824,
+        "wait_cancellation_completions": 7,
+        "wait_loaded_completions": 12
+      },
+      "threshold_ratio": 2,
+      "isolated_from_builds_and_other_load": true
+    },
+    {
+      "name": "mixed-race",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config GORACE='log_path=/data/tmp/rdev-validation/phase6-race-reports-044f395/race halt_on_error=1 atexit_sleep_ms=0' RDEV_TEST_CLI_BINARY=/data/tmp/rdev-validation/rdev-race-044f395 RDEV_TEST_DAEMON_BINARY=/data/tmp/rdev-validation/rdevd-race-044f395 /data/tmp/rdev-toolchain/go/bin/go test -race ./cmd/rdevd -run '^TestRemoteBrokerMixedWorkload$' -count=1 -timeout=3m -v",
+      "raw_log": "/data/tmp/rdev-validation/phase6-mixed-race-044f395.log",
+      "raw_log_sha256": "1c4276b78246d08a579b45cf2b597dffb09be41922964c1eb25ee9e366b43e2c",
+      "metrics": {
+        "bulk_bytes_per_second": 2097152,
+        "cli_mcp_exact_sync_traffic": true,
+        "control.ping": {
+          "baseline_p95_ms": 2.696028,
+          "bulk_p95_ms": 2.683103,
+          "ratio": 0.9952059103243734,
+          "samples": 499
+        },
+        "control.status": {
+          "baseline_p95_ms": 0.906949,
+          "bulk_p95_ms": 1.03073,
+          "ratio": 1.1364806620879453,
+          "samples": 500
+        },
+        "exec-0_cancellation_completions": 7,
+        "exec-0_loaded_completions": 12,
+        "exec-1_cancellation_completions": 7,
+        "exec-1_loaded_completions": 12,
+        "idle_bulk_reclaimed": true,
+        "job-control.job_status": {
+          "baseline_p95_ms": 3.539859,
+          "bulk_p95_ms": 3.581107,
+          "ratio": 1.0116524415238008,
+          "samples": 320
+        },
+        "job-control.ping": {
+          "baseline_p95_ms": 2.655693,
+          "bulk_p95_ms": 2.758577,
+          "ratio": 1.0387409237438212,
+          "samples": 320
+        },
+        "job-control.status": {
+          "baseline_p95_ms": 0.97181,
+          "bulk_p95_ms": 0.985205,
+          "ratio": 1.0137835585145245,
+          "samples": 321
+        },
+        "loaded_seconds": 12.553784357,
+        "measurement_processes": 7,
+        "mixed_sync_sigkill_isolated": true,
+        "peak_owner_active": 2,
+        "peak_owner_queued": 1,
+        "peak_sync_reservation_bytes": 25165824,
+        "same_base_agent": true,
+        "source_bytes_each": 12582912,
+        "sync-a_payload_bytes": 13631488,
+        "sync-b_payload_bytes": 25165824,
+        "wait_cancellation_completions": 7,
+        "wait_loaded_completions": 13
+      },
+      "threshold_ratio": 2,
+      "isolated_from_builds_and_other_load": true
+    },
+    {
+      "name": "local_daemon_smoke",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "result": "passed",
+      "command": "sh scripts/rdevd-smoke-runtime.sh bin/rdevd /data/tmp/rdev-validation/phase6-local-smoke-044f395",
+      "raw_log": "/data/tmp/rdev-validation/phase6-local-smoke-044f395.log",
+      "raw_log_sha256": "0ae129947eec55ff19b17aaa0e53b0ac22bb63043bb07aa9e856c0e45bba1c02"
+    }
+  ],
+  "race_reports": 0,
+  "race_binaries": [
+    {
+      "name": "rdev-race-044f395",
+      "sha256": "50af2d95ff2ae2874d640e59573e1127c3ca213515fb0450906c3ee7d064f7dc",
+      "command": "/data/tmp/rdev-toolchain/go/bin/go build -race -trimpath -o /data/tmp/rdev-validation/rdev-race-044f395 ./cmd/rdev"
+    },
+    {
+      "name": "rdevd-race-044f395",
+      "sha256": "b0f2c7405533f828f6f29a52a4a62bb1ce1f02afe40a4f1358646484e0c5d65e",
+      "command": "/data/tmp/rdev-toolchain/go/bin/go build -race -trimpath -o /data/tmp/rdev-validation/rdevd-race-044f395 ./cmd/rdevd"
+    }
+  ],
+  "release": {
+    "source": {
+      "commit": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "tree_sha256": "2d359fd3ce735f9fb4a7c20e5c4708fa8566037d0cce7aca80cdd9cb426e587e",
+      "dirty": false
+    },
+    "cyclonedx_schema": {
+      "url": "https://raw.githubusercontent.com/CycloneDX/specification/1.6/schema/bom-1.6.schema.json",
+      "result": "passed"
+    },
+    "vulnerability_reports": [
+      {
+        "name": "govulncheck-binary-rdev-agent-darwin-amd64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "scan_level": "symbol",
+          "scan_mode": "binary"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-binary-rdev-agent-darwin-arm64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "scan_level": "symbol",
+          "scan_mode": "binary"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-binary-rdev-agent-linux-amd64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "scan_level": "symbol",
+          "scan_mode": "binary"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-binary-rdev-agent-linux-arm64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "scan_level": "symbol",
+          "scan_mode": "binary"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-binary-rdev.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "scan_level": "symbol",
+          "scan_mode": "binary"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-binary-rdevd.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "scan_level": "symbol",
+          "scan_mode": "binary"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-source-darwin-amd64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "go_version": "go1.26.8",
+          "scan_level": "symbol",
+          "scan_mode": "source"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-source-darwin-arm64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "go_version": "go1.26.8",
+          "scan_level": "symbol",
+          "scan_mode": "source"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-source-linux-amd64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "go_version": "go1.26.8",
+          "scan_level": "symbol",
+          "scan_mode": "source"
+        },
+        "findings": 0
+      },
+      {
+        "name": "govulncheck-source-linux-arm64.json",
+        "config": {
+          "protocol_version": "v1.0.0",
+          "scanner_name": "govulncheck",
+          "scanner_version": "v1.8.0",
+          "db": "https://vuln.go.dev",
+          "db_last_modified": "2026-09-02T19:12:04Z",
+          "go_version": "go1.26.8",
+          "scan_level": "symbol",
+          "scan_mode": "source"
+        },
+        "findings": 0
+      }
+    ],
+    "tamper_rejection": {
+      "exit_status": 1,
+      "error": "metadata does not match artifacts: provenance.intoto.json\nexit status 1"
+    },
+    "restored_verify": "passed",
+    "metadata_sha256": {
+      "manifest.json": "f36fe921c28ede13dbba8a63352ec11360d5f24c9b4a0faded3a475ee0598f03",
+      "sbom.cdx.json": "3354bbba4ea9789fb87e498f071ce7c0a59e2d0e5cd78c4c05eac0ccc722cd5a",
+      "provenance.intoto.json": "ebace93ea9653b4dcb0e3467166714473a3fcff82cec085e29da148d2e8665ad"
+    },
+    "artifacts": [
+      {
+        "name": "rdev",
+        "size": 24740772,
+        "goos": "linux",
+        "goarch": "amd64",
+        "sha256": "79c39a0e863560cd5dd49aede163148e43771acf799c9dbae9cbbaf5fe35cadd"
+      },
+      {
+        "name": "rdevd",
+        "size": 7005158,
+        "goos": "linux",
+        "goarch": "amd64",
+        "sha256": "fa7740bef811533e2629aa10c60e56e7512a2d254d99aca9d852c45501101717"
+      },
+      {
+        "name": "rdev-agent-linux-amd64",
+        "size": 3453090,
+        "goos": "linux",
+        "goarch": "amd64",
+        "sha256": "b6fed0a79c53974d0c5ee2fa583db53e09ce0ac225c843a143a0ed5f30e397a4"
+      },
+      {
+        "name": "rdev-agent-linux-arm64",
+        "size": 3276962,
+        "goos": "linux",
+        "goarch": "arm64",
+        "sha256": "23f22fde12a427f9aae68c456007e10a3746c3f0729b90dad413cacc6820a233"
+      },
+      {
+        "name": "rdev-agent-darwin-amd64",
+        "size": 3445056,
+        "goos": "darwin",
+        "goarch": "amd64",
+        "sha256": "a81770de7aaa47f6405b514045bd96dac2d2d80d9cc85e3f65ed016bc7a3360e"
+      },
+      {
+        "name": "rdev-agent-darwin-arm64",
+        "size": 3211986,
+        "goos": "darwin",
+        "goarch": "arm64",
+        "sha256": "03aad68f5f76df6a1871851a5b792a3d9dea722ab078625b9293d192016dc47a"
+      }
+    ],
+    "commands": [
+      "RDEV_RELEASE_OUT=/data/tmp/rdev-validation/phase6-release/final-044f395 GOCACHE=/data/tmp/rdev-gocache GOMODCACHE=/data/tmp/rdev-gomodcache make GO=/data/tmp/rdev-toolchain/go/bin/go release-gate",
+      "RDEV_RELEASE_OUT=/data/tmp/rdev-validation/phase6-release/final-044f395 GOCACHE=/data/tmp/rdev-gocache GOMODCACHE=/data/tmp/rdev-gomodcache make GO=/data/tmp/rdev-toolchain/go/bin/go verify-release"
+    ],
+    "gate_log_sha256": "228ded8daed35c768cf980fea59ae5f8e9663cc53374f74de3a7012638d73419",
+    "verify_log_sha256": "17de36acb4bd73573b7c0fa7eacbaf9d3b6a5b7ff6e8dd48b56a4507535af03a"
+  },
+  "dependency_baseline": {
+    "source": "de967044dc0cc76be9a1239d2881797934dc49f9",
+    "go": "go1.25.0",
+    "x_sys": "v0.41.0",
+    "unique_advisories": 47,
+    "with_call_traces": 27,
+    "remediation": "Go 1.26.8 and x/sys v0.44.0; MCP SDK remains v1.7.0",
+    "raw_report_sha256": "144fe8bad5249eabfed284430f5dce46f2e957dbaecb581d8a917767bcc11e53"
+  },
+  "independent_review": [
+    {
+      "reviewer": "entry_review",
+      "source": "aca675ae01f5dcfb99147005cc9daee076ea988d",
+      "scope": "entry behavior, stdin, timeout, typed errors, durable digest, old peers, release/compat and documentation",
+      "result": "all confirmed findings cross-reviewed closed; own daemon flags reviewed by other reviewers"
+    },
+    {
+      "reviewer": "entry_review",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "scope": "sync fixture isolation and actual four-entry results",
+      "result": "passed; no weakened assertion or production change"
+    },
+    {
+      "reviewer": "address_discovery",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "scope": "P6-01 through P6-09 completeness; shared support/state boundaries; documentation",
+      "result": "no open blocking findings"
+    },
+    {
+      "reviewer": "release_compat",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "scope": "final release gate, metadata/artifact binding and tamper rejection; cross-review of support/state/daemon flags",
+      "result": "passed"
+    },
+    {
+      "reviewer": "entry_review",
+      "source": "044f3957958af0e654168da1e629d2b95749d1a9",
+      "scope": "final closure documentation and validation record, including log/metadata/artifact hashes and exact mixed workload metrics",
+      "result": "passed; initial aggregate failure is disclosed, no skipped check counted as pass, no remaining blocker"
+    }
+  ],
+  "deferred": [
+    "macOS runtime remains unverified; cross-build is not runtime evidence",
+    "Phase8: signing, formal releases, distribution channels, full automatic upgrade/rollback combinations and production scale/soak certification"
+  ],
+  "not_executed": [
+    "hosted CI",
+    "formal release",
+    "production deployment"
+  ]
+}

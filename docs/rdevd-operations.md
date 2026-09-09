@@ -804,7 +804,8 @@ CLI/MCP job results include requested/effective resources and the limit reason.
 
 This changes old defaults: standalone CLI/client and broker exec used to allow
 unbounded runtime, while standalone MCP used 60 seconds. New jobs previously
-had no wall timer when it was omitted. Existing positive values keep their meaning;
+had no wall timer when it was omitted. Existing positive values within the hard
+maximum keep their meaning;
 existing running supervisors keep their recorded envelope. A new job requires
 negotiated `job_resource_envelope`; an old agent lacking it is rejected before
 launch. Update the embedded agent using `make all` and reconnect. This does not
