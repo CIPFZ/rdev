@@ -1103,23 +1103,34 @@ P6-01～P6-09 已完成（2026-09-09）：最终源码 `044f395` 的本地检查
 
 覆盖：ENG-027。只有 Phase 5 的 policy/ownership 和 Phase 3 的幂等/错误语义完成后才能开始。
 
-| Task | 内容 | 依赖 | 验收条件 |
-| --- | --- | --- | --- |
-| P7-01 | 定义 immutable HostID、alias、labels 和 inventory schema | P4-01、P4-14 | alias 变化不改变 HostID；selector 可确定性解析 |
-| P7-02 | 实现 selector preview 和 immutable target snapshot | P7-01、P5-12 | 执行中 inventory 变化不扩大计划目标 |
-| P7-03 | 定义 FleetPlan/HostRun 持久状态机 | P7-02、P3-02、P4-14 | broker 重启可恢复，成功 host 不重复执行 mutation |
-| P7-04 | 实现 max_parallel、waves、canary 和 pause/resume | P7-03、P5-07 | 并发和波次严格受限，暂停后不启动新 host |
-| P7-05 | 实现 max_failures/ratio 和剩余目标取消策略 | P7-04、P3-09 | 达阈值后按策略 pause/cancel，ambiguous 独立统计 |
-| P7-06 | 实现 batch result aggregation 和 retry subset | P7-05 | success/failed/skipped/canceled/ambiguous/unreachable 不丢失 |
-| P7-07 | 将 Fleet capability、approval、audit 和 storage policy 接入 | P5-13、P5-14、P7-03 | `all`/大范围/destructive 计划必须显式批准并可审计 |
+P7-01～P7-07 已完成（2026-09-09）。最终源码 `db9a260` 已通过独立评审、
+本地 check/全仓 race、真实 CLI/官方 MCP SDK/SSH、受影响的 Phase5/6 运行时回归、
+Linux 生命周期、独立混合负载及在线 release-gate/verify-release。
+首版 allowlist 为有真实副作用且可恢复的 `job_start`，统一由 `rdevd` 执行；
+稳定 HostID、不可变快照、逐 host 权限、审批与 attempt/operation 身份贯穿全部入口。
+逐项验收与最终证据见 [Phase7 验收表](phase7-acceptance.md)。
 
-Fleet Gate：
+| Task | 状态 | 内容 | 依赖 | 验收条件 |
+| --- | --- | --- | --- | --- |
+| P7-01 | Complete | 定义 immutable HostID、alias、labels 和 inventory schema | P4-01、P4-14 | alias 变化不改变 HostID；selector 可确定性解析 |
+| P7-02 | Complete | 实现 selector preview 和 immutable target snapshot | P7-01、P5-12 | 执行中 inventory 变化不扩大计划目标 |
+| P7-03 | Complete | 定义 FleetPlan/HostRun 持久状态机 | P7-02、P3-02、P4-14 | broker 重启可恢复，成功 host 不重复执行 mutation |
+| P7-04 | Complete | 实现 max_parallel、waves、canary 和 pause/resume | P7-03、P5-07 | 并发和波次严格受限，暂停后不再准入新 host；已准入操作按在途契约处理 |
+| P7-05 | Complete | 实现 max_failures/ratio 和剩余目标取消策略 | P7-04、P3-09 | 超过配置允许最大值后按策略 pause/cancel，ambiguous 独立统计 |
+| P7-06 | Complete | 实现 batch result aggregation 和 retry subset | P7-05 | success/failed/skipped/canceled/ambiguous/unreachable 不丢失 |
+| P7-07 | Complete | 将 Fleet capability、approval、audit 和 storage policy 接入 | P5-13、P5-14、P7-03 | `all`/大范围/destructive 计划必须显式批准并可审计 |
 
-- [ ] selector 预览与实际 snapshot 完全一致。
-- [ ] canary 失败时不会进入下一 wave。
-- [ ] 100 host 部分失败、broker 重启和 cancel 后状态可恢复。
-- [ ] retry 只作用于选定失败子集，已成功 mutation 不重复执行。
-- [ ] 空 selector 和超阈值目标不能静默执行。
+Fleet Gate（最终源码全部通过，证据层次如下）：
+
+- [x] selector 预览与实际 snapshot 完全一致。
+- [x] canary 失败时不会进入下一 wave。
+- [x] 100 host 部分失败、broker 重启和 cancel 后状态可恢复：实际执行 100 个逻辑 host 的确定性模拟；真实进程 SIGKILL/SSH 恢复另行通过。
+- [x] retry 只作用于选定失败子集，已成功 mutation 不重复执行：模拟及真实独立目标 counter 验证。
+- [x] 空 selector 和超阈值目标不能静默执行。
+
+真实 Fleet 验证为一台授权 SSH 机器上的三个独立 agent/业务目录，不代表三台物理
+主机或百台真实主机。macOS runtime 尚未验证，继续按用户确认延期。
+真实 100 host/20 client/24h soak、完整生产认证及签名发布仍属 Phase8。
 
 ### Phase 8：发布、供应链与生产认证
 

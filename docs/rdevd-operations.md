@@ -287,6 +287,11 @@ other targets. Results sort and deduplicate by HostID. A plan supports at most
 preview snapshot; inspect its operation, digest and every `results` page before
 approving. Every plan requires explicit approval, covering all/large/destructive
 work without a client-controlled risk bypass.
+Each preview creates a new plan; after a lost preview response, use `fleet list`
+to recover the caller's recorded plan before creating another. Repeated or
+concurrent execute calls for a running or terminal plan with the same digest
+return its current state without dispatching another attempt. A paused plan
+requires resume with valid consumed approval, or fresh approval followed by execute.
 
 Use the same principal with an explicit `fleet.approve` grant to call
 `fleet approve PLAN -digest SHA -ttl SEC` (default 60, at most 600), then
@@ -295,8 +300,9 @@ from single-host approvals. They bind the plan, principal, target connection
 identity, operation and rollout/failure policy plus policy version and expiry.
 The unscoped `fleet.plan` grant admits plan/status/results/list;
 `fleet.execute` also controls pause/resume/cancel/retry/reconcile. Each selected
-HostID additionally requires `job_start` and `job_status` permission. Use exact
-HostID grants for those inner operations; alias grants do not transfer to Fleet.
+HostID additionally requires `job_start` and `job_status` permission. Exact
+HostID grants constrain those inner operations; global grants also apply, while
+alias-only grants do not transfer to Fleet.
 Discovery evaluates all required grants from one policy snapshot.
 New dispatch rechecks grants and target
 identity. Changed connection configuration fails closed; selectors are never
@@ -314,8 +320,9 @@ can hold at most global-minus-one slots when global capacity exceeds one.
 Owner/plan round-robin admission prevents a large plan monopolizing released slots.
 `max_parallel` is an upper bound and does not override that reservation.
 Canary must completely succeed before any
-later wave; ambiguous, unreachable and failed canaries never pass. Pause stops
-new dispatch and preserves in-flight jobs; wave boundaries and next-wave times
+later wave; ambiguous, unreachable and failed canaries never pass. Admission is
+the durable transition to `dispatching`. Pause stops new admission and preserves
+already admitted starts and in-flight jobs; wave boundaries and next-wave times
 are durable. Resume preserves successful targets; expired authorization needs
 new approval and execute. Previously admitted jobs may finish after expiry.
 
@@ -969,4 +976,5 @@ must be explicitly labeled with `RDEV_RELEASE_ALLOW_DIRTY=1`.
 Go build information, audit evidence and metadata binding. This is local evidence,
 not a hosted CI run or signed release. Formal signing, distribution notices,
 release channels, upgrade/rollback automation and production certification remain
-Phase8. The [Phase6 acceptance](phase6-acceptance.md) records actual executions.
+Phase8. [Phase7 acceptance](phase7-acceptance.md) records the current execution;
+[Phase6 acceptance](phase6-acceptance.md) retains the prior source-bound evidence.

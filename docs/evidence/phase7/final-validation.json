@@ -1,0 +1,1169 @@
+{
+  "schema_version": 1,
+  "phase": "Phase7",
+  "status": "Complete",
+  "handoff": "042a9524f23730f8bf8520bbfb7cdabfe95556f4",
+  "validation_and_build": "db9a26038c2a9cf96ff63f5bca44274167a9b36b",
+  "source_note": "All implementation, tests, runtime binaries, independent source reviews and local release gate bind this clean commit. The subsequent closure commit changes documentation and final evidence only.",
+  "regression_references": {
+    "phase5_production": "29b5f08a2aa929ae589690a235417bb8623cef17",
+    "phase6_validation": "044f3957958af0e654168da1e629d2b95749d1a9"
+  },
+  "environment": {
+    "local_platform": "linux/amd64",
+    "go_version": "go1.26.8",
+    "go_launcher": "/data/tmp/rdev-toolchain/go/bin/go",
+    "govulncheck": "v1.8.0",
+    "GOCACHE": "/data/tmp/rdev-gocache",
+    "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+    "ssh_alias": "service-deploy",
+    "ssh_config": "/data/tmp/rdev-validation/ssh/config"
+  },
+  "implementation_scope": {
+    "operation_allowlist": [
+      "job_start"
+    ],
+    "execution_authority": "rdevd",
+    "inventory_schema": 1,
+    "fleet_state_schema": 1,
+    "broker_protocol": 1,
+    "targets_per_plan_max": 128,
+    "results_page_max": 32,
+    "approval": "Every mutation plan; principal, immutable targets, connection identity, operation, rollout/failure policy, policy version and expiry bound. job_start/job_status authorization is required for each selected HostID; global grants apply, while alias-only grants do not transfer.",
+    "recovery": "Stable per-attempt operation identity, query original ledger/job, never automatically replay; unresolved outcomes retain ambiguous state and capacity.",
+    "retry": "Explicit eligible subset creates a child requiring fresh approval, with new attempt and operation identities; no successful or ambiguous retries."
+  },
+  "requirements": {
+    "P7-01": "Complete",
+    "P7-02": "Complete",
+    "P7-03": "Complete",
+    "P7-04": "Complete",
+    "P7-05": "Complete",
+    "P7-06": "Complete",
+    "P7-07": "Complete"
+  },
+  "fleet_gates": [
+    {
+      "gate": "Preview equals executed immutable snapshot",
+      "result": "passed",
+      "tests": [
+        "TestFleetSelectorDeterminismAndDiscoveryIsolation",
+        "TestFleetInventoryCASAndConcurrentSnapshot",
+        "TestFleetInventoryDiscoveryUsesOnePolicySnapshot",
+        "TestFleetSnapshotApprovalOwnerAndPolicyBinding",
+        "TestRemoteFleetFrontendsAndRetry"
+      ],
+      "evidence_level": "deterministic tests plus actual CLI/official MCP SDK/SSH"
+    },
+    {
+      "gate": "Failed canary never enters next wave",
+      "result": "passed",
+      "tests": [
+        "TestFleetCanaryFailureAndThresholdBoundaries",
+        "TestRemoteFleetPauseCancelAndCanary"
+      ],
+      "evidence_level": "deterministic and real SSH side-effect absence"
+    },
+    {
+      "gate": "100 logical hosts partial failure, restart and cancel preserve state",
+      "result": "passed",
+      "tests": [
+        "TestFleet100LogicalHostsPartialFailureRestartCancelRetry",
+        "TestFleet100LogicalHostsCompleteWithBoundedConcurrency"
+      ],
+      "observations": [
+        "100-host completion sends exactly 100 operations, max_parallel at most 7; 12 concurrent duplicate execute calls cause no further sends.",
+        "100-target failure scenario: first wave 8 success/2 failed, durable pause and wave deadline survive reload; cancel preserves results and marks 90 pending canceled; retry selected failed target adds exactly one operation; second restart preserves child completion."
+      ],
+      "evidence_level": "actually executed deterministic simulation, not 100 real machines"
+    },
+    {
+      "gate": "Retry only selected failure; successful mutations do not replay",
+      "result": "passed",
+      "tests": [
+        "TestFleetConcurrentRetryReservesOneChild",
+        "TestFleetRecoveryEverySubmissionWindowNeverReplays",
+        "TestRemoteFleetFrontendsAndRetry",
+        "TestRemoteFleetCrashRecovery"
+      ],
+      "observations": [
+        "Real target counters x/xx/x after retrying the selected failed target.",
+        "Actual pre-ACK SIGKILL, unavailable remote query, ambiguous, then query recovery retains original job/operation/attempt and one side effect."
+      ],
+      "evidence_level": "simulation plus actual process crash/SSH/marker evidence"
+    },
+    {
+      "gate": "Empty selectors and large target sets cannot silently execute",
+      "result": "passed",
+      "tests": [
+        "TestFleetSelectorRejectsEmptyAndMalformed",
+        "TestFleetOperationAndRolloutValidation",
+        "TestFleet100LogicalHostsCompleteWithBoundedConcurrency",
+        "TestRemoteBrokerFleetBoundary",
+        "TestRemoteFleetFrontendsAndRetry"
+      ],
+      "evidence_level": "strict selector/size boundaries and all-plan approval enforcement"
+    }
+  ],
+  "checks": [
+    {
+      "name": "check",
+      "source": "db9a26038c2a9cf96ff63f5bca44274167a9b36b",
+      "result": "passed",
+      "command": "GOCACHE=/data/tmp/rdev-gocache GOMODCACHE=/data/tmp/rdev-gomodcache make GO=/data/tmp/rdev-toolchain/go/bin/go all daemon check",
+      "raw_log": "/data/tmp/rdev-validation/phase7/check-db9a260.log",
+      "raw_log_sha256": "59787573ecdda9096c6c0afee7760671af1b6c62e3ef317a6ccaeec252ae555c"
+    },
+    {
+      "name": "full_repository_race",
+      "source": "db9a26038c2a9cf96ff63f5bca44274167a9b36b",
+      "result": "passed",
+      "command": "GOCACHE=/data/tmp/rdev-gocache GOMODCACHE=/data/tmp/rdev-gomodcache /data/tmp/rdev-toolchain/go/bin/go test -race ./... -count=1",
+      "raw_log": "/data/tmp/rdev-validation/phase7/race-db9a260.log",
+      "raw_log_sha256": "0621aac32c03857eb7f38179bc7cd7f9a7430153ca19b68f3372053c95224154"
+    }
+  ],
+  "independent_review": {
+    "source": "db9a26038c2a9cf96ff63f5bca44274167a9b36b",
+    "result": "accepted",
+    "reviewers": [
+      {
+        "name": "final_security_review",
+        "scope": [
+          "identity",
+          "inventory",
+          "selector",
+          "authorization",
+          "approval",
+          "audit",
+          "CLI/MCP",
+          "support/compat/schema"
+        ],
+        "closed_findings": [
+          {
+            "severity": "P2",
+            "issue": "Raw Fleet RPC accepted duplicate and unknown JSON fields before typed route validation",
+            "fix": "Fleet-only strict Request.UnmarshalJSON under existing bounded ingress; non-Fleet decoding preserved",
+            "regressions": [
+              "TestIndependentFleetRawJSONRejectsAmbiguousInventory",
+              "TestIndependentFleetStrictDeltaAndLegacyPipeline"
+            ]
+          }
+        ],
+        "final_targeted_tests": "cmd/rdevd 0.006s; internal/broker 0.164s passed",
+        "participated_in_implementation": false
+      },
+      {
+        "name": "final_recovery_review",
+        "scope": [
+          "state transitions",
+          "crash recovery",
+          "retry ancestry",
+          "concurrent controls",
+          "cancellation",
+          "scheduler fairness",
+          "resource reservations",
+          "storage retention"
+        ],
+        "closed_findings": [
+          {
+            "severity": "P1",
+            "issue": "New plans could consume lifecycle metadata headroom and prevent cancellation at the 16 MiB bound",
+            "fix": "New plan/retry admission reserves metadata growth; result/control/load use hard limit; admission freeze preserved",
+            "regressions": [
+              "TestReviewFleetNearByteBudgetCanStillCancel",
+              "TestReviewExpiredRetryComponentSurvivesNextRetry"
+            ]
+          }
+        ],
+        "final_targeted_tests": "Independent reserve/load/cancel boundary regression passed (8.18s)",
+        "participated_in_implementation": false
+      }
+    ],
+    "open_confirmed_findings": []
+  },
+  "runtime_artifacts": {
+    "source": "db9a26038c2a9cf96ff63f5bca44274167a9b36b",
+    "race_build_commands": [
+      "/data/tmp/rdev-toolchain/go/bin/go build -race -trimpath -ldflags='-X github.com/CIPFZ/rdev/internal/buildinfo.Commit=db9a260 -X github.com/CIPFZ/rdev/internal/buildinfo.CommitTime=2026-09-09T10:31:35Z' -o /data/tmp/rdev-validation/phase7/rdev-race-db9a260 ./cmd/rdev",
+      "/data/tmp/rdev-toolchain/go/bin/go build -race -trimpath -ldflags='-X github.com/CIPFZ/rdev/internal/buildinfo.Commit=db9a260 -X github.com/CIPFZ/rdev/internal/buildinfo.CommitTime=2026-09-09T10:31:35Z' -o /data/tmp/rdev-validation/phase7/rdevd-race-db9a260 ./cmd/rdevd"
+    ],
+    "artifacts": [
+      {
+        "path": "/data/workspace/rdev/bin/rdev",
+        "role": "normal CLI",
+        "size": 24813237,
+        "sha256": "020c5066b5dc94aef5800c3362409c8181587a8fbbb074f96e7c877d2fa163bd",
+        "go_version": "go1.26.8",
+        "vcs_modified": false,
+        "race_instrumented": false
+      },
+      {
+        "path": "/data/workspace/rdev/bin/rdevd",
+        "role": "normal daemon",
+        "size": 7308933,
+        "sha256": "ed7318f46665f8fd8dc1058344bc43d2b3b2109e5fec648c2be413743a90b0ae",
+        "go_version": "go1.26.8",
+        "vcs_modified": false,
+        "race_instrumented": false
+      },
+      {
+        "path": "/data/tmp/rdev-validation/phase7/rdev-race-db9a260",
+        "role": "race CLI",
+        "size": 27998812,
+        "sha256": "a013fd4555d9983e482113720695f33a2ef2cfda5136c2c79e2071f6b4187fd9",
+        "go_version": "go1.26.8",
+        "vcs_modified": false,
+        "race_instrumented": true
+      },
+      {
+        "path": "/data/tmp/rdev-validation/phase7/rdevd-race-db9a260",
+        "role": "race daemon",
+        "size": 9322539,
+        "sha256": "fff776929914ba05f8ffa9f795429b0e8ea8d1cdc275a707316d0a7a0580c87f",
+        "go_version": "go1.26.8",
+        "vcs_modified": false,
+        "race_instrumented": true
+      }
+    ]
+  },
+  "runtime_checks": [
+    {
+      "stage": "fleet-normal",
+      "started_at": "2026-09-09T10:36:07.182078+00:00",
+      "wall_seconds": 27.969,
+      "exit_code": 0,
+      "result": "passed",
+      "command": [
+        "/data/tmp/rdev-toolchain/go/bin/go",
+        "test",
+        "./cmd/rdevd",
+        "-run",
+        "^(TestRemoteBrokerFleetBoundary|TestRemoteFleetFrontendsAndRetry|TestRemoteFleetCrashRecovery|TestRemoteFleetPauseCancelAndCanary|TestRemoteFleetMixedWorkload)$",
+        "-count=1",
+        "-timeout=5m",
+        "-v"
+      ],
+      "environment": {
+        "GOCACHE": "/data/tmp/rdev-gocache",
+        "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+        "RDEV_RUN_REMOTE": "1",
+        "RDEV_TEST_REMOTE": "service-deploy",
+        "RDEV_TEST_SSH_CONFIG": "/data/tmp/rdev-validation/ssh/config",
+        "RDEV_TEST_CLI_BINARY": "/data/workspace/rdev/bin/rdev",
+        "RDEV_TEST_DAEMON_BINARY": "/data/workspace/rdev/bin/rdevd"
+      },
+      "instrumentation": {
+        "harness": "normal",
+        "daemon": "normal",
+        "cli": "normal",
+        "agents": "uninstrumented",
+        "exceptions": []
+      },
+      "tests": [
+        {
+          "name": "TestRemoteBrokerFleetBoundary",
+          "seconds": 1.32
+        },
+        {
+          "name": "TestRemoteFleetFrontendsAndRetry",
+          "seconds": 3.31
+        },
+        {
+          "name": "TestRemoteFleetCrashRecovery",
+          "seconds": 2.61
+        },
+        {
+          "name": "TestRemoteFleetPauseCancelAndCanary",
+          "seconds": 10.18
+        },
+        {
+          "name": "TestRemoteFleetMixedWorkload",
+          "seconds": 10.14
+        }
+      ],
+      "subtests": [],
+      "skipped": [],
+      "log": "/data/tmp/rdev-validation/phase7/fleet-normal-db9a260.log",
+      "log_sha256": "fde97cd97619e2fd6fead595d9c6b89b341be1f304ca3e77469e7c7ba140e273",
+      "measurements": [],
+      "name": "fleet-normal"
+    },
+    {
+      "stage": "fleet-race",
+      "started_at": "2026-09-09T10:36:45.945034+00:00",
+      "wall_seconds": 28.997,
+      "exit_code": 0,
+      "result": "passed",
+      "command": [
+        "/data/tmp/rdev-toolchain/go/bin/go",
+        "test",
+        "-race",
+        "./cmd/rdevd",
+        "-run",
+        "^(TestRemoteBrokerFleetBoundary|TestRemoteFleetFrontendsAndRetry|TestRemoteFleetCrashRecovery|TestRemoteFleetPauseCancelAndCanary|TestRemoteFleetMixedWorkload)$",
+        "-count=1",
+        "-timeout=5m",
+        "-v"
+      ],
+      "environment": {
+        "GOCACHE": "/data/tmp/rdev-gocache",
+        "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+        "RDEV_RUN_REMOTE": "1",
+        "RDEV_TEST_REMOTE": "service-deploy",
+        "RDEV_TEST_SSH_CONFIG": "/data/tmp/rdev-validation/ssh/config",
+        "RDEV_TEST_CLI_BINARY": "/data/tmp/rdev-validation/phase7/rdev-race-db9a260",
+        "RDEV_TEST_DAEMON_BINARY": "/data/tmp/rdev-validation/phase7/rdevd-race-db9a260",
+        "GORACE": "log_path=/data/tmp/rdev-validation/phase7/race-reports-db9a260/race halt_on_error=1 atexit_sleep_ms=0"
+      },
+      "instrumentation": {
+        "harness": "race",
+        "daemon": "race",
+        "cli": "race",
+        "agents": "uninstrumented",
+        "exceptions": []
+      },
+      "tests": [
+        {
+          "name": "TestRemoteBrokerFleetBoundary",
+          "seconds": 1.36
+        },
+        {
+          "name": "TestRemoteFleetFrontendsAndRetry",
+          "seconds": 4.09
+        },
+        {
+          "name": "TestRemoteFleetCrashRecovery",
+          "seconds": 2.74
+        },
+        {
+          "name": "TestRemoteFleetPauseCancelAndCanary",
+          "seconds": 10.31
+        },
+        {
+          "name": "TestRemoteFleetMixedWorkload",
+          "seconds": 9.9
+        }
+      ],
+      "subtests": [],
+      "skipped": [],
+      "log": "/data/tmp/rdev-validation/phase7/fleet-race-db9a260.log",
+      "log_sha256": "fab9dbc906093fdd7fda987203aa9f240ca948f64458e0c447ee7a5dbef53f3b",
+      "measurements": [],
+      "name": "fleet-race"
+    },
+    {
+      "stage": "regression-normal",
+      "started_at": "2026-09-09T10:37:19.050370+00:00",
+      "wall_seconds": 106.428,
+      "exit_code": 0,
+      "result": "passed",
+      "command": [
+        "/data/tmp/rdev-toolchain/go/bin/go",
+        "test",
+        "./cmd/rdevd",
+        "-run",
+        "^(TestRemoteBrokerApprovalIsolation|TestRemoteBrokerAuditRoutes|TestRemoteBrokerFrontendBoundary|TestRemoteBrokerJobRecovery|TestRemoteBrokerRetryCancellation|TestRemoteBrokerLeaseLifecycle|TestRemoteBrokerSecrets|TestRemoteSupportAndStateFrontends|TestRemoteBrokerPreparedSync|TestRemoteBrokerSharedWait|TestRemotePhase6FrontendContracts)$",
+        "-count=1",
+        "-timeout=10m",
+        "-v"
+      ],
+      "environment": {
+        "GOCACHE": "/data/tmp/rdev-gocache",
+        "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+        "RDEV_RUN_REMOTE": "1",
+        "RDEV_TEST_REMOTE": "service-deploy",
+        "RDEV_TEST_SSH_CONFIG": "/data/tmp/rdev-validation/ssh/config",
+        "RDEV_TEST_CLI_BINARY": "/data/workspace/rdev/bin/rdev",
+        "RDEV_TEST_DAEMON_BINARY": "/data/workspace/rdev/bin/rdevd"
+      },
+      "instrumentation": {
+        "harness": "normal",
+        "daemon": "normal",
+        "cli": "normal",
+        "agents": "uninstrumented",
+        "exceptions": []
+      },
+      "tests": [
+        {
+          "name": "TestRemoteBrokerApprovalIsolation",
+          "seconds": 0.9
+        },
+        {
+          "name": "TestRemoteBrokerAuditRoutes",
+          "seconds": 0.5
+        },
+        {
+          "name": "TestRemoteBrokerFrontendBoundary",
+          "seconds": 1.15
+        },
+        {
+          "name": "TestRemoteBrokerJobRecovery",
+          "seconds": 1.53
+        },
+        {
+          "name": "TestRemoteBrokerRetryCancellation",
+          "seconds": 4.43
+        },
+        {
+          "name": "TestRemoteBrokerLeaseLifecycle",
+          "seconds": 65.67
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts",
+          "seconds": 21.04
+        },
+        {
+          "name": "TestRemoteBrokerSecrets",
+          "seconds": 2.52
+        },
+        {
+          "name": "TestRemoteSupportAndStateFrontends",
+          "seconds": 0.61
+        },
+        {
+          "name": "TestRemoteBrokerPreparedSync",
+          "seconds": 6.04
+        },
+        {
+          "name": "TestRemoteBrokerSharedWait",
+          "seconds": 1.62
+        }
+      ],
+      "subtests": [
+        {
+          "name": "TestRemotePhase6FrontendContracts/standalone-cli",
+          "seconds": 5.36
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts/broker-cli",
+          "seconds": 4.96
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts/standalone-mcp",
+          "seconds": 5.06
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts/broker-mcp",
+          "seconds": 4.88
+        }
+      ],
+      "skipped": [],
+      "log": "/data/tmp/rdev-validation/phase7/regression-normal-db9a260.log",
+      "log_sha256": "87760dd3e425a010b3daeaeebea1d01ad30fae3c00ba7e4cd1921ede2f0f544c",
+      "measurements": [
+        "remote_lifecycle_test.go:315: real SSH retry/cancellation: old_agent=1800102 replacement_agent=1800127 waiter_cancel_ms=20.525 retry_cancel_ms=20.680 foreground_cancel_ms=10.678 mutation_executions=1 survivor_exec=passed shared_transport_preserved=true",
+        "remote_lifecycle_test.go:412: real SSH lease lifecycle: {\"active_agent_preserved\":true,\"cycles\":6,\"elapsed_ms\":65361.874,\"final_daemon_ssh\":0,\"frontend_normal_close\":3,\"frontend_sigkill\":3,\"idle_ttl_ms\":250,\"new_owner_requests\":60,\"reap_ms\":[4799.842,4604.096,4612.238,4611.976,4614.393,4617.141],\"reaper_tick_ms\":5000}",
+        "remote_wait_test.go:145: real shared wait: 20 independent PIDs with distinct timeout/deadline and tail1/2; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies preserve each tail and share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=11.297026ms; detached PID=1802041 preserved after restart"
+      ],
+      "name": "regression-normal"
+    },
+    {
+      "stage": "regression-race",
+      "started_at": "2026-09-09T10:39:17.361399+00:00",
+      "wall_seconds": 113.42,
+      "exit_code": 0,
+      "result": "passed",
+      "command": [
+        "/data/tmp/rdev-toolchain/go/bin/go",
+        "test",
+        "-race",
+        "./cmd/rdevd",
+        "-run",
+        "^(TestRemoteBrokerApprovalIsolation|TestRemoteBrokerAuditRoutes|TestRemoteBrokerFrontendBoundary|TestRemoteBrokerJobRecovery|TestRemoteBrokerRetryCancellation|TestRemoteBrokerLeaseLifecycle|TestRemoteBrokerSecrets|TestRemoteSupportAndStateFrontends|TestRemoteBrokerPreparedSync|TestRemoteBrokerSharedWait|TestRemotePhase6FrontendContracts)$",
+        "-count=1",
+        "-timeout=10m",
+        "-v"
+      ],
+      "environment": {
+        "GOCACHE": "/data/tmp/rdev-gocache",
+        "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+        "RDEV_RUN_REMOTE": "1",
+        "RDEV_TEST_REMOTE": "service-deploy",
+        "RDEV_TEST_SSH_CONFIG": "/data/tmp/rdev-validation/ssh/config",
+        "RDEV_TEST_CLI_BINARY": "/data/tmp/rdev-validation/phase7/rdev-race-db9a260",
+        "RDEV_TEST_DAEMON_BINARY": "/data/tmp/rdev-validation/phase7/rdevd-race-db9a260",
+        "GORACE": "log_path=/data/tmp/rdev-validation/phase7/race-reports-db9a260/race halt_on_error=1 atexit_sleep_ms=0"
+      },
+      "instrumentation": {
+        "harness": "race",
+        "daemon": "race",
+        "cli": "race",
+        "agents": "uninstrumented",
+        "exceptions": [
+          "TestRemoteBrokerSecrets internally builds its own uninstrumented CLI"
+        ]
+      },
+      "tests": [
+        {
+          "name": "TestRemoteBrokerApprovalIsolation",
+          "seconds": 1.17
+        },
+        {
+          "name": "TestRemoteBrokerAuditRoutes",
+          "seconds": 0.63
+        },
+        {
+          "name": "TestRemoteBrokerFrontendBoundary",
+          "seconds": 2.48
+        },
+        {
+          "name": "TestRemoteBrokerJobRecovery",
+          "seconds": 2.03
+        },
+        {
+          "name": "TestRemoteBrokerRetryCancellation",
+          "seconds": 4.7
+        },
+        {
+          "name": "TestRemoteBrokerLeaseLifecycle",
+          "seconds": 65.7
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts",
+          "seconds": 22.26
+        },
+        {
+          "name": "TestRemoteBrokerSecrets",
+          "seconds": 3.22
+        },
+        {
+          "name": "TestRemoteSupportAndStateFrontends",
+          "seconds": 1.51
+        },
+        {
+          "name": "TestRemoteBrokerPreparedSync",
+          "seconds": 6.8
+        },
+        {
+          "name": "TestRemoteBrokerSharedWait",
+          "seconds": 2.31
+        }
+      ],
+      "subtests": [
+        {
+          "name": "TestRemotePhase6FrontendContracts/standalone-cli",
+          "seconds": 5.54
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts/broker-cli",
+          "seconds": 5.31
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts/standalone-mcp",
+          "seconds": 5.31
+        },
+        {
+          "name": "TestRemotePhase6FrontendContracts/broker-mcp",
+          "seconds": 5.27
+        }
+      ],
+      "skipped": [],
+      "log": "/data/tmp/rdev-validation/phase7/regression-race-db9a260.log",
+      "log_sha256": "d538cb37e5dc048275d8ec19be35cd240d16c31a26ea5e1fd61de6d08cd13679",
+      "measurements": [
+        "remote_lifecycle_test.go:315: real SSH retry/cancellation: old_agent=1802568 replacement_agent=1802592 waiter_cancel_ms=10.659 retry_cancel_ms=11.669 foreground_cancel_ms=37.049 mutation_executions=1 survivor_exec=passed shared_transport_preserved=true",
+        "remote_lifecycle_test.go:412: real SSH lease lifecycle: {\"active_agent_preserved\":true,\"cycles\":6,\"elapsed_ms\":65357.674,\"final_daemon_ssh\":0,\"frontend_normal_close\":3,\"frontend_sigkill\":3,\"idle_ttl_ms\":250,\"new_owner_requests\":60,\"reap_ms\":[4722.467,4522.237,4547.374,4522.839,4531.744,4512.214],\"reaper_tick_ms\":5000}",
+        "remote_wait_test.go:145: real shared wait: 20 independent PIDs with distinct timeout/deadline and tail1/2; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies preserve each tail and share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=13.967026ms; detached PID=1804614 preserved after restart"
+      ],
+      "name": "regression-race"
+    },
+    {
+      "started_at": "2026-09-09T10:41:23.603981+00:00",
+      "wall_seconds": 10.258,
+      "command": [
+        "sh",
+        "scripts/remote-rdevd-smoke.sh"
+      ],
+      "environment": {
+        "RDEV_REMOTE_RUNTIME": "1",
+        "RDEV_REMOTE_SERVICE": "1",
+        "RDEV_REMOTE_SSH": "service-deploy",
+        "RDEV_SSH_CONFIG": "/data/tmp/rdev-validation/ssh/config",
+        "RDEV_GO": "/data/tmp/rdev-toolchain/go/bin/go",
+        "GOCACHE": "/data/tmp/rdev-gocache",
+        "GOMODCACHE": "/data/tmp/rdev-gomodcache"
+      },
+      "instrumentation": "normal Linux/amd64 daemon with CGO disabled and remote Linux runtime harness; real isolated systemd service; cleanup owned by existing script",
+      "exit_code": 0,
+      "result": "passed",
+      "tests": [
+        {
+          "name": "TestDaemonRuntimeLifecycle",
+          "seconds": 1.72
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/principal_provision_expire_rotate",
+          "seconds": 1.34
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/single_instance_crash_signal",
+          "seconds": 0.07
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/audit_owner_query_restart",
+          "seconds": 0.06
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed",
+          "seconds": 0.24
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/public_key",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/null_config",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/null_policy",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_policy",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/public_policy",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs",
+          "seconds": 0.01
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/bad_events",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/null_events",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/public_events",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/bad_secrets",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/null_secrets",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/public_secrets",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_secrets",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_secrets",
+          "seconds": 0.02
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/bad_continuity",
+          "seconds": 0.01
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/null_continuity",
+          "seconds": 0.0
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/public_continuity",
+          "seconds": 0.01
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/bad_hosts",
+          "seconds": 0.01
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/public_hosts",
+          "seconds": 0.01
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_host_field",
+          "seconds": 0.01
+        },
+        {
+          "name": "TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_hosts",
+          "seconds": 0.01
+        }
+      ],
+      "skipped": [],
+      "artifact_sha256": [
+        "5e44242283fd70847769cb3d1e2b5d9ad543068a2ebe88d683460e1bf0c0d977"
+      ],
+      "log": "/data/tmp/rdev-validation/phase7/linux-lifecycle-db9a260.log",
+      "log_sha256": "ccb9d6c3b659850da1b894cf9b839ef16e042d30e0206c85f6a00f693a313924",
+      "name": "linux-lifecycle"
+    },
+    {
+      "stage": "mixed-normal",
+      "started_at": "2026-09-09T10:42:16.442708+00:00",
+      "wall_seconds": 31.349,
+      "exit_code": 0,
+      "result": "passed",
+      "command": [
+        "/data/tmp/rdev-toolchain/go/bin/go",
+        "test",
+        "./cmd/rdevd",
+        "-run",
+        "^(TestRemoteBrokerMixedWorkload)$",
+        "-count=1",
+        "-timeout=3m",
+        "-v"
+      ],
+      "environment": {
+        "GOCACHE": "/data/tmp/rdev-gocache",
+        "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+        "RDEV_RUN_REMOTE": "1",
+        "RDEV_TEST_REMOTE": "service-deploy",
+        "RDEV_TEST_SSH_CONFIG": "/data/tmp/rdev-validation/ssh/config",
+        "RDEV_TEST_CLI_BINARY": "/data/workspace/rdev/bin/rdev",
+        "RDEV_TEST_DAEMON_BINARY": "/data/workspace/rdev/bin/rdevd"
+      },
+      "instrumentation": {
+        "harness": "normal",
+        "daemon": "normal",
+        "cli": "normal",
+        "agents": "uninstrumented",
+        "exceptions": []
+      },
+      "tests": [
+        {
+          "name": "TestRemoteBrokerMixedWorkload",
+          "seconds": 30.93
+        }
+      ],
+      "subtests": [],
+      "skipped": [],
+      "log": "/data/tmp/rdev-validation/phase7/mixed-normal-db9a260.log",
+      "log_sha256": "6c3ebe1d06cc7ad6d7f9e05662dd6dff643dc27117ea40893716430f606a5ed4",
+      "measurements": {
+        "bulk_bytes_per_second": 2097152,
+        "cli_mcp_exact_sync_traffic": true,
+        "control.ping": {
+          "baseline_p95_ms": 1.354186,
+          "bulk_p95_ms": 1.401635,
+          "ratio": 1.0350387612927618,
+          "samples": 567
+        },
+        "control.status": {
+          "baseline_p95_ms": 0.246441,
+          "bulk_p95_ms": 0.239087,
+          "ratio": 0.9701591861743785,
+          "samples": 567
+        },
+        "exec-0_cancellation_completions": 7,
+        "exec-0_loaded_completions": 12,
+        "exec-1_cancellation_completions": 7,
+        "exec-1_loaded_completions": 12,
+        "idle_bulk_reclaimed": true,
+        "job-control.job_status": {
+          "baseline_p95_ms": 1.456347,
+          "bulk_p95_ms": 1.536508,
+          "ratio": 1.0550425139063697,
+          "samples": 371
+        },
+        "job-control.ping": {
+          "baseline_p95_ms": 1.389442,
+          "bulk_p95_ms": 1.408687,
+          "ratio": 1.0138508840239462,
+          "samples": 370
+        },
+        "job-control.status": {
+          "baseline_p95_ms": 0.224892,
+          "bulk_p95_ms": 0.24574,
+          "ratio": 1.092702274869715,
+          "samples": 371
+        },
+        "loaded_seconds": 12.581983494,
+        "measurement_processes": 7,
+        "mixed_sync_sigkill_isolated": true,
+        "peak_owner_active": 2,
+        "peak_owner_queued": 1,
+        "peak_sync_reservation_bytes": 25165824,
+        "same_base_agent": true,
+        "source_bytes_each": 12582912,
+        "sync-a_payload_bytes": 13238272,
+        "sync-b_payload_bytes": 25165824,
+        "wait_cancellation_completions": 7,
+        "wait_loaded_completions": 12
+      },
+      "name": "mixed-normal",
+      "strict_slo": {
+        "control_p95_ratio_max": 2,
+        "parallel_heavy_work": false,
+        "thresholds_changed": false
+      }
+    },
+    {
+      "stage": "mixed-race",
+      "started_at": "2026-09-09T10:42:52.618113+00:00",
+      "wall_seconds": 31.62,
+      "exit_code": 0,
+      "result": "passed",
+      "command": [
+        "/data/tmp/rdev-toolchain/go/bin/go",
+        "test",
+        "-race",
+        "./cmd/rdevd",
+        "-run",
+        "^(TestRemoteBrokerMixedWorkload)$",
+        "-count=1",
+        "-timeout=3m",
+        "-v"
+      ],
+      "environment": {
+        "GOCACHE": "/data/tmp/rdev-gocache",
+        "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+        "RDEV_RUN_REMOTE": "1",
+        "RDEV_TEST_REMOTE": "service-deploy",
+        "RDEV_TEST_SSH_CONFIG": "/data/tmp/rdev-validation/ssh/config",
+        "RDEV_TEST_CLI_BINARY": "/data/tmp/rdev-validation/phase7/rdev-race-db9a260",
+        "RDEV_TEST_DAEMON_BINARY": "/data/tmp/rdev-validation/phase7/rdevd-race-db9a260",
+        "GORACE": "log_path=/data/tmp/rdev-validation/phase7/race-reports-db9a260/race halt_on_error=1 atexit_sleep_ms=0"
+      },
+      "instrumentation": {
+        "harness": "race",
+        "daemon": "race",
+        "cli": "race",
+        "agents": "uninstrumented",
+        "exceptions": []
+      },
+      "tests": [
+        {
+          "name": "TestRemoteBrokerMixedWorkload",
+          "seconds": 31.01
+        }
+      ],
+      "subtests": [],
+      "skipped": [],
+      "log": "/data/tmp/rdev-validation/phase7/mixed-race-db9a260.log",
+      "log_sha256": "b0fdb13331d33592f813ffbfdd716367a3651254dcbb4677c381b97ccaef7910",
+      "measurements": {
+        "bulk_bytes_per_second": 2097152,
+        "cli_mcp_exact_sync_traffic": true,
+        "control.ping": {
+          "baseline_p95_ms": 2.49915,
+          "bulk_p95_ms": 2.751363,
+          "ratio": 1.1009195126342957,
+          "samples": 500
+        },
+        "control.status": {
+          "baseline_p95_ms": 0.893583,
+          "bulk_p95_ms": 1.015391,
+          "ratio": 1.1363141420550749,
+          "samples": 500
+        },
+        "exec-0_cancellation_completions": 7,
+        "exec-0_loaded_completions": 12,
+        "exec-1_cancellation_completions": 7,
+        "exec-1_loaded_completions": 12,
+        "idle_bulk_reclaimed": true,
+        "job-control.job_status": {
+          "baseline_p95_ms": 3.207798,
+          "bulk_p95_ms": 3.479546,
+          "ratio": 1.084714810595929,
+          "samples": 321
+        },
+        "job-control.ping": {
+          "baseline_p95_ms": 2.526341,
+          "bulk_p95_ms": 2.666803,
+          "ratio": 1.0555989868351106,
+          "samples": 321
+        },
+        "job-control.status": {
+          "baseline_p95_ms": 0.952274,
+          "bulk_p95_ms": 1.069112,
+          "ratio": 1.1226936785000956,
+          "samples": 321
+        },
+        "loaded_seconds": 12.561628397,
+        "measurement_processes": 7,
+        "mixed_sync_sigkill_isolated": true,
+        "peak_owner_active": 2,
+        "peak_owner_queued": 1,
+        "peak_sync_reservation_bytes": 25165824,
+        "same_base_agent": true,
+        "source_bytes_each": 12582912,
+        "sync-a_payload_bytes": 13762560,
+        "sync-b_payload_bytes": 25165824,
+        "wait_cancellation_completions": 7,
+        "wait_loaded_completions": 13
+      },
+      "name": "mixed-race",
+      "strict_slo": {
+        "control_p95_ratio_max": 2,
+        "parallel_heavy_work": false,
+        "thresholds_changed": false
+      }
+    }
+  ],
+  "race_reports": {
+    "directory": "/data/tmp/rdev-validation/phase7/race-reports-db9a260",
+    "reports": 0,
+    "scope": "Actual local daemon, CLI and test harness where declared; remote agent remains uninstrumented; Secrets regression builds its own normal CLI."
+  },
+  "release": {
+    "source": "db9a26038c2a9cf96ff63f5bca44274167a9b36b",
+    "result": "passed",
+    "output_directory": "/data/tmp/rdev-validation/phase7/release-db9a260",
+    "checks": [
+      {
+        "name": "release-gate",
+        "command": [
+          "make",
+          "GO=/data/tmp/rdev-toolchain/go/bin/go",
+          "release-gate"
+        ],
+        "environment": {
+          "GOCACHE": "/data/tmp/rdev-gocache",
+          "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+          "RDEV_RELEASE_OUT": "/data/tmp/rdev-validation/phase7/release-db9a260"
+        },
+        "started_at": "2026-09-09T10:43:53.203739+00:00",
+        "wall_seconds": 11.575,
+        "exit_code": 0,
+        "result": "passed",
+        "log": "/data/tmp/rdev-validation/phase7/release-gate-db9a260.log",
+        "log_sha256": "0082fbac17742cc5bd1bbfd57666334e15b90ba36037f4caf1894c8cc28fa5aa"
+      },
+      {
+        "name": "verify-release",
+        "command": [
+          "make",
+          "GO=/data/tmp/rdev-toolchain/go/bin/go",
+          "verify-release"
+        ],
+        "environment": {
+          "GOCACHE": "/data/tmp/rdev-gocache",
+          "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+          "RDEV_RELEASE_OUT": "/data/tmp/rdev-validation/phase7/release-db9a260"
+        },
+        "started_at": "2026-09-09T10:44:04.779429+00:00",
+        "wall_seconds": 0.293,
+        "exit_code": 0,
+        "result": "passed",
+        "log": "/data/tmp/rdev-validation/phase7/verify-release-db9a260.log",
+        "log_sha256": "85f732eeb66da22f264f76e24048d74291381baee09473c7d27395f6059596e2"
+      },
+      {
+        "name": "verify-release-tampered-provenance",
+        "command": [
+          "/data/tmp/rdev-toolchain/go/bin/go",
+          "run",
+          "./scripts/releasecheck",
+          "verify",
+          "/data/tmp/rdev-validation/phase7/phase7-release-negative-4ggd1g3x"
+        ],
+        "environment": {
+          "GOCACHE": "/data/tmp/rdev-gocache",
+          "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+          "RDEV_RELEASE_OUT": "/data/tmp/rdev-validation/phase7/release-db9a260"
+        },
+        "started_at": "2026-09-09T10:44:05.123049+00:00",
+        "wall_seconds": 0.111,
+        "exit_code": 1,
+        "result": "passed",
+        "log": "/data/tmp/rdev-validation/phase7/verify-release-tampered-provenance-db9a260.log",
+        "log_sha256": "190bbeb5e3dd42f4ac08b52c84cd2ed6755c4c3397eda7780f9a6c091697271e"
+      },
+      {
+        "name": "verify-release-original-final",
+        "command": [
+          "make",
+          "GO=/data/tmp/rdev-toolchain/go/bin/go",
+          "verify-release"
+        ],
+        "environment": {
+          "GOCACHE": "/data/tmp/rdev-gocache",
+          "GOMODCACHE": "/data/tmp/rdev-gomodcache",
+          "RDEV_RELEASE_OUT": "/data/tmp/rdev-validation/phase7/release-db9a260"
+        },
+        "started_at": "2026-09-09T10:44:05.247261+00:00",
+        "wall_seconds": 0.131,
+        "exit_code": 0,
+        "result": "passed",
+        "log": "/data/tmp/rdev-validation/phase7/verify-release-original-final-db9a260.log",
+        "log_sha256": "85f732eeb66da22f264f76e24048d74291381baee09473c7d27395f6059596e2"
+      }
+    ],
+    "manifest_source": {
+      "commit": "db9a26038c2a9cf96ff63f5bca44274167a9b36b",
+      "tree_sha256": "3c09cda85e8db789002b8f7a8318fdf1cd87ef8a75a8cc65eabe53e4bc2cd78b",
+      "dirty": false
+    },
+    "artifacts": [
+      {
+        "name": "rdev",
+        "sha256": "020c5066b5dc94aef5800c3362409c8181587a8fbbb074f96e7c877d2fa163bd",
+        "size": 24813237,
+        "goos": "linux",
+        "goarch": "amd64"
+      },
+      {
+        "name": "rdevd",
+        "sha256": "ed7318f46665f8fd8dc1058344bc43d2b3b2109e5fec648c2be413743a90b0ae",
+        "size": 7308933,
+        "goos": "linux",
+        "goarch": "amd64"
+      },
+      {
+        "name": "rdev-agent-linux-amd64",
+        "sha256": "53f0e825192c94326f6eb9549cc43dc735dd33d73be77a2c49c314b17f72626a",
+        "size": 3453090,
+        "goos": "linux",
+        "goarch": "amd64"
+      },
+      {
+        "name": "rdev-agent-linux-arm64",
+        "sha256": "7fb089ae2301d729bcad3791dd26bd2914a0d7622b1347f7d96636cc3ab96d78",
+        "size": 3276962,
+        "goos": "linux",
+        "goarch": "arm64"
+      },
+      {
+        "name": "rdev-agent-darwin-amd64",
+        "sha256": "337ab4bf359d4de1d50174acd71de17e305b3cdb8e1374c76630cff7b0b91e8d",
+        "size": 3445056,
+        "goos": "darwin",
+        "goarch": "amd64"
+      },
+      {
+        "name": "rdev-agent-darwin-arm64",
+        "sha256": "8c1ec3a38cda13d1f63853118b95a8286db5444ec238f1cfe65195672a0c8686",
+        "size": 3211986,
+        "goos": "darwin",
+        "goarch": "arm64"
+      }
+    ],
+    "evidence_sha256": {
+      "govulncheck-binary-rdev-agent-darwin-amd64.json": "7079cd2ac7dbbf87750bd33e0027b890a4a6c1fd2ae35d1c43eaa0f0426d5fcf",
+      "govulncheck-binary-rdev-agent-darwin-arm64.json": "7079cd2ac7dbbf87750bd33e0027b890a4a6c1fd2ae35d1c43eaa0f0426d5fcf",
+      "govulncheck-binary-rdev-agent-linux-amd64.json": "7079cd2ac7dbbf87750bd33e0027b890a4a6c1fd2ae35d1c43eaa0f0426d5fcf",
+      "govulncheck-binary-rdev-agent-linux-arm64.json": "7079cd2ac7dbbf87750bd33e0027b890a4a6c1fd2ae35d1c43eaa0f0426d5fcf",
+      "govulncheck-binary-rdev.json": "591403962b067cad58d31287dae1effc8d7505361094472d5d52a97dfb9294a0",
+      "govulncheck-binary-rdevd.json": "7079cd2ac7dbbf87750bd33e0027b890a4a6c1fd2ae35d1c43eaa0f0426d5fcf",
+      "govulncheck-source-darwin-amd64.json": "c50dc8fc8a433b1bf32c05496b7fdbd7892a44e2c9cf8935e9e6be59246fc660",
+      "govulncheck-source-darwin-arm64.json": "ebd124a58f7e41c4606b4c8d19f5477bb41b09219d1231e53c792a4c9ec6f2b8",
+      "govulncheck-source-linux-amd64.json": "17a2981e5ed5d28c9a36861d90ce15b2039c0f04addaba887b5b27c6ec18628a",
+      "govulncheck-source-linux-arm64.json": "b9ce65c00b9f3de4fa03edbe4ac1650f57e3cc6c17f7f054266a5aa7ba3041fa",
+      "module-verify.txt": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd",
+      "modules.json": "18e389740d94a7b7e9411c770914bf6fd7a52458fb40bfa39f532f0bcd6bed77",
+      "source.json": "4c6199d89574e5290b8ea4c0698d9bbb5458357dcd2b796a7eb970ef03ad5e14",
+      "tools.txt": "bee9d0c01649c022dc5a7640b8a85ed6069f5dd957acbf5ad8872c1488c4e07b"
+    },
+    "metadata_sha256": {
+      "manifest.json": "a338434163aba54dbd207a00ffa674677e3dc85e62c5c16f2e208b9039fdd65b",
+      "sbom.cdx.json": "ccc9431aad6b1cb66c70ca667383e0053f01460d384aa9e23e4dbcc20ab5d602",
+      "provenance.intoto.json": "8108c03b2b17f61afd95171d0907fe9ee05920262f44df505ef6267adaf816cf"
+    },
+    "sbom_schema_validation": {
+      "result": "passed",
+      "validator": "Python jsonschema 4.17.3",
+      "schema_source": "https://github.com/CycloneDX/specification/tree/1.6/schema",
+      "schemas_sha256": {
+        "bom-1.6.schema.json": "3e92dddbc30cf7f6a02b80f0942b1a4cfd4fb1c26f1dfc4310afa9d613cafb93",
+        "spdx.schema.json": "baa9d3bd1ed57b6751b0887edead6b5063ff53ff7429cf85d476c6c94af0166e",
+        "jsf-0.82.schema.json": "8bae002c25e723db7ee1f26afde680ae1a2b1a8f6b4b4b0fd65dc3becb090aae"
+      }
+    },
+    "negative_check": "A copied provenance with a changed subject digest was rejected; original release evidence reverified afterward.",
+    "assurance": "Online local unsigned gate: four platform source scans and six actual binary scans; no publication, deployment, signing or hosted CI claim."
+  },
+  "reused_evidence": {
+    "reference": "docs/evidence/phase6/final-validation.json",
+    "unchanged_source_paths": [
+      "cmd/rdev-agent",
+      "internal/client",
+      "internal/transport",
+      "internal/session",
+      "internal/proto"
+    ],
+    "verification_command": "git diff --exit-code 044f395 db9a260 -- cmd/rdev-agent internal/client internal/transport internal/session internal/proto",
+    "scope": "Prior IPv6 and connection normalization/platform-agent evidence remains valid for unchanged implementation; affected broker/frontend/security/sync/runtime behavior was re-executed above."
+  },
+  "evidence_boundaries": {
+    "logical_scale": "100 separately identified logical hosts actually run in deterministic broker/fault tests.",
+    "real_fleet": "One authorized SSH machine, three isolated agent state and business namespaces; not three physical hosts or a real 100-host fleet.",
+    "linux_runtime": "Real SSH, CLI processes, official MCP SDK, process crashes, counters, retained sync, lifecycle and systemd service.",
+    "cross_build": "Four Linux/macOS amd64/arm64 agent binaries built and audited; build success is not platform runtime validation.",
+    "macos_runtime": "Unverified; explicitly deferred by user; not a Phase7 blocker.",
+    "phase8_deferred": [
+      "Real 100-host/20-client/24-hour soak",
+      "Full physical multi-host production certification",
+      "Formal signing and release publication",
+      "Complete automated N/N-1 upgrade/rollback matrix"
+    ],
+    "not_performed": [
+      "Production deployment",
+      "Business-host fleet mutations",
+      "Hosted release publication"
+    ]
+  },
+  "runtime_cleanup": {
+    "platform": "Linux",
+    "machine": "x86_64",
+    "isolated_systemd_unit": "rdevd-phase5-service-1805206.service",
+    "unit_state": "inactive",
+    "service_links_removed": true,
+    "remote_smoke_namespace_removed": true,
+    "log": "/data/tmp/rdev-validation/phase7/runtime-cleanup-db9a260.log",
+    "log_sha256": "5a3b16e05b76598ff3dfa44e3f21f92e915ac61b3e922a07116613fce5c2699d"
+  },
+  "fixture_corrections": [
+    {
+      "stage": "uncommitted Phase7 development; artifact stamp 042a952-dirty",
+      "classification": "test fixture error / correct product refusal",
+      "cause": "Fixture expected SIGHUP to reload a replaced policy file. Existing daemon SIGHUP reloads QoS/principal keys; new HostID grants were therefore not active.",
+      "correction": "Issue exact HostID grants through the existing separately authorized policy.grant RPC before plan creation.",
+      "failed_log_sha256": "e6e1555688fdaf2ee350ca175a6df45a30fc03eb2f437cf998a623caf47e40bb",
+      "final_revalidation": "fleet-normal and fleet-race on clean db9a260; all five tests passed in both modes"
+    },
+    {
+      "stage": "uncommitted Phase7 development; artifact stamp 042a952-dirty",
+      "classification": "test fixture error / correct product refusal",
+      "cause": "Fixture requested retained sync preparation with Prepare=true but omitted the established DryRun=true requirement.",
+      "correction": "Submit Prepare=true and DryRun=true before reviewing and approving the retained sync plan.",
+      "failed_log_sha256": "3a1832f7906205cfb8701b88edfc513d406d4450cc0d3bfc8a87a5a5e8035ced",
+      "final_revalidation": "fleet-normal and fleet-race on clean db9a260; all five tests passed in both modes"
+    },
+    {
+      "stage": "uncommitted Phase7 development; artifact stamp 042a952-dirty",
+      "classification": "test fixture error / correct product refusal",
+      "cause": "Fixture put retained sync and job-wait observation reservations under one owner, exceeding the unchanged 32 MiB owner ingress budget; the product correctly rejected admission.",
+      "correction": "Use separate explicit sync and exec/job principals as in the established mixed-workload harness, preserving the 32 MiB limit and every side-effect/SLO assertion.",
+      "failed_log_sha256": "581ffb830b1aba8fb6e76123d98390102333ff77592c98078c2b81fc95ee08da",
+      "final_revalidation": "fleet-normal and fleet-race on clean db9a260; all five tests passed in both modes"
+    }
+  ]
+}
