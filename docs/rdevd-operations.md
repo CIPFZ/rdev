@@ -309,6 +309,9 @@ strategy parameters fail. `all_at_once` rejects canary/wave/pause settings.
 Parallelism counts whole HostRuns until job completion and remains subject to
 broker global/owner/host/lane limits. Detached Fleet reservations use at most
 half of each non-control QoS envelope (default global 5, owner 1, host 4);
+The global lifetime limit is also capped by the exec lane limit (8); each owner
+can hold at most global-minus-one slots when global capacity exceeds one.
+Owner/plan round-robin admission prevents a large plan monopolizing released slots.
 `max_parallel` is an upper bound and does not override that reservation.
 Canary must completely succeed before any
 later wave; ambiguous, unreachable and failed canaries never pass. Pause stops
@@ -323,7 +326,10 @@ dispatch. Failed, unreachable and ambiguous count as failures; the ratio's
 denominator is terminal attempted success/failed/unreachable/ambiguous only.
 Skipped and canceled are excluded. `on_threshold` is `pause` (default) or
 `cancel_remaining`; submitted jobs retain their evidence and keep running.
-Batch cancel cancels pending targets, not detached jobs. A separate job stop
+Batch cancel cancels pending targets and queued/submitting starts that have not
+committed. Proven unsent cancellation is canceled; unconfirmed submission is
+ambiguous. Submitted detached jobs continue. Every ambiguous result retains its
+lifetime reservation and pauses new dispatch until reconciliation. A separate job stop
 uses normal job permissions and approval; canceled observers never cancel plans.
 
 Plans and HostRuns persist intent before dispatch. A HostRun's attempt number

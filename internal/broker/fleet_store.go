@@ -251,6 +251,12 @@ func validateFleetPlan(p FleetPlan) error {
 		if r.RetryPlanID != "" && !validFleetID(r.RetryPlanID) {
 			return errors.New("invalid retry reference")
 		}
+		if (r.PolicyDigest == "") != (r.ApprovalRef == "") {
+			return errors.New("fleet run policy and approval must be paired")
+		}
+		if r.State == "dispatching" && (!validDigest(r.PolicyDigest) || !validDigest(r.ApprovalRef)) {
+			return errors.New("fleet dispatch approval missing")
+		}
 		if r.ApprovalRef != "" && !validDigest(r.ApprovalRef) {
 			return errors.New("invalid fleet run approval")
 		}
@@ -357,7 +363,7 @@ func validateFleetLinks(plans map[string]FleetPlan) error {
 	for _, p := range plans {
 		if p.ParentPlanID != "" {
 			parent, ok := plans[p.ParentPlanID]
-			if !ok || parent.Owner != p.Owner || parent.PlanID == p.PlanID {
+			if !ok || parent.Owner != p.Owner || parent.PlanID == p.PlanID || parent.Spec.Operation != p.Spec.Operation || fleetHash(parent.Spec.Job) != fleetHash(p.Spec.Job) {
 				return errors.New("invalid fleet parent reference")
 			}
 			parents := map[string]HostRun{}
