@@ -1071,7 +1071,7 @@ Phase 3 完成记录：
 - [ ] 连接状态、client 配额、queue wait、lane 流量和 eviction reason 可通过 `status/doctor` 观察。
 - [ ] 未授权 client 无法使用 host、secret、job 或 Fleet capability。 2026-09-09 `4bfdf06` 补齐保留 Fleet operation 的真实拒绝矩阵（跨项目、capability/wire/approval 替换、SIGKILL 前后）；完整权限 Gate 和独立 review 仍未完成。
 - [ ] destructive approval 绑定精确目标 snapshot 和 operation digest。
-- [ ] broker reload、升级和异常退出不影响已脱离 SSH 的后台 job。
+- [ ] broker reload、升级和异常退出不影响已脱离 SSH 的后台 job。 2026-09-09 `4ded2a4` 验证两版旧 daemon/agent 经 TERM 或 SIGKILL 后升级的 12 个真实场景，保留原 supervisor PID/二进制摘要、owner 与日志，并修复旧 supervisor TERM 日志丢失；更广 schema/rollback 和独立 review 仍未完成。
 
 2026-09-08 后续证据：`e3ac9c2` 验证已确认后台 job 在 daemon SIGKILL、
 SSH 不可用启动、reload 和远端删除/本地持久化失败后保留 owner；`bd03436`

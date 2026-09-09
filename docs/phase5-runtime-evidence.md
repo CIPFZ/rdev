@@ -1740,3 +1740,29 @@ race agent SHA-256:
 `2d6950b9864247a28e4487a29f33a394ad102c7b9332fe49e83749f45d3c5e93`.
 The earlier failing runs are diagnostic records and are not counted as passing
 acceptance evidence. Committed-source verification follows.
+
+
+## Committed job upgrade validation (`4ded2a4`)
+
+[Committed full check and remote log](evidence/phase5/2026-09-09/committed-job-upgrade-4ded2a4.log)
+records passing `make check remote-job-upgrade remote-jobs remote-wait
+remote-mutation remote-events remote-fleet-boundary stress-broker smoke-rdevd
+remote-phase5-runtime` on the fixed clean implementation commit.
+The final upgrade matrix passed 12 actual daemon/agent replacements, covering
+both predecessor pairs and both clean/crash upgrade boundaries three times.
+The job, wait, mutation, event and Fleet scenarios each passed three repetitions;
+stress completed 100 twenty-client runs. Held-response mutation shutdown remained
+bounded, and repeated pre-ACK crash/replay negatives preserved once-only effects.
+
+Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start passed,
+PID `1457022 -> 1457091`. Remote daemon SHA-256:
+`aa476d2c182fc6709fda1fbd405600d6e49eca386527438cdd94e1e4bf4cd454`. Current embedded Linux amd64 agent SHA-256:
+`4ec573c03af9175b378b13fdc756b8517ec466e23b4b6769a02c59929e2e2c80`. The upgrade harness verified this new agent executable
+alongside the predecessor executable still mapped by each original supervisor.
+The preceding all-package and actual daemon/agent race logs cover the same
+production fix. Test helper refinements added exact approved cross-owner
+negatives and optional race-agent artifact selection before this committed run.
+
+No Phase5-wide Complete claim follows: shared sync/session, declarative secret
+delegation, mixed workloads, identity/archive retirement, broader storage/schema/
+rollback cases, macOS runtime and independent review remain unfinished.
