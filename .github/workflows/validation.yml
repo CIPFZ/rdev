@@ -48,7 +48,11 @@ jobs:
       - name: Real historical-agent install and rollback windows
         run: |
           previous=e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e
-          git worktree add --detach "$RUNNER_TEMP/rdev-predecessor" "$previous"
+          # This pinned Go toolchain omits native VCS buildinfo in the linked
+          # worktree layout. A separate clean clone preserves the identity that
+          # the real binary tests require; do not relax that verification.
+          git clone --quiet --no-hardlinks --no-local "$PWD" "$RUNNER_TEMP/rdev-predecessor"
+          git -C "$RUNNER_TEMP/rdev-predecessor" checkout --quiet --detach "$previous"
           make -C "$RUNNER_TEMP/rdev-predecessor" GO="$(command -v go)" agents PLATFORMS=linux-amd64
           echo '::notice title=Installer preflight::historical native agent build completed'
           go test -c -o "$RUNNER_TEMP/real-agent-install.test" ./internal/agentinstall
