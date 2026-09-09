@@ -1,0 +1,42 @@
+=== RUN   TestJobStopKillsOrphanedChild
+--- PASS: TestJobStopKillsOrphanedChild (0.00s)
+=== RUN   TestJobStopRefusesIdentityMismatch
+--- PASS: TestJobStopRefusesIdentityMismatch (0.00s)
+=== RUN   TestJobStopTermPreservesLegacySupervisorFlush
+--- PASS: TestJobStopTermPreservesLegacySupervisorFlush (0.11s)
+=== RUN   TestJobStopTermRetainsSupervisorOutputAndChildIdentity
+--- PASS: TestJobStopTermRetainsSupervisorOutputAndChildIdentity (0.12s)
+=== RUN   TestJobStopKillsOrphanedChild
+--- PASS: TestJobStopKillsOrphanedChild (0.00s)
+=== RUN   TestJobStopRefusesIdentityMismatch
+--- PASS: TestJobStopRefusesIdentityMismatch (0.01s)
+=== RUN   TestJobStopTermPreservesLegacySupervisorFlush
+--- PASS: TestJobStopTermPreservesLegacySupervisorFlush (0.11s)
+=== RUN   TestJobStopTermRetainsSupervisorOutputAndChildIdentity
+--- PASS: TestJobStopTermRetainsSupervisorOutputAndChildIdentity (0.11s)
+=== RUN   TestJobStopKillsOrphanedChild
+--- PASS: TestJobStopKillsOrphanedChild (0.00s)
+=== RUN   TestJobStopRefusesIdentityMismatch
+--- PASS: TestJobStopRefusesIdentityMismatch (0.00s)
+=== RUN   TestJobStopTermPreservesLegacySupervisorFlush
+--- PASS: TestJobStopTermPreservesLegacySupervisorFlush (0.11s)
+=== RUN   TestJobStopTermRetainsSupervisorOutputAndChildIdentity
+--- PASS: TestJobStopTermRetainsSupervisorOutputAndChildIdentity (0.11s)
+=== RUN   TestJobStopKillsOrphanedChild
+--- PASS: TestJobStopKillsOrphanedChild (0.00s)
+=== RUN   TestJobStopRefusesIdentityMismatch
+--- PASS: TestJobStopRefusesIdentityMismatch (0.00s)
+=== RUN   TestJobStopTermPreservesLegacySupervisorFlush
+--- PASS: TestJobStopTermPreservesLegacySupervisorFlush (0.11s)
+=== RUN   TestJobStopTermRetainsSupervisorOutputAndChildIdentity
+--- PASS: TestJobStopTermRetainsSupervisorOutputAndChildIdentity (0.11s)
+=== RUN   TestJobStopKillsOrphanedChild
+--- PASS: TestJobStopKillsOrphanedChild (0.00s)
+=== RUN   TestJobStopRefusesIdentityMismatch
+--- PASS: TestJobStopRefusesIdentityMismatch (0.00s)
+=== RUN   TestJobStopTermPreservesLegacySupervisorFlush
+--- PASS: TestJobStopTermPreservesLegacySupervisorFlush (0.11s)
+=== RUN   TestJobStopTermRetainsSupervisorOutputAndChildIdentity
+--- PASS: TestJobStopTermRetainsSupervisorOutputAndChildIdentity (0.11s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	1.135s

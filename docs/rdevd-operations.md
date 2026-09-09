@@ -329,6 +329,21 @@ separate executor principals and their real shared-transport assertions.
 
 ## Detached job ownership recovery
 
+`make remote-job-upgrade RDEV_SSH_CONFIG=/path/to/ssh/config` validates real
+forward upgrades from daemon/agent pairs `e3ac9c2` and `c5707ee`. Set
+`RDEV_JOB_PREDECESSOR_COMMITS` to a space-separated commit list to test additional
+predecessors. The command builds historical artifacts in a temporary directory,
+creates two owner-scoped remote jobs, and verifies supervisor executable hashes,
+management, wait/shutdown/reconnect, output and durable removal after replacing
+both binaries. Existing jobs keep running their original supervisor executable;
+upgrading the base agent does not replace those processes. TERM to a pre-relay
+supervisor's job now stops its child group and lets the supervisor flush output.
+A configured grace deadline still escalates unresponsive jobs to KILL.
+
+These checks cover acknowledged jobs and the named predecessor schemas; they do
+not make untested downgrades or arbitrary state schemas supported. Keep the local
+ownership/mutation files and remote job records through an upgrade.
+
 The private `.jobs` snapshot beside the socket has schema 1, a 4 MiB bound and
 a maximum of 8192 records. Valid historical arrays migrate on startup. Malformed,
 future-version, duplicate or non-private snapshots cause startup to fail while

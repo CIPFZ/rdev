@@ -1,0 +1,63 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' bash scripts/remote-job-upgrade.sh '/data/tmp/rdev-toolchain/go/bin/go'
+job predecessor commit: e3ac9c283258bc8370421125a3a29532b9986676
+4146a4773c5d433d126f63d5fa594ac5fe47bf9057be3a28d3510b01127cd96e  /data/tmp/rdev-job-predecessor.SuAvmS/e3ac9c283258bc8370421125a3a29532b9986676/rdevd
+2158fddb9229eeeb0059248a512f1615371c3866b0586de2f97b5910c3414d73  /data/tmp/rdev-job-predecessor.SuAvmS/e3ac9c283258bc8370421125a3a29532b9986676/agents/rdev-agent-linux-amd64
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1434297/1434305 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1434512/1434519 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.30s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.66s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.64s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1434727/1434745 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1434940/1434947 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.27s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.64s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.63s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1435164/1435171 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1435384/1435391 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.31s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.67s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.64s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	15.880s
+job predecessor commit: c5707ee0a830653f1e768aafd377f4ddcb7574b7
+e29492fd9b01cf7a2794817f6b288ee11d49536a0ed93da3a7ba550fd9ec0683  /data/tmp/rdev-job-predecessor.SuAvmS/c5707ee0a830653f1e768aafd377f4ddcb7574b7/rdevd
+1a546f8b29a4fdba1c7d368f1191c1e237f5e7f6f21f3870d7cd5fdd6abc3cb9  /data/tmp/rdev-job-predecessor.SuAvmS/c5707ee0a830653f1e768aafd377f4ddcb7574b7/agents/rdev-agent-linux-amd64
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1435624/1435634 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1435830/1435840 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.40s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.70s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.71s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1436050/1436060 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1436255/1436265 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.47s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.75s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.72s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1436539/1436549 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1436787/1436797 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.37s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.71s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.66s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	16.245s

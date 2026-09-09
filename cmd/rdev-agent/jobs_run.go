@@ -321,33 +321,44 @@ func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
 		}
 	}
 
-	// Modern supervisors relay TERM and then flush logs and terminal status.
-	// KILL and legacy supervisors still require signaling both isolated groups.
-	groupErr := syscall.Kill(-meta.PID, sig)
-	childGroupErr := error(nil)
-	if childPID > 0 && (sig == syscall.SIGKILL || !meta.SignalRelay || groupErr != nil) {
-		childGroupErr = syscall.Kill(-childPID, sig)
-	}
-	if groupErr != nil {
-		// The group is gone. Try the bare supervisor pid, then the recorded
-		// child: a SIGKILLed supervisor leaves the child orphaned to init but
-		// still running, and that child is exactly what a caller wants to stop.
-		pidErr := syscall.Kill(meta.PID, sig)
-		if pidErr != nil {
-			// A successful child-group signal is sufficient even when the
-			// supervisor has already exited; probing the leader again would turn
-			// that successful stop into a spurious "unavailable" error.
-			if childGroupErr != nil && (childPID <= 0 || syscall.Kill(childPID, sig) != nil) {
-				return nil, processStateError("job process is unavailable")
-			}
-			// Also sweep the orphan's own group, in case it spawned children.
-			if childPID > 0 {
-				syscall.Kill(-childPID, sig)
+	// A legacy supervisor has no TERM handler and buffers logs until its child
+	// exits. Terminate that child's isolated group and leave the supervisor
+	// alive to drain output and persist status. Killing both groups here loses
+	// all buffered output from jobs started before signal relay was introduced.
+	// The grace deadline below still bounds a child that refuses TERM.
+	if sig == syscall.SIGTERM && !meta.SignalRelay && childPID > 0 {
+		if err := syscall.Kill(-childPID, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return nil, processStateError("job child process is unavailable")
+		}
+	} else {
+		// Modern supervisors relay TERM and flush terminal state. KILL must
+		// still address both groups, including an orphaned child.
+		groupErr := syscall.Kill(-meta.PID, sig)
+		childGroupErr := error(nil)
+		if childPID > 0 && (sig == syscall.SIGKILL || !meta.SignalRelay || groupErr != nil) {
+			childGroupErr = syscall.Kill(-childPID, sig)
+		}
+		if groupErr != nil {
+			// The group is gone. Try the bare supervisor pid, then the recorded
+			// child: a SIGKILLed supervisor leaves the child orphaned to init but
+			// still running, and that child is exactly what a caller wants to stop.
+			pidErr := syscall.Kill(meta.PID, sig)
+			if pidErr != nil {
+				// A successful child-group signal is sufficient even when the
+				// supervisor has already exited; probing the leader again would turn
+				// that successful stop into a spurious "unavailable" error.
+				if childGroupErr != nil && (childPID <= 0 || syscall.Kill(childPID, sig) != nil) {
+					return nil, processStateError("job process is unavailable")
+				}
+				// Also sweep the orphan's own group, in case it spawned children.
+				if childPID > 0 {
+					syscall.Kill(-childPID, sig)
+				}
 			}
 		}
-	}
-	if groupErr != nil && childGroupErr != nil && childPID <= 0 {
-		return nil, processStateError("job process is unavailable")
+		if groupErr != nil && childGroupErr != nil && childPID <= 0 {
+			return nil, processStateError("job process is unavailable")
+		}
 	}
 
 	if sig == syscall.SIGTERM && p.GraceSec > 0 {

@@ -1,0 +1,6 @@
+=== RUN   TestJobStopTermPreservesLegacySupervisorFlush
+    job_stop_test.go:89: legacy supervisor was killed before flushing: signal: terminated
+--- FAIL: TestJobStopTermPreservesLegacySupervisorFlush (0.11s)
+FAIL
+FAIL	github.com/CIPFZ/rdev/cmd/rdev-agent	0.110s
+FAIL

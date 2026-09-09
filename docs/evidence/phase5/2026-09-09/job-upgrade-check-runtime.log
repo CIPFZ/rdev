@@ -1,0 +1,145 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.005s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.861s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	9.079s
+ok  	github.com/CIPFZ/rdev/internal/broker	3.877s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.002s
+ok  	github.com/CIPFZ/rdev/internal/client	0.476s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.036s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.714s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.003s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.010s
+ok  	github.com/CIPFZ/rdev/internal/session	9.168s
+ok  	github.com/CIPFZ/rdev/internal/state	0.101s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.025s
+ok  	github.com/CIPFZ/rdev/internal/support	0.002s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.299s
+ok       rdev-agent-linux-amd64 ff7b39b07020
+ok       rdev-agent-linux-arm64 a319f27b351f
+ok       rdev-agent-darwin-amd64 23ce61a8de13
+ok       rdev-agent-darwin-arm64 91b9264892f6
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' bash scripts/remote-job-upgrade.sh '/data/tmp/rdev-toolchain/go/bin/go'
+job predecessor commit: e3ac9c283258bc8370421125a3a29532b9986676
+4146a4773c5d433d126f63d5fa594ac5fe47bf9057be3a28d3510b01127cd96e  /data/tmp/rdev-job-predecessor.Lf9TVd/e3ac9c283258bc8370421125a3a29532b9986676/rdevd
+2158fddb9229eeeb0059248a512f1615371c3866b0586de2f97b5910c3414d73  /data/tmp/rdev-job-predecessor.Lf9TVd/e3ac9c283258bc8370421125a3a29532b9986676/agents/rdev-agent-linux-amd64
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1439598/1439605 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1439857/1439865 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.27s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.63s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.64s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1440064/1440073 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1440264/1440271 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.28s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.65s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.63s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1440467/1440474 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1440708/1440716 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.33s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.68s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.66s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	15.893s
+job predecessor commit: c5707ee0a830653f1e768aafd377f4ddcb7574b7
+e29492fd9b01cf7a2794817f6b288ee11d49536a0ed93da3a7ba550fd9ec0683  /data/tmp/rdev-job-predecessor.Lf9TVd/c5707ee0a830653f1e768aafd377f4ddcb7574b7/rdevd
+1a546f8b29a4fdba1c7d368f1191c1e237f5e7f6f21f3870d7cd5fdd6abc3cb9  /data/tmp/rdev-job-predecessor.Lf9TVd/c5707ee0a830653f1e768aafd377f4ddcb7574b7/agents/rdev-agent-linux-amd64
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1440915/1440924 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1441117/1441127 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.38s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.71s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.67s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1441334/1441352 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1441611/1441621 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.42s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.68s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.73s)
+=== RUN   TestRemoteBrokerJobUpgrade
+=== RUN   TestRemoteBrokerJobUpgrade/terminated
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after terminated: original supervisor PIDs 1441814/1441824 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+=== RUN   TestRemoteBrokerJobUpgrade/killed
+    remote_job_upgrade_test.go:193: real broker and agent upgrade after killed: original supervisor PIDs 1442018/1442029 and old executable hashes retained; new base agent executable verified; two-project ownership/list/status/log/wait/stop/rm isolation; reload and observed-wait drain/reconnect; old output preserved; removal durable after SIGKILL; each command executed once
+--- PASS: TestRemoteBrokerJobUpgrade (5.35s)
+    --- PASS: TestRemoteBrokerJobUpgrade/terminated (2.69s)
+    --- PASS: TestRemoteBrokerJobUpgrade/killed (2.66s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	16.152s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerJobRecovery$' -count=3 -timeout=2m -v
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:187: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:188: remote supervisor PIDs retained across recovery: project A=1442272 project B=1442282; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (1.76s)
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:187: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:188: remote supervisor PIDs retained across recovery: project A=1442386 project B=1442397; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (1.81s)
+=== RUN   TestRemoteBrokerJobRecovery
+    remote_jobs_test.go:187: real detached jobs: separate frontend ACK survives SIGKILL; SSH-unavailable startup retains both project owners; same supervisors survive reconnect/SIGHUP; scoped Limit=1 listing precedes remote pagination; granted other project denied status/logs/wait/stop/rm; real deletion rename failure rolls back active ownership; owned Missing cleanup persists across SIGKILL; each job command executed once
+    remote_jobs_test.go:188: remote supervisor PIDs retained across recovery: project A=1442499 project B=1442509; final proof file values=[once once]
+--- PASS: TestRemoteBrokerJobRecovery (1.79s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	5.360s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerSharedWait$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=9.893136ms; detached PID=1442621 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (1.88s)
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=8.2873ms; detached PID=1442774 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (1.89s)
+=== RUN   TestRemoteBrokerSharedWait
+    remote_wait_test.go:140: real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=10.933024ms; detached PID=1442957 preserved after restart
+--- PASS: TestRemoteBrokerSharedWait (1.87s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	5.645s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerMutationCrashRecovery$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1443047; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.014329369s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.19s)
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1443499; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.0154874s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.23s)
+=== RUN   TestRemoteBrokerMutationCrashRecovery
+    remote_mutation_test.go:355: real pre-ACK crash recovery: job command once; pending job ownership retained through SSH-unavailable restart; recovered supervisor=1443764; original owner resolves durable start; other project denied; stable ID substitution/replay denied; new remote agent replay recovers metadata and rejects deleted tombstone; append once after crash; pre-dispatch intent rename failure sends no mutation; no payloads in intent snapshot
+    remote_mutation_test.go:356: real CLI and MCP processes: explicit operation IDs, owner-scoped outcome queries and duplicate append prevention passed; definitive remote rejection reservation cleaned by original owner only
+    remote_mutation_test.go:357: SIGTERM with remote mutation response held: bounded shutdown=7.014756318s; restart preserves ambiguity and refuses duplicate append
+    remote_mutation_test.go:358: 20 independent status clients concurrently resolved the same durable job start without spurious transition failures
+--- PASS: TestRemoteBrokerMutationCrashRecovery (11.28s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	33.710s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerJobEventHistory$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:166: real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (2.70s)
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:166: real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (2.80s)
+=== RUN   TestRemoteBrokerJobEventHistory
+    remote_events_test.go:166: real job history: 20 independent wait clients killed; one zero-subscriber observation retained its ingress charge and persisted exactly one terminal event, then released the charge; SIGKILL restart preserved cursor; removed job history retained for original owner; CLI/MCP cursor replay and other-project denials; real event rename failure retained old snapshot and later status repaired one terminal event; no argv/output in snapshot
+--- PASS: TestRemoteBrokerJobEventHistory (2.80s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	8.305s

@@ -137,7 +137,10 @@ remote-secret-qos: agents
 remote-qos: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerQoS$$' -count=3 -timeout=4m -v
 
-.PHONY: remote-jobs remote-wait remote-replay-digest remote-mutation remote-events remote-fleet-boundary
+.PHONY: remote-jobs remote-wait remote-replay-digest remote-mutation remote-events remote-fleet-boundary remote-job-upgrade
+remote-job-upgrade: agents
+	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' bash scripts/remote-job-upgrade.sh '$(GO)'
+
 remote-fleet-boundary: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerFleetBoundary$$' -count=3 -timeout=2m -v
 

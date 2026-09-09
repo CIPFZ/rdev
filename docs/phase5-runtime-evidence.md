@@ -1676,3 +1676,67 @@ whole unauthorized-use gate. Declarative secret delegation, remaining shared
 routes, mixed workloads, upgrade/storage matrices, macOS runtime and independent
 review remain open. Implementing-agent inspection of policy, route, approval
 and audit ordering is not counted as independent review.
+
+
+## Actual broker/agent upgrades and legacy supervisor output
+
+`make remote-job-upgrade` builds both the daemon and Linux amd64 agent from
+predecessors `e3ac9c2` (durable acknowledged ownership before supervisor signal
+relay) and `c5707ee` (owner-scoped persistent secrets). Each predecessor runs
+three repetitions with both SIGTERM and SIGKILL upgrade boundaries. Two projects
+sharing one client ID start different jobs before upgrading. The harness checks
+`/proc/PID/exe` SHA-256: the base agent changes to the current executable while
+both original supervisor PIDs still execute the exact predecessor binary.
+
+The initial oldest-predecessor run failed all six terminal-output assertions.
+Current `job_stop TERM` signaled the old supervisor group before its child. Those
+supervisors have no TERM handler and keep their output in bounded buffers until
+the child exits, so terminating the supervisor discarded its output. The fix
+signals the recorded isolated child group for legacy TERM, allowing the original
+supervisor to drain and persist. Modern signal relay, PID identity checks, KILL,
+and configured grace/escalation paths remain in place.
+
+A local subprocess test models the historical no-relay/PID-only child record
+and delayed output flush. It fails against the original implementation, loaded
+through a Go source overlay, because the supervisor exits on TERM before flushing;
+the corrected implementation passes five repeated runs alongside modern TERM,
+orphan-stop and stale-identity tests. The real corrected matrix passes both
+predecessors, both signals and three repetitions (12 upgrades / 24 existing jobs).
+
+Each upgrade checks owner-scoped list/status and cross-project status/log/wait/
+stop/rm denial; mutating negatives have valid administrator approvals, so missing
+approval cannot explain the denial. SIGHUP preserves the jobs. A separate frontend
+wait attaches to an upgraded job; SIGTERM finishes within five seconds, the
+frontend exits, and both original jobs survive reconnect. Explicit stop/wait
+retains the predecessor's output, removal survives another SIGKILL, and remote
+proof files contain exactly one command execution per job.
+
+Full check, real job/wait/mutation/event regressions and all-package race passed.
+The full race precedes the final test-only addition of explicit approvals on
+cross-project stop/rm negatives. An additional actual race-daemon and race-agent
+matrix exercises those assertions and the changed remote stop implementation;
+final results and committed-source artifact records follow below.
+
+This proves upgrades of acknowledged jobs from the two named schema-1
+predecessors. It does not establish arbitrary older/newer schema compatibility,
+downgrade safety, power-loss durability or retroactive stable-ID protection for
+old operations that predate mutation intents. Identity retirement, remaining
+shared routes, mixed workloads, macOS and independent review remain open.
+
+
+Supporting upgrade evidence:
+[initial real failure](evidence/phase5/2026-09-09/job-upgrade-initial-runtime.log),
+[empty-tail diagnosis](evidence/phase5/2026-09-09/job-upgrade-diagnostic.log),
+[local before-fix reproduction](evidence/phase5/2026-09-09/job-upgrade-before-fix-regression.log),
+[five local stop regressions](evidence/phase5/2026-09-09/job-upgrade-local-stop.log),
+[corrected 12-upgrade matrix](evidence/phase5/2026-09-09/job-upgrade-corrected-runtime.log),
+[full check and remote regressions](evidence/phase5/2026-09-09/job-upgrade-check-runtime.log),
+[full repository race](evidence/phase5/2026-09-09/job-upgrade-full-race.log), and
+[actual daemon/agent race matrix](evidence/phase5/2026-09-09/job-upgrade-actual-daemon-agent-race.log).
+The actual race matrix passed all 12 upgrades, including approved cross-project
+mutation denials. Race daemon SHA-256:
+`65828d40aae339b64e3fb49a2d15a932d57fbdd060c7d1bd457a98d065e49db8`;
+race agent SHA-256:
+`2d6950b9864247a28e4487a29f33a394ad102c7b9332fe49e83749f45d3c5e93`.
+The earlier failing runs are diagnostic records and are not counted as passing
+acceptance evidence. Committed-source verification follows.
