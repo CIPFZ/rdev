@@ -323,7 +323,7 @@ def main():
     parser.add_argument("--preflight-only", action="store_true", help="OpenSSH topology/fault checks only; no rdev runtime claim")
     parser.add_argument("--recover", choices=("status", "cleanup"), help="inspect or explicitly clean a retained failed fixture")
     parser.add_argument("--runtime-timeout", type=float, default=1250, help="whole runtime process-tree deadline in seconds")
-    parser.add_argument("--run", default="TestRemote(BrokerRoutes|BrokerFrontendBoundary|BrokerJobRecovery|BrokerPreparedSync|BrokerRetryCancellation|BrokerMutationCrashRecovery|FleetFrontendsAndRetry)$", help="explicit Go runtime test selection")
+    parser.add_argument("--run", default="TestRemote(BrokerRoutes|BrokerFrontendBoundary|BrokerJobRecovery|BrokerPreparedSync|BrokerRetryCancellation|BrokerMutationCrashRecovery|FleetFrontendsAndRetry|Phase8MasterDisappearance|Phase8DNSFailure)$", help="explicit Go runtime test selection")
     args = parser.parse_args()
     if args.recover:
         recover(args.out.resolve(), args.recover)

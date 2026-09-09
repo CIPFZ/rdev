@@ -23,6 +23,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          fetch-depth: 0 # Exact historical engineering predecessor, not a fabricated version string.
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: '1.26.8'
@@ -44,6 +45,35 @@ jobs:
         run: |
           make GO=go all daemon
           make GO=go check
+      - name: Real historical-agent install and rollback windows
+        run: |
+          previous=e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e
+          git worktree add --detach "$RUNNER_TEMP/rdev-predecessor" "$previous"
+          make -C "$RUNNER_TEMP/rdev-predecessor" GO="$(command -v go)" agents PLATFORMS=linux-amd64
+          go test -c -o "$RUNNER_TEMP/real-agent-install.test" ./internal/agentinstall
+          python3 scripts/real-agent-install.py \
+            --test-binary "$RUNNER_TEMP/real-agent-install.test" \
+            --current "$PWD/cmd/rdev/agents/rdev-agent-linux-amd64" \
+            --current-commit "$GITHUB_SHA" \
+            --current-sha256 "$(sha256sum cmd/rdev/agents/rdev-agent-linux-amd64 | cut -d ' ' -f 1)" \
+            --previous "$RUNNER_TEMP/rdev-predecessor/cmd/rdev/agents/rdev-agent-linux-amd64" \
+            --previous-commit "$previous" \
+            --previous-sha256 "$(sha256sum "$RUNNER_TEMP/rdev-predecessor/cmd/rdev/agents/rdev-agent-linux-amd64" | cut -d ' ' -f 1)" \
+            --out "$RUNNER_TEMP/rdev-evidence/install"
+      - name: Actual disk-full and read-only installation failures
+        run: |
+          status=0
+          sudo python3 scripts/storage-faults.py \
+            --go "$(command -v go)" \
+            --current "$PWD/cmd/rdev/agents/rdev-agent-linux-amd64" \
+            --current-commit "$GITHUB_SHA" \
+            --previous "$RUNNER_TEMP/rdev-predecessor/cmd/rdev/agents/rdev-agent-linux-amd64" \
+            --previous-commit e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e \
+            --out "$RUNNER_TEMP/rdev-evidence/storage" || status=$?
+          if test -d "$RUNNER_TEMP/rdev-evidence/storage"; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/rdev-evidence/storage"
+          fi
+          exit "$status"
       - name: Real IPv4, IPv6 and ProxyJump runtime
         env:
           RDEV_TEST_SAFE_DIAGNOSTICS: '1'
@@ -130,6 +160,10 @@ jobs:
             ${{ runner.temp }}/rdev-evidence/openssh.txt
             ${{ runner.temp }}/rdev-evidence/run.txt
             ${{ runner.temp }}/rdev-evidence/artifact-identity.json
+            ${{ runner.temp }}/rdev-evidence/install/result.json
+            ${{ runner.temp }}/rdev-evidence/install/test.log
+            ${{ runner.temp }}/rdev-evidence/storage/result.json
+            ${{ runner.temp }}/rdev-evidence/storage/worker.log
             ${{ runner.temp }}/rdev-evidence/ssh/result.json
             ${{ runner.temp }}/rdev-evidence/ssh/release-policy-preflight.log
             ${{ runner.temp }}/rdev-evidence/ssh/recovery.json

@@ -237,7 +237,7 @@ release gate 固定 `govulncheck v1.8.0` 和 `go.mod` 的 Go 工具链，联网�
 
 产物包含实际二进制、`manifest.json`、CycloneDX `sbom.cdx.json`、未签名 `provenance.intoto.json`、源码快照和审计报告；验证器核对产物摘要、构建信息、模块依赖及 metadata 对应关系。它是可执行的本地 gate，没有宣称托管 CI 已运行或 provenance 已由可信签名者认证。联网失败或 skipped 不是通过，实际执行证据以验收记录为准。
 
-Phase8 已加入独立 SSHSIG 签名/验签入口、实际链接依赖的 `THIRD_PARTY_NOTICES.txt`、渠道策略和升级事务；完整工程验收、正式发行身份、真实托管 CI、平台矩阵和 24h 认证状态见 [验收表](docs/phase8-acceptance.md)。默认 gate 仍生成 unsigned 本地产物，不发布 release 或部署。
+Phase8 已加入独立 SSHSIG 签名/验签入口、实际链接依赖的 `THIRD_PARTY_NOTICES.txt`、渠道策略和升级事务；完整工程验收、正式发行身份、真实托管 CI、平台矩阵和 24h 认证状态见 [验收表](docs/phase8-acceptance.md)。默认 gate 仍生成 unsigned 本地产物，不发布 release 或部署。 新增真实二进制安装/回滚、磁盘 ENOSPC/EROFS、SSH ControlMaster 丢失和历史源码兼容检查的命令与证据也在该验收表中；它们分别保留实际通过范围和未运行项。
 
 ## 开发与验证
 

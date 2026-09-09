@@ -976,7 +976,7 @@ must be explicitly labeled with `RDEV_RELEASE_ALLOW_DIRTY=1`.
 Go build information, audit evidence and metadata binding. This is local evidence,
 not a hosted CI run or signed release. Phase8 adds separate signing/verification, linked-module notices, channel policy
 and remote transactions. Formal release identity and full production acceptance
-remain pending; see [Phase8 acceptance](phase8-acceptance.md). [Phase7 acceptance](phase7-acceptance.md) records the current execution;
+remain pending; see [Phase8 acceptance](phase8-acceptance.md) for current execution. [Phase7 acceptance](phase7-acceptance.md) records the accepted predecessor;
 [Phase6 acceptance](phase6-acceptance.md) retains the prior source-bound evidence.
 
 
@@ -1006,3 +1006,24 @@ reconcile before assuming success. A committed cleanup warning means the new
 binary already took effect. Binary rollback is not state rollback. Drain old
 writers before migrating into the shared writer-lease regime; a new running job
 holds its lease until exit and blocks exclusive migration.
+
+
+The actual Phase7 engineering predecessor `e73a38b` has been tested separately
+from formal N-1 releases. New standalone CLI/MCP may upgrade that predecessor
+under an explicit unsigned-dev policy; the old standalone build refuses a newer
+clean agent before business dispatch. Configuring a new broker with the old
+predecessor's `-agent-dir` is rejected as `protocol.unsupported_feature` because
+that local artifact lacks the required release identity, even when the remote
+protocol range overlaps. Use the candidate's correctly stamped agents for
+migration. Old broker/new agent combinations have separate bounded runtime
+coverage; none of these results authorize a legacy installer against managed
+signed installations.
+
+The real installer checks in `scripts/real-agent-install.py` require actual clean
+current/predecessor binaries and their full source commits and digests. They
+execute production installer/recovery entries and instrument eleven named
+persistence barriers in the installer test process, with real agent readiness.
+`scripts/storage-faults.py` additionally requires Linux mount privileges and uses
+only its new private mount namespace and a 96 MiB tmpfs to enforce ENOSPC/EROFS.
+Both entries retain source-bound reports; they do not provide publisher signing
+authorization, formal N-1 identity, or a complete physical-disk crash matrix.
