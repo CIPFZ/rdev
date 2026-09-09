@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "rdev FleetSpec job_start input",
+  "description": "Shared CLI/MCP/broker input. Broker is authoritative for byte limits, selector authorization, operation normalization, resource support and strategy conflicts. Input file is at most 16 KiB.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "selector",
+    "operation",
+    "job"
+  ],
+  "properties": {
+    "selector": {
+      "type": "string",
+      "minLength": 1,
+      "description": "all, id=ID[,ID], alias=NAME[,NAME], or label:KEY=VALUE[&KEY=VALUE]; no implicit all."
+    },
+    "operation": {
+      "const": "job_start"
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec"
+      ],
+      "properties": {
+        "spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "argv"
+          ],
+          "properties": {
+            "argv": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "items": {
+                "type": "string"
+              }
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "env": {
+              "type": "object",
+              "maxProperties": 64,
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "login_shell": {
+              "type": "boolean"
+            },
+            "stdin": {
+              "const": ""
+            },
+            "timeout_sec": {
+              "const": 0
+            },
+            "max_output_bytes": {
+              "const": 0
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu_quota_millis": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "memory_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "pids": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "fds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576
+            },
+            "wall_timeout_sec": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "job_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            }
+          },
+          "description": "wall timeout zero/omitted selects 3600. Target must negotiate job_resource_envelope. CPU/memory/PID enforcement remains unsupported and positive requests fail before execution."
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "enum": [
+            "",
+            "all_at_once",
+            "waves",
+            "canary"
+          ],
+          "default": "waves"
+        },
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "default": 4
+        },
+        "canary": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128,
+          "description": "Only canary strategy; zero selects one."
+        },
+        "wave_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128,
+          "default": 10
+        },
+        "pause_between_waves_sec": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "max_failures": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "max_failure_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "on_threshold": {
+          "enum": [
+            "",
+            "pause",
+            "cancel_remaining"
+          ],
+          "default": "pause"
+        }
+      },
+      "description": "Omitted failure thresholds disabled; zero triggers first failure. Failure fraction excludes skipped/canceled. Trigger strictly above maximum. all_at_once rejects nonzero canary/wave/pause; waves rejects nonzero canary."
+    }
+  }
+}

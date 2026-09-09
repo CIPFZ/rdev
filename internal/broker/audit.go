@@ -12,6 +12,9 @@ import (
 )
 
 type AuditEvent struct {
+	PlanRef       string    `json:"plan_ref,omitempty"`
+	HostRef       string    `json:"host_ref,omitempty"`
+	Attempt       int       `json:"attempt,omitempty"`
 	DigestScope   string    `json:"digest_scope,omitempty"`
 	TargetScope   string    `json:"target_scope,omitempty"`
 	RequestRef    string    `json:"request_ref,omitempty"`
@@ -159,16 +162,19 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
 	e.Schema = AuditSchemaVersion
-	if e.DigestScope != "broker_instance" && e.DigestScope != "approval" {
+	if e.DigestScope != "broker_instance" && e.DigestScope != "approval" && e.DigestScope != "fleet" {
 		e.DigestScope = ""
 	}
-	if e.TargetScope != "submitted" && e.TargetScope != "configured" && e.TargetScope != "approval" {
+	if e.TargetScope != "submitted" && e.TargetScope != "configured" && e.TargetScope != "approval" && e.TargetScope != "fleet" {
 		e.TargetScope = ""
 	}
-	for _, field := range []*string{&e.RequestRef, &e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID, &e.OperationRef} {
+	for _, field := range []*string{&e.RequestRef, &e.PolicyDigest, &e.RequestDigest, &e.TargetDigest, &e.ApprovalID, &e.OperationRef, &e.PlanRef, &e.HostRef} {
 		if digest, err := hex.DecodeString(*field); err != nil || len(digest) != sha256.Size {
 			*field = ""
 		}
+	}
+	if e.Attempt < 0 || e.Attempt > 100 {
+		e.Attempt = 0
 	}
 	e.Owner = AuditOwnerID(e.Owner)
 	e.Operation = auditOperation(e.Operation)
@@ -222,7 +228,7 @@ func auditOperation(operation string) string {
 		return operation
 	}
 	switch operation {
-	case "job.events", "status", "doctor", "audit_query", "audit.health", "pool.health", "mutation.status", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.list", "secret.use", "secret.set_from_file", "fleet.plan", "fleet.execute", "fleet.approve":
+	case "job.events", "status", "doctor", "audit_query", "audit.health", "pool.health", "mutation.status", "policy.grant", "approval.create", "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.list", "secret.use", "secret.set_from_file", "fleet.plan", "fleet.execute", "fleet.approve", "fleet.status", "fleet.results", "fleet.list", "fleet.pause", "fleet.resume", "fleet.cancel", "fleet.retry", "fleet.reconcile", "fleet.inventory.import", "fleet.inventory.update", "fleet.inventory.list":
 		return operation
 	default:
 		return "unknown"
@@ -231,7 +237,7 @@ func auditOperation(operation string) string {
 
 func auditCode(code string) string {
 	switch code {
-	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_issued", "approval_used", "approval_invalid", "accepted", "completed", "dispatch_error", "request_rejected", "route_rejected", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "recovery_found", "state_persist_failed":
+	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_issued", "approval_used", "approval_invalid", "accepted", "completed", "dispatch_error", "request_rejected", "route_rejected", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "recovery_found", "state_persist_failed", "planned", "retry_planned", "pending", "dispatching", "running", "success", "failed", "skipped", "canceled", "ambiguous", "unreachable", "execute", "resumed", "operator_pause", "operator_cancel", "finished", "failure_threshold", "canary_failed", "approval_or_policy_changed", "permission_changed":
 		return code
 	default:
 		return "unknown"

@@ -24,6 +24,8 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		return errors.New("broker command required")
 	}
 	switch args[0] {
+	case "fleet":
+		return brokerFleet(ctx, args[1:])
 	case "sync":
 		return brokerSync(ctx, args[1:])
 	case "secret":

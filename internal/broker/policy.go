@@ -172,7 +172,9 @@ func CapabilityForOperation(operation string) string {
 		return "sync"
 	case "secret.set", "secret.delete", "secret.list", "secret.use", "secret.set_from_file":
 		return "secret"
-	case "fleet.plan", "fleet.execute", "fleet.approve":
+	case "fleet.inventory.import", "fleet.inventory.update", "fleet.inventory.list":
+		return "broker.admin"
+	case "fleet.plan", "fleet.execute", "fleet.approve", "fleet.status", "fleet.results", "fleet.list", "fleet.pause", "fleet.resume", "fleet.cancel", "fleet.retry", "fleet.reconcile":
 		return "fleet"
 	default:
 		return operation
@@ -357,6 +359,9 @@ func (p *Policy) decideWireRequest(owner, operation, host string, useSecrets, sy
 func (s *Service) DecideBrokerRequest(req Request) Decision {
 	if err := req.Owner.Validate(); err != nil {
 		return Decision{Reason: "invalid owner"}
+	}
+	if isFleetOperation(req.Operation) {
+		return s.policy.DecideRequest(req.Owner.Key(), fleetPermission(req.Operation), "")
 	}
 	if req.Operation == "support" {
 		s.policy.mu.RLock()

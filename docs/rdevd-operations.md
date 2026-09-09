@@ -237,6 +237,118 @@ possibly committed disk state for administrator recovery instead of overwriting
 it during shutdown. Inspect the private policy file and restart after fixing
 storage health; a failed acknowledgment in this case has an uncertain outcome.
 
+## Fleet inventory and durable plans
+
+Fleet uses the same daemon, policy, mutation ledger, job registry, scheduler and
+resource accounting as single-host requests. First-version operation allowlist:
+`job_start` only, with explicit `job.spec.argv`, cwd, env and login_shell plus
+`job.resources` and label. Secret references are unsupported; host session cwd/env are not inherited.
+New job wall time defaults to 3600 seconds and requires the negotiated resource
+feature. Other operations fail closed. No broker means no Fleet execution.
+
+[Inventory JSON Schema](schemas/fleet-inventory.schema.json) and
+[FleetSpec JSON Schema](schemas/fleet-spec.schema.json) describe input shapes;
+the broker additionally enforces identity, permission and cross-field rules.
+Inventory is schema 1, revisioned private metadata referring to the trusted
+administrator host registry; it contains no second authoritative SSH config.
+Start with `fleet inventory-list`, then `fleet inventory-import -revision N`.
+Import groups aliases of the same canonical connection/session identity and
+preserves existing IDs and labels. To edit labels or alias membership, save the
+complete snapshot, edit its records, then `fleet inventory-update -file FILE`.
+The request revision is a CAS; successful updates increment it. A new record has
+an empty `host_id` and a broker-generated random 128-bit ID. Retired IDs are
+server-maintained tombstones: deleting/recreating a host cannot reuse its ID.
+The snapshot binds the global registry destination, port, remote_dir and session
+configuration. External OpenSSH configuration, DNS, ProxyCommand and PATH wrappers
+remain trusted administrator environment; Fleet does not detect their changes or
+claim a physical machine identity.
+Changing an alias name retains identity; changing connection/session identity
+requires a new ID and new host grants. Host-file edits still require daemon
+restart and an explicit inventory import/update. Project host files cannot
+expand inventory. Inventory management uses explicit `fleet.inventory.import`,
+`fleet.inventory.update` and `fleet.inventory.list` grants (the `broker.admin`
+capability), separately from ordinary Fleet use.
+
+Inventory limits are 1024 records, 16 aliases and 32 labels per host. Label keys
+are at most 63 bytes and values 128 bytes, case-sensitive ASCII letters/digits
+with `._-/` allowed after the first character; case-fold collisions such as
+`env` and `Env` on the same host are rejected. Labels are descriptive data,
+including any owner label, and never confer permission. Inventory schema,
+unknown/duplicate fields, retired IDs, alias collisions, duplicate identities
+and partial updates are validated before publication. The stored snapshot has
+deterministic HostID, alias and tombstone sorting.
+
+Selectors are exactly `all`, `id=ID[,ID]`, `alias=NAME[,NAME]`, or
+`label:KEY=VALUE[&KEY=VALUE]` (AND predicates). Whitespace, empty selectors,
+unknown syntax and zero authorized matches fail; no error becomes `all`.
+Explicit names outside the caller's discoverable inventory fail without exposing
+other targets. Results sort and deduplicate by HostID. A plan supports at most
+128 targets; more than 20 is a large plan. `fleet plan -file FILE` persists the
+preview snapshot; inspect its operation, digest and every `results` page before
+approving. Every plan requires explicit approval, covering all/large/destructive
+work without a client-controlled risk bypass.
+
+Use the same principal with an explicit `fleet.approve` grant to call
+`fleet approve PLAN -digest SHA -ttl SEC` (default 60, at most 600), then
+`fleet execute PLAN -digest SHA -approval TOKEN`. Fleet approvals are distinct
+from single-host approvals. They bind the plan, principal, target connection
+identity, operation and rollout/failure policy plus policy version and expiry.
+The unscoped `fleet.plan` grant admits plan/status/results/list;
+`fleet.execute` also controls pause/resume/cancel/retry/reconcile. Each selected
+HostID additionally requires `job_start` and `job_status` permission. Use exact
+HostID grants for those inner operations; alias grants do not transfer to Fleet.
+Discovery evaluates all required grants from one policy snapshot.
+New dispatch rechecks grants and target
+identity. Changed connection configuration fails closed; selectors are never
+re-resolved during execution or retry.
+
+Rollout defaults: `waves`, max_parallel 4 (1..16), wave_size 10 (1..128),
+canary 1 for `canary`, and pause_between_waves_sec 0 (0..3600). Numeric zero
+selects the documented default where applicable; negative/overflow and conflicting
+strategy parameters fail. `all_at_once` rejects canary/wave/pause settings.
+Parallelism counts whole HostRuns until job completion and remains subject to
+broker global/owner/host/lane limits. Detached Fleet reservations use at most
+half of each non-control QoS envelope (default global 5, owner 1, host 4);
+`max_parallel` is an upper bound and does not override that reservation.
+Canary must completely succeed before any
+later wave; ambiguous, unreachable and failed canaries never pass. Pause stops
+new dispatch and preserves in-flight jobs; wave boundaries and next-wave times
+are durable. Resume preserves successful targets; expired authorization needs
+new approval and execute. Previously admitted jobs may finish after expiry.
+
+`max_failures` and `max_failure_ratio` omitted means disabled; explicit zero
+allows no failure. A threshold triggers when the observed value is strictly
+**greater than** the configured maximum, after each result and before another
+dispatch. Failed, unreachable and ambiguous count as failures; the ratio's
+denominator is terminal attempted success/failed/unreachable/ambiguous only.
+Skipped and canceled are excluded. `on_threshold` is `pause` (default) or
+`cancel_remaining`; submitted jobs retain their evidence and keep running.
+Batch cancel cancels pending targets, not detached jobs. A separate job stop
+uses normal job permissions and approval; canceled observers never cancel plans.
+
+Plans and HostRuns persist intent before dispatch. A HostRun's attempt number
+and operation ID stay fixed through restart and reconciliation. Recovery queries
+existing mutation/job results; a missing/failed query never licenses replay.
+Unprovable submissions remain ambiguous. `fleet reconcile PLAN` queries those
+original attempts. `fleet retry PLAN HOST_ID...` creates one child plan only for
+an explicit terminal failed/unreachable/skipped/canceled subset; success and
+ambiguous are rejected, concurrent retries cannot dispatch the same attempt
+twice, and the child needs its own approval. Retry does not reparse selectors.
+
+Status/results pages contain at most 32 HostRuns; list pages contain bounded
+plan metadata. `next_offset` indicates another page. CLI status/results return
+`exit_status`: 0 completed with all success, 1 failed/canceled, 2 unfinished or
+ambiguous; control commands return 0 for admission. MCP `rdev_fleet` takes
+`{action, request, approval_token?}` with the same request model and returns
+`{plan?, plans?, approval?, inventory?}`. Raw argv/env execution data remains in
+private state, while audit records only identity/digest/decision/result links.
+Results contain metadata, not raw job logs. Fleet storage is bounded to 64 plans,
+8 per owner and 16 MiB. Terminal history is eligible after seven days; a retry
+chain is reclaimed together only after every related plan is terminal and past
+that horizon. Active, ambiguous and still-needed recovery records are retained. Storage pressure rejects new plans; recorded queries and
+reconciliation remain available. Disk errors freeze new admission until storage
+health is repaired and the daemon restarted.
+
 ## Exact-request approvals
 
 Shared-broker mutating wire operations require approval, including arbitrary

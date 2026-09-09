@@ -35,6 +35,30 @@ func schema(name string) commandSpec {
 		}
 	}
 	switch name {
+	case "fleet.plan", "fleet.inventory-update":
+		add("string", 0, "file")
+	case "fleet.approve", "fleet.execute":
+		s.min, s.max = 1, 1
+		add("string", 0, "digest")
+		if name == "fleet.approve" {
+			add("int", 600, "ttl")
+		} else {
+			add("string", 0, "approval")
+		}
+	case "fleet.status", "fleet.results":
+		s.min, s.max = 1, 1
+		add("int", 32, "limit")
+		add("int", math.MaxInt32, "offset")
+	case "fleet.list":
+		add("int", 32, "limit")
+		add("int", math.MaxInt32, "offset")
+	case "fleet.pause", "fleet.resume", "fleet.cancel", "fleet.reconcile":
+		s.min, s.max = 1, 1
+	case "fleet.retry":
+		s.min, s.max = 2, 129
+	case "fleet.inventory-import":
+		add("uint", 0, "revision")
+	case "fleet.inventory-list":
 	case "exec", "job.start":
 		s.min, s.max = 1, 1
 		add("string", 0, "cwd")
@@ -282,7 +306,7 @@ func validateCLI(args []string) error {
 	}
 	name, rest := args[0], args[1:]
 	switch name {
-	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker":
+	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet":
 		if len(rest) > 0 {
 			name += "." + rest[0]
 			rest = rest[1:]
@@ -303,6 +327,13 @@ func validateCLI(args []string) error {
 }
 
 func (f *flagSet) env() map[string]string {
- if len(f.repeat["env"])==0 { return nil }; out:=map[string]string{}
- for _,kv:=range f.repeat["env"] { k,v,_:=strings.Cut(kv,"="); out[k]=v }; return out
+	if len(f.repeat["env"]) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, kv := range f.repeat["env"] {
+		k, v, _ := strings.Cut(kv, "=")
+		out[k] = v
+	}
+	return out
 }

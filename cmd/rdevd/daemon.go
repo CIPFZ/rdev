@@ -145,6 +145,12 @@ func runDaemon(args []string) error {
 	if err := service.Mutations.ConfigurePersistence(*socket + ".mutations"); err != nil {
 		return fmt.Errorf("mutation registry load failed: %w", err)
 	}
+	if err := service.ConfigureFleetInventory(*socket + ".inventory"); err != nil {
+		return fmt.Errorf("fleet inventory load failed: %w", err)
+	}
+	if err := service.ConfigureFleet(*socket + ".fleet"); err != nil {
+		return fmt.Errorf("fleet state load failed: %w", err)
+	}
 	if err := service.ConfigureSync(*socket + ".sync"); err != nil {
 		return errors.New("sync state initialization failed")
 	}
@@ -166,6 +172,7 @@ func runDaemon(args []string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	service.RecoverFleet()
 	service.SetReady(true)
 	if *readyFile != "" {
 		if err := writeReady(*readyFile); err != nil {

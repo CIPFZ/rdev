@@ -23,6 +23,8 @@ type ProtocolDispatcher interface {
 // clients. Callers must share one Service instead of constructing one Client
 // per frontend process.
 type Service struct {
+	Fleet            *FleetStore
+	inventory        *FleetInventoryStore
 	syncMu           sync.Mutex
 	syncPlans        map[string]*preparedSync
 	syncStore        *synctree.Store
@@ -73,7 +75,9 @@ func NewService(lookup client.AgentLookup) *Service {
 	config, _ := NewConfigStore(Config{MaxHosts: 128, IdleTTL: 5 * time.Minute})
 	observationCtx, stopObservations := context.WithCancel(context.Background())
 	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[sharedKey]*sharedDispatch), Jobs: NewJobRegistry(), observationCtx: observationCtx, stopObservations: stopObservations}
+	s.inventory = newFleetInventoryStore()
 	s.SetReady(true)
+	s.Fleet = newFleetStore()
 	s.jobWaits = make(map[jobObservationKey]*jobObservation)
 	s.syncPlans = make(map[string]*preparedSync)
 	s.Secrets = NewSecretRegistry(s.client.Secrets)

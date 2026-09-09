@@ -50,7 +50,9 @@ func Discover(mode string) Discovery {
 		{Name: "host_session_edit", Status: "supported"},
 		{Name: "declarative_secrets", Status: "supported"},
 	}
+	out.Frontends = append(out.Frontends, Boundary{Name: "fleet", Status: "unsupported", Alternative: "configure RDEV_BROKER_SOCKET; Fleet never executes through private SSH"})
 	if mode == "broker" {
+		out.Frontends[4] = Boundary{Name: "fleet", Status: "supported", Scope: "durable approved job_start only; static trusted inventory; at most 128 targets, 16 parallel; job completion is observed; inventory admin, fleet grants and each host operation grant are separate"}
 		out.Frontends[2] = Boundary{Name: "host_session_edit", Status: "unsupported", Alternative: "administrator edits private host registry and restarts rdevd; clients supply cwd/env per request"}
 		out.Frontends[3] = Boundary{Name: "declarative_secrets", Status: "unsupported", Alternative: "use principal-owned secret set or set_from_file, then secret:name with a secret.use grant"}
 	}

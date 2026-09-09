@@ -96,12 +96,20 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := runBrokerCommand(ctx, os.Args[1:]); err != nil {
+			var status fleetExit
+			if errors.As(err, &status) {
+				os.Exit(int(status))
+			}
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
 	}
 
+	if os.Args[1] == "fleet" {
+		fmt.Fprintf(os.Stderr, "rdev: %s: Fleet requires RDEV_BROKER_SOCKET; no direct SSH execution\n", proto.NewError(proto.CodeUnsupportedFeature, "", proto.StateNotSent))
+		os.Exit(1)
+	}
 	c := client.New(lookupAgent)
 	// A malformed registry should not block a session: warn and continue with
 	// ad-hoc destinations, which still work without any config file.
@@ -647,6 +655,16 @@ func usage() {
 
 USAGE
   rdev serve                              run as an MCP server (for Claude Code)
+  rdev fleet plan -file SPEC.json          persist an immutable target preview (broker only)
+  rdev fleet approve PLAN -digest SHA [-ttl 60]
+  rdev fleet execute PLAN -digest SHA -approval TOKEN
+  rdev fleet status|results PLAN [-offset N] [-limit 32]
+  rdev fleet list [-offset N] [-limit 32]
+  rdev fleet pause|resume|cancel|reconcile PLAN
+  rdev fleet retry PLAN HOST_ID...         create a new plan for an explicit failed subset
+  rdev fleet inventory-import -revision N
+  rdev fleet inventory-update -file INVENTORY.json
+  rdev fleet inventory-list               inventory administration requires its own grant
   rdev broker status                      this principal's shared broker resource usage
   rdev ping    <host>
   rdev capability <host> [-refresh]
@@ -685,6 +703,10 @@ HOST
 NOTES
   With RDEV_BROKER_SOCKET set, commands use the authenticated broker. Commands
   not yet available in shared mode fail before opening a direct connection.
+
+  Fleet JSON files accept -file=- for bounded stdin input. Every Fleet mutation
+  requires approval. Status/results exit 0 only for complete success, 1 for
+  failure/cancel, 2 while unfinished or ambiguous. CLI exit does not cancel plans.
 
   Single-value flags cannot repeat; -exclude repeats; -env/-secret repeat with
   distinct keys. Unknown, missing, invalid or conflicting values fail.

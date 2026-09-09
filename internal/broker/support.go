@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/support"
@@ -13,7 +14,7 @@ import (
 // host is never resolved here, so denied discovery cannot enumerate inventory.
 func (s *Service) Support(owner Owner, host string) support.Discovery {
 	out := support.Discover("broker")
-	operations := []string{"sync.push", "sync.pull", "sync.delete", "secret.set", "secret.set_from_file", "secret.list", "secret.delete", "secret.use", "status", "job.events", "mutation.status"}
+	operations := []string{"sync.push", "sync.pull", "sync.delete", "secret.set", "secret.set_from_file", "secret.list", "secret.delete", "secret.use", "status", "job.events", "mutation.status", "fleet.plan", "fleet.execute", "fleet.approve", "fleet.status", "fleet.results", "fleet.list", "fleet.pause", "fleet.resume", "fleet.cancel", "fleet.retry", "fleet.reconcile", "fleet.inventory.import", "fleet.inventory.update", "fleet.inventory.list"}
 	for _, op := range proto.Operations() {
 		if op.Name != proto.OpSyncInspect && op.Name != proto.OpSyncStage && op.Name != proto.OpSyncCommit {
 			operations = append(operations, op.Name)
@@ -27,12 +28,13 @@ func (s *Service) Support(owner Owner, host string) support.Discovery {
 	for _, op := range operations {
 		capability := CapabilityForOperation(op)
 		requestHost, scope := host, "host"
-		if op == "status" || op == "mutation.status" {
+		if op == "status" || op == "mutation.status" || strings.HasPrefix(op, "fleet.") {
 			// Status and the mutation-status frontends send unscoped requests;
 			// a host-only grant cannot authorize those invocations.
 			requestHost, scope = "", "broker"
 		}
-		allowed := grants[op] || grants[capabilityKey(capability, op)] || requestHost != "" && grants[hostGrantKey(requestHost, capability, op)]
+		permissionOp := fleetPermission(op)
+		allowed := grants[permissionOp] || grants[capabilityKey(capability, permissionOp)] || requestHost != "" && grants[hostGrantKey(requestHost, capability, op)]
 		// File import needs both permissions, just like DecideBrokerRequest.
 		if op == "secret.set_from_file" {
 			allowed = allowed && (grants["read_file"] || grants[capabilityKey("file.read", "read_file")] || host != "" && grants[hostGrantKey(host, "file.read", "read_file")])

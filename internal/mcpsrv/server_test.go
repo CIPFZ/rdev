@@ -144,7 +144,7 @@ func TestAllToolsAreRegistered(t *testing.T) {
 		"rdev_read", "rdev_write", "rdev_list",
 		"rdev_sync", "rdev_session", "rdev_secrets",
 		"rdev_storage_status", "rdev_storage_gc", "rdev_storage_doctor",
-		"rdev_support", "rdev_compat", "rdev_state",
+		"rdev_support", "rdev_compat", "rdev_state", "rdev_fleet",
 	}
 	for _, name := range want {
 		if !got[name] {

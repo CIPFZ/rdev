@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/observe"
@@ -55,6 +56,7 @@ func newServer(c *client.Client, approveProject func(string) (session.ProjectTru
 	// using internal/client directly (the CLI does) never passes through here.
 	s.AddReceivingMiddleware(redactResults(c))
 
+	registerFleet(s, "", broker.Owner{})
 	registerCompat(s)
 	registerSupport(s, c)
 	registerState(s, c)

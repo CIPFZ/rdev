@@ -12,9 +12,9 @@ import (
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
-// Fleet orchestration belongs to Phase7. Phase5 must still fail closed for all
-// reserved Fleet operations, including explicit grants, borrowed approvals and
-// a different project's ordinary execution authority.
+// Fleet routes must reject malformed or substituted requests before touching a
+// plan, approval, mutation ledger or SSH, including explicitly granted callers.
+// Ordinary execution authority never implies Fleet authority in another project.
 func TestRemoteBrokerFleetBoundary(t *testing.T) {
 	d, namespace, ssh := newRemoteRuntime(t)
 	granted := broker.Owner{ClientID: "fleet-boundary-client", ProjectID: "granted"}
@@ -23,7 +23,7 @@ func TestRemoteBrokerFleetBoundary(t *testing.T) {
 	ops := []string{"fleet.plan", "fleet.execute", "fleet.approve"}
 	p := broker.NewPolicy()
 	for _, op := range ops {
-		if err := p.GrantHost(granted.Key(), "runtime-host", "fleet", op); err != nil {
+		if err := p.Grant(granted.Key(), op); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -76,8 +76,8 @@ func TestRemoteBrokerFleetBoundary(t *testing.T) {
 				for _, wire := range []*proto.Request{nil, {Op: op}, valid} {
 					for _, cap := range []string{"", "fleet", broker.CapabilityForOperation(proto.OpExec)} {
 						r := call(o, broker.Request{Operation: op, Host: "runtime-host", Capability: cap, Wire: wire, Risk: false, Approval: approval.Approval.Token, OperationID: id})
-						if r.OK || r.Error == "" || r.Wire != nil || r.Approval != nil || r.Mutation != nil || r.Scheduler != nil || r.Pool != nil || r.Ingress != nil || r.SharedWaits != nil || r.AuditHealth != nil || r.History != nil || len(r.Secrets) != 0 || len(r.Audit) != 0 || r.RequestRef == "" || r.PolicyDigest == "" {
-							t.Fatal("reserved Fleet operation returned authority or data")
+						if r.OK || r.Error == "" || r.Wire != nil || r.Approval != nil || r.Fleet != nil || r.Fleets != nil || r.Inventory != nil || r.Mutation != nil || r.Scheduler != nil || r.Pool != nil || r.Ingress != nil || r.SharedWaits != nil || r.AuditHealth != nil || r.History != nil || len(r.Secrets) != 0 || len(r.Audit) != 0 || r.RequestRef == "" || r.PolicyDigest == "" {
+							t.Fatal("malformed Fleet operation returned authority or data")
 						}
 						reason := "route_rejected"
 						if cap != "" && cap != "fleet" {
@@ -90,8 +90,8 @@ func TestRemoteBrokerFleetBoundary(t *testing.T) {
 							if r.Error != "denied by default" {
 								t.Fatal("other project inherited Fleet authority")
 							}
-						} else if r.Error != "unsupported broker operation" {
-							t.Fatal("grant unexpectedly enabled a Fleet handler")
+						} else if r.Error == "unsupported broker operation" {
+							t.Fatal("implemented Fleet route was not validated")
 						}
 						decision := "allow"
 						if reason == "denied" {
@@ -103,7 +103,7 @@ func TestRemoteBrokerFleetBoundary(t *testing.T) {
 				for _, wire := range []*proto.Request{nil, {Op: op}, valid} {
 					r := call(admin, broker.Request{Operation: "approval.create", ApprovalSpec: &broker.ApprovalSpec{Owner: o, Operation: op, Host: "runtime-host", Wire: wire, TTL: time.Minute}})
 					if r.OK || r.Approval != nil {
-						t.Fatal("unimplemented Fleet operation received an approval")
+						t.Fatal("Fleet operation received an ordinary single-host approval")
 					}
 				}
 			}
@@ -123,6 +123,11 @@ func TestRemoteBrokerFleetBoundary(t *testing.T) {
 			if strings.Contains(string(record), id) {
 				t.Fatal("rejected Fleet request created mutation state")
 			}
+		}
+		fleetData, err := os.ReadFile(d.socket + ".fleet")
+		var fleetState struct{ Plans []json.RawMessage }
+		if err != nil || json.Unmarshal(fleetData, &fleetState) != nil || len(fleetState.Plans) != 0 {
+			t.Fatal("rejected Fleet substitutions changed durable plans")
 		}
 		for _, o := range []broker.Owner{granted, denied} {
 			r := call(o, broker.Request{Operation: "audit_query"})
@@ -171,5 +176,5 @@ func TestRemoteBrokerFleetBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post-restart execution count: %v %s", err, out)
 	}
-	t.Log("real daemon/SSH: fleet.plan/execute/approve default deny across projects; explicit fleet grants remain unsupported; capability/inner-wire/approval substitutions create no SSH or mutation; exact owner request/result audit; valid approval and stable operation ID remain usable exactly once; same boundary after SIGKILL")
+	t.Log("real daemon/SSH: fleet.plan/execute/approve default deny across projects; granted malformed routes reject before dispatch; capability/inner-wire/ordinary-approval substitutions create no SSH, plan or mutation; exact owner request/result audit; valid ordinary approval and stable operation ID remain usable exactly once; same boundary after SIGKILL")
 }

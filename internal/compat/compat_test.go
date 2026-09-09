@@ -115,3 +115,35 @@ func TestPublishedErrorContractIsEnforced(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFleetPublishedSchemasUseRuntimeVersionsAndLimits(t *testing.T) {
+	read := func(name string) map[string]any {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("..", "..", "docs", "schemas", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(data, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	inv := read("fleet-inventory.schema.json")["properties"].(map[string]any)
+	if inv["schema"].(map[string]any)["const"] != float64(broker.FleetInventorySchemaVersion) || inv["records"].(map[string]any)["maxItems"] != float64(broker.FleetMaxHosts) {
+		t.Fatal("inventory schema differs from actual reader")
+	}
+	spec := read("fleet-spec.schema.json")["properties"].(map[string]any)
+	if spec["operation"].(map[string]any)["const"] != proto.OpJobStart {
+		t.Fatal("Fleet allowlist differs")
+	}
+	rollout := spec["rollout"].(map[string]any)["properties"].(map[string]any)
+	if rollout["wave_size"].(map[string]any)["maximum"] != float64(broker.FleetMaxTargets) {
+		t.Fatal("Fleet target bound differs")
+	}
+	for _, f := range Current().Formats {
+		if f.Name == "broker_fleet" && f.Current != broker.FleetSchemaVersion {
+			t.Fatal("Fleet persistence contract differs")
+		}
+	}
+}

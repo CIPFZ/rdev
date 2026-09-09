@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "rdev Fleet inventory schema 1 (administrator CAS update)",
+  "description": "Shape contract; broker additionally validates canonical target identities, case-fold label collisions, global uniqueness, tombstones and revision CAS before atomic publication. Persistent snapshots contain nonempty IDs/digests and every record field.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "revision",
+    "records",
+    "retired_ids"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "records": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "aliases",
+          "labels"
+        ],
+        "properties": {
+          "host_id": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{32})?$",
+            "description": "Empty for a new broker-generated identity; supplied IDs must be active and retain target identity."
+          },
+          "aliases": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Case-sensitive ASCII bytes 0x21..0x7e excluding comma, equals and ampersand; broker validates canonical trusted registry membership."
+            }
+          },
+          "labels": {
+            "type": "object",
+            "maxProperties": 32,
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+            }
+          },
+          "target_digest": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{64})?$",
+            "description": "May be omitted for new records; broker derives and verifies canonical connection identity."
+          }
+        }
+      }
+    },
+    "retired_ids": {
+      "type": "array",
+      "maxItems": 65536,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{32}$"
+      },
+      "description": "Broker-maintained permanent tombstones; clients cannot replace this history."
+    }
+  }
+}

@@ -98,7 +98,7 @@ func (c *Client) DoContext(ctx context.Context, req Request) (result Response, c
 	if req.Owner == (Owner{}) {
 		req.Owner = c.owner
 	}
-	if req.Approval == "" {
+	if req.Approval == "" && (!isFleetOperation(req.Operation) || req.Operation == "fleet.execute") {
 		req.Approval = os.Getenv("RDEV_APPROVAL_TOKEN")
 	}
 	if isSecretMutation(req.Operation) || isSyncOperation(req.Operation) && req.Sync != nil && !req.Sync.DryRun {

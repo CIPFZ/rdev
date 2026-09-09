@@ -8,6 +8,7 @@ import (
 )
 
 type Request struct {
+	Fleet           *FleetRequest       `json:"fleet,omitempty"`
 	Sync            *client.SyncOptions `json:"sync,omitempty"`
 	Secret          *SecretParams       `json:"secret,omitempty"`
 	OperationID     string              `json:"operation_id,omitempty"`
@@ -31,6 +32,9 @@ type Request struct {
 	Since           time.Time           `json:"since,omitempty"`
 }
 type Response struct {
+	Fleet           *FleetPlan         `json:"fleet,omitempty"`
+	Fleets          *FleetPage         `json:"fleets,omitempty"`
+	Inventory       *FleetInventory    `json:"inventory,omitempty"`
 	Support         *support.Discovery `json:"support,omitempty"`
 	Sync            *client.SyncResult `json:"sync,omitempty"`
 	Secrets         []SecretDescriptor `json:"secrets,omitempty"`

@@ -19,6 +19,8 @@ const maxMutationIntents = 8192
 const maxOwnerMutationIntents = 1024
 const maxMutationBytes = 8 << 20
 
+var ErrMutationUnknown = errors.New("mutation unknown for principal")
+
 var ErrMutationRecorded = errors.New("mutation identity already recorded; query mutation.status; request was not replayed")
 var ErrMutationStorage = errors.New("mutation state durability uncertain; restart required")
 
@@ -211,7 +213,7 @@ func (r *MutationRegistry) Get(owner, id string) (MutationIntent, error) {
 	}
 	m, ok := r.records[mutationKey{owner, id}]
 	if !ok {
-		return MutationIntent{}, errors.New("mutation unknown for principal")
+		return MutationIntent{}, ErrMutationUnknown
 	}
 	return m, nil
 }

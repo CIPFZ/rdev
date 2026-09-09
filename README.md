@@ -38,6 +38,33 @@ standalone 的主机配置分两层：
 
 共享模式的 host registry 由管理员加载，业务客户端不能编辑共享 host/session。管理员修改私有 registry 后重启 `rdevd`；客户端逐请求传 `cwd`/`env`。unsupported 路由明确失败，不创建私有 SSH 客户端回退。`rdev support` 和 `rdev_support` 可提前查询这些边界及替代操作。
 
+## Fleet：共享批量编排
+
+Fleet 首版只支持 `job_start`，由 `rdevd` 持久执行，完成判定是 job 终态。CLI/MCP 退出或观察中断不会取消计划。没有 broker 时明确拒绝，不回退为本地 SSH 循环。其他单机 operation 不在首版 allowlist 内。
+
+管理员先用 `rdev fleet inventory-list` 查询 revision，再执行 `rdev fleet inventory-import -revision N`，从 daemon 的可信全局 host registry 初始化或同步 inventory。相同连接/session 身份的 alias 合并为一个随机稳定 HostID。修改 labels、alias 使用完整 inventory 的 CAS 更新：`rdev fleet inventory-update -file inventory.json`。HostID 和 labels 不授予权限；普通调用者只发现自己有权访问的目标。
+
+selector 支持 `alias=dev-a,dev-b`、`id=HOST_ID[,HOST_ID]`、`label:env=test&role=worker` 和显式 `all`。空值、无匹配及超过 128 个目标都拒绝；排序和去重以 HostID 为准。计划冻结身份、连接摘要、操作与 rollout，所有执行均须审批，包括 `all` 和超过 20 个目标的大范围计划。
+
+```json
+{"selector":"alias=dev-a,dev-b","operation":"job_start","job":{"spec":{"argv":["/usr/bin/true"],"login_shell":false},"resources":{"wall_timeout_sec":300}},"rollout":{"strategy":"canary","canary":1,"wave_size":10,"max_parallel":4,"max_failures":0,"on_threshold":"pause"}}
+```
+
+```sh
+rdev fleet plan -file spec.json
+# 查看全部目标分页；用返回的 plan_id 与 digest 明确批准同一个快照。
+rdev fleet approve PLAN -digest SHA -ttl 60
+rdev fleet execute PLAN -digest SHA -approval TOKEN
+rdev fleet results PLAN -offset 0 -limit 32
+rdev fleet pause PLAN
+rdev fleet resume PLAN
+rdev fleet cancel PLAN
+rdev fleet reconcile PLAN
+rdev fleet retry PLAN FAILED_HOST_ID
+```
+
+`retry` 生成需要独立审批的新子计划，只覆盖明确指定且允许重试的目标；成功或 ambiguous 的尝试不能重试。`reconcile` 查询原 mutation/job 结果，不重新提交命令。状态/结果 CLI 退出码：全部完成成功为 0，失败/取消为 1，未完成或有 ambiguous 为 2；控制命令返回 0 仅表示请求已接受。分页结果只含必要元数据，原始输出通过单 job 工具另行授权查询。详细的 wave、阈值、授权和恢复语义见 [运维说明](docs/rdevd-operations.md#fleet-inventory-and-durable-plans)。
+
 ## MCP 工具
 
 以当前 server 的 `tools/list` 为准：standalone 与 broker 模式有不同工具集和授权要求。
@@ -47,6 +74,7 @@ standalone 的主机配置分两层：
 | `rdev_exec` | `argv` 数组形式的前台命令 |
 | `rdev_job_start` / `_wait` / `_list` / `_status` / `_logs` / `_stop` / `_rm` | 有界后台任务、观察和清理 |
 | `rdev_read` / `rdev_write` / `rdev_list` | 文件读写和目录列表 |
+| `rdev_fleet` | broker 持久 job_start 编排：预览、审批、执行、分页查询、暂停/恢复/取消及明确失败子集重试；standalone 明确拒绝 |
 | `rdev_sync` | push/pull；broker 使用预览、保留计划及审批执行 |
 | `rdev_secrets` | standalone 内存凭据；broker principal-owned 凭据 |
 | `rdev_session` | 仅 standalone 的 host/session 查询和编辑 |

@@ -258,6 +258,17 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			endRequest()
 			continue
 		}
+		if strings.HasPrefix(req.Operation, "fleet.") {
+			response := service.HandleFleet(requestCtx, req)
+			if response.OK {
+				recordResult("completed")
+			} else {
+				recordResult("request_rejected")
+			}
+			_ = respond(response)
+			endRequest()
+			continue
+		}
 		if req.Operation == "support" {
 			info := service.Support(req.Owner, req.Host)
 			recordResult("completed")

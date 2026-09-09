@@ -228,6 +228,30 @@ Broker authentication, routing and local CLI diagnostics may also return textual
 errors. Neither textual error wording nor an output truncation marker proves
 that a mutation was not executed.
 
+Fleet is broker-only and initially allows durable `job_start` with explicit argv,
+cwd, environment and bounded resources. Inventory is administrator-managed static
+metadata referencing the trusted host registry. HostIDs cannot be reused or
+transferred to a changed connection identity; alias and label changes cannot
+expand a persisted target snapshot. Descriptive owner labels do not grant access.
+Snapshots bind the trusted registry destination, port, remote_dir and session
+configuration. External OpenSSH config, DNS, ProxyCommand and PATH wrappers are
+trusted administrator inputs; Fleet does not detect their drift or attest a
+physical machine identity.
+Discovery, plan/result pages and retry history retain exact client/project
+isolation. Fleet grants are separate from each HostID's `job_start`/`job_status`
+grants; inventory management has its own capability.
+
+Every Fleet execution requires an explicit Fleet approval bound to its principal,
+immutable targets, connection and operation identities, rollout/failure policy,
+policy version and expiry. A single-host approval is not a Fleet approval.
+New dispatch checks current permissions and identity again. Submitted attempts
+retain their operation IDs across restart and use result queries without replay;
+unprovable outcomes remain ambiguous. Cancel stops pending dispatch but does not
+implicitly stop detached jobs or erase mutation evidence. Stopping an existing
+job remains a separate authorized, approved operation. Fleet execution data is
+private, bounded durable state; audit excludes argv, environment values and raw
+output. Storage failure freezes new admissions while preserving recorded queries.
+
 The support snapshot identifies Linux amd64 runtime evidence separately from
 build-only combinations and macOS's historical development baseline. **macOS
 runtime remains unverified and explicitly deferred**; cross-compilation is not

@@ -20,6 +20,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "rdev", Title: "Remote dev environment proxy", Version: Version}, nil)
 	s.AddReceivingMiddleware(projectResults(nil, nil))
+	registerFleet(s, socket, owner)
 	registerCompat(s)
 	registerBrokerSupport(s, socket, owner)
 	registerBrokerState(s, socket, owner)

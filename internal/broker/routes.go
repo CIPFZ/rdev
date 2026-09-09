@@ -10,6 +10,12 @@ import (
 // changes or transport acquisition. A grant cannot create an absent handler or
 // turn a host-limited administration grant into global authority.
 func ValidateRoute(req Request) error {
+	if isFleetOperation(req.Operation) {
+		return validateFleetRoute(req)
+	}
+	if req.Fleet != nil {
+		return errors.New("unexpected fleet parameters")
+	}
 	if req.Wire != nil && (req.Wire.Exec != nil || req.Wire.Job != nil) {
 		if _, err := proto.NormalizeTimeouts(req.Wire); err != nil {
 			return err
