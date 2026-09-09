@@ -1,6 +1,0 @@
-=== RUN   TestRemoteBrokerLaneTraffic
-    remote_traffic_test.go:156: real binary read/retry failed
---- FAIL: TestRemoteBrokerLaneTraffic (3.74s)
-FAIL
-FAIL	github.com/CIPFZ/rdev/cmd/rdevd	3.748s
-FAIL

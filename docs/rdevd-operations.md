@@ -9,9 +9,11 @@ sandboxed by this mechanism.
 
 Build the daemon with Go 1.25.0 and build the agents using `make agents`.
 Install `rdevd` in `~/bin` and the four agent binaries in
-`~/.local/share/rdev/agents`. On the original macOS development machine, use
-`/Users/tonyny/sdk/go1.25.0/bin/go`; on other platforms pass the corresponding
-absolute path as `make GO=/absolute/path/to/go`.
+`~/.local/share/rdev/agents`; select the toolchain with
+`make GO=/absolute/path/to/go`.
+
+Validation commands and results live in the [runtime index](phase5-runtime-evidence.md);
+current completion gaps live in the [acceptance record](phase5-acceptance.md).
 
 ## Provisioning
 
@@ -150,18 +152,9 @@ not global recovery counts. A clean seal is not an archive guarantee: query
 history and the two retained files still have their documented retention bounds.
 
 Do not delete the marker to hide a gap. It does not reconstruct missing events or
-claim protection from edits by the same OS user. A marker/segment publication
-failure leaves conservative recovery evidence; malformed, duplicate, null and
-public markers are rejected before readiness. `make remote-audit-continuity`
-exercises real crash, close-failure and project-isolation paths.
-`make remote-audit-upgrade` builds predecessor `08ff4fb` from Git and runs an actual
-downgrade/write/re-upgrade sequence; `RDEV_PREDECESSOR_COMMIT` selects another
-predecessor for a wider matrix. `make remote-audit-soak` defaults to ten active
-minutes with twenty independent producers and alternating SIGKILL/SIGTERM epochs.
-`RDEV_AUDIT_SOAK_SECONDS` can select 120–3600 seconds in whole minutes. The soak
-requires rotation in every minute, bounds private segment sizes, checks owner
-queries and explicit gaps, and records RSS/FD and completed-call measurements.
-Full storage-stall/power-loss, retention query and upgrade matrices remain open.
+protect against edits by the same OS user. Marker/segment publication failures
+leave conservative recovery evidence; malformed, duplicate, null and public
+markers are rejected before readiness.
 
 ## Services and repeatable validation
 
@@ -194,7 +187,6 @@ removes it. `remote-phase5-runtime` also uploads a compiled test executable and
 runs the actual daemon principal/startup/crash tests, so remote Go is unnecessary.
 It requires Linux amd64, Python 3, and a running systemd user manager.
 
-
 ## Audit identity compatibility
 
 New audit records use schema 1 and an opaque SHA-256 fingerprint of the exact
@@ -204,11 +196,10 @@ secret values and outputs are excluded. Legacy schema-0 records used lossy
 owner display strings. They remain on disk subject to normal retention, but
 are omitted from principal queries with `audit_incomplete=true`, because their
 ownership cannot safely be reconstructed. Administrators can inspect the old
-segments locally. Long-running rotation and sink failure acceptance remain
-open in the Phase5 record.
+segments locally. Rotation, continuity and known limitations are recorded in the
+[runtime index](phase5-runtime-evidence.md#41cddb4).
 
-
-## Explicit host registry and real session benchmark
+## Host registry and policy
 
 `rdevd -hosts-file /private/hosts.json` loads only the administrator-selected
 0600 regular file, with a 4 MiB bound, normal host/security validation, and
@@ -217,31 +208,10 @@ null and unknown fields are rejected. It replaces implicit global/project
 registry discovery for that daemon. Host-file changes currently require a
 restart; SIGHUP reloads the broker config and principal key.
 
-`make remote-session-benchmark RDEV_SSH_CONFIG=/path/to/ssh/config` runs three
-20-process / 500-request real-SSH workloads against `service-deploy` (or
-`RDEV_REMOTE_SSH`). It creates a unique remote state directory, observes one
-shared remote agent PID and the daemon's SSH child count, and verifies distinct
-client/project protocol identities. It requires a Linux test runner and Linux
-remote with Python 3. This is a short session benchmark; it does not claim
-long-running fairness or the bulk/control latency SLO.
-
 Broker-mode protocol dispatch requires a version-3 agent to preserve principal
 metadata. Direct compatibility clients retain their legacy behavior. The new
 optional ping `caller_id` reports only the current request's opaque protocol
 identity; older ping clients can ignore it.
-
-`make remote-lifecycle RDEV_SSH_CONFIG=/path/to/ssh/config` runs real SSH
-cancellation and lease tests. It kills the test namespace's verified agent PID,
-pauses replacement-agent startup at an OpenSSH wrapper barrier, cancels a
-waiting frontend context, and kills the initiating frontend process. It checks
-that another owner completes exactly one mutation and that foreground
-cancellation preserves other owners' execs and the shared agent. Six additional
-lease cycles alternate normal frontend exit and SIGKILL, hold each connection
-across a reaper tick, and verify that both the SSH child and remote agent exit
-after the final lease expires. The current reaper tick is five seconds, so
-observed reclamation takes the configured `idle_ttl` plus up to one tick and
-process-exit latency. These tests require Linux `/proc` locally and remotely,
-Python 3, and an authorized SSH target; all resources use generated namespaces.
 
 Policy changes made through `policy.grant` are written to a unique 0600 file,
 synced, atomically renamed and directory-synced before success is returned.
@@ -263,12 +233,6 @@ cannot be confirmed, the policy stops admitting requests and preserves the
 possibly committed disk state for administrator recovery instead of overwriting
 it during shutdown. Inspect the private policy file and restart after fixing
 storage health; a failed acknowledgment in this case has an uncertain outcome.
-
-`make remote-policy RDEV_SSH_CONFIG=/path/to/ssh/config` runs three real SSH
-policy tests. Each holds actual remote startup to test a queued decision across
-revocation, SIGKILLs the daemon after grant/revoke acknowledgments, checks exact
-host/project boundaries and capability substitution negatives, and injects a
-real atomic-rename failure without publishing the attempted permission change.
 
 ## Exact-request approvals
 
@@ -319,26 +283,13 @@ context but never extended. Audits correlate request/target digests and an
 opaque SHA-256 approval reference across issuance, use and result, without
 recording raw request bodies, outputs or approval tokens.
 
-`make remote-approval RDEV_SSH_CONFIG=/path/to/ssh/config` runs three real SSH
-approval tests covering mandatory classification, separate issuer/executor,
-owner/host/parameter substitution, expiry, one-use, policy change, restart and
-owner-scoped audit privacy. The session benchmark and lifecycle tests now issue
-explicit administrator approvals for each mutation during setup; they retain
-separate executor principals and their real shared-transport assertions.
-
-
 ## Detached job ownership recovery
 
-`make remote-job-upgrade RDEV_SSH_CONFIG=/path/to/ssh/config` validates real
-forward upgrades from daemon/agent pairs `e3ac9c2` and `c5707ee`. Set
-`RDEV_JOB_PREDECESSOR_COMMITS` to a space-separated commit list to test additional
-predecessors. The command builds historical artifacts in a temporary directory,
-creates two owner-scoped remote jobs, and verifies supervisor executable hashes,
-management, wait/shutdown/reconnect, output and durable removal after replacing
-both binaries. Existing jobs keep running their original supervisor executable;
-upgrading the base agent does not replace those processes. TERM to a pre-relay
-supervisor's job now stops its child group and lets the supervisor flush output.
-A configured grace deadline still escalates unresponsive jobs to KILL.
+Forward upgrades from daemon/agent pairs `e3ac9c2` and `c5707ee` have runtime
+validation. Existing jobs keep their original supervisor executable; upgrading
+the base agent does not replace those processes. TERM to a pre-relay supervisor's
+job stops its child group and lets the supervisor flush output. A configured
+grace deadline still escalates unresponsive jobs to KILL.
 
 These checks cover acknowledged jobs and the named predecessor schemas; they do
 not make untested downgrades or arbitrary state schemas supported. Keep the local
@@ -363,7 +314,6 @@ agent receives no scoped request and the client reports unsupported_feature.
 Upgrade the agent artifact to regain scoped listing. Filtering precedes the
 remote limit and totals, so another project's newer jobs cannot hide owned jobs.
 
-
 ## Shared job wait lifecycle
 
 A disconnected wait frontend releases its subscription immediately. The broker
@@ -379,7 +329,6 @@ unfinished. Modern remote supervisors relay job_stop TERM
 to the command group and persist output before exiting, preserving tail-on-exit.
 Forced KILL and old supervisors can still lose in-memory output; their existing
 stop semantics are retained.
-
 
 ## Durable mutation outcomes
 
@@ -435,21 +384,12 @@ closed; automatic retirement is not implemented. Do not delete the broker
 snapshot or remote tombstones to reset the limits: that would discard replay
 protection. Identity retirement remains a Phase5 operational gap.
 
-`make remote-mutation RDEV_SSH_CONFIG=/path/to/ssh/config` exercises real SSH,
-SIGKILL before broker acknowledgment, SSH-outage restart, job identity recovery,
-append-once proof, rename failure before dispatch, actual CLI/MCP processes,
-owner isolation, definitive rejection cleanup and SIGTERM with a held remote
-terminal response. The test intercepts only selected responses in an OpenSSH
-wrapper; remote commands and agent behavior are production code. It proves
-process-crash semantics, not storage survival after a remote machine power loss.
-
 On shutdown, the broker uses up to five seconds (half the remaining shutdown
 budget) for graceful requests, then cancels scheduled work, closes transports
 and waits for durable outcome publication within the original ten-second
 context. A held remote response becomes ambiguous; no shutdown path replays it.
 An uninterruptible filesystem operation and physical power-loss durability still
 require broader failure testing.
-
 
 ## Job state history and replay
 
@@ -492,14 +432,6 @@ to repair history. The in-memory watch cache retains only completion hints, with
 1024 keys, 512 subscriptions, a 1024-byte key bound and a 64 KiB event bound.
 Detailed replay uses the durable history query.
 
-`make remote-events RDEV_SSH_CONFIG=/path/to/ssh/config` runs twenty actual wait
-frontends, kills all of them, observes terminal persistence without subscribers,
-SIGKILLs/restarts the daemon, queries cursors through actual CLI/MCP processes,
-checks project isolation after job removal, injects a real rename failure and
-repairs the history by an owned status call. Push streaming and extended remote
-retention pressure remain outstanding; passing this test does not complete
-the entire Phase5 gate.
-
 ## Frontend ingress and slow readers
 
 The listener admits at most 128 sockets, including at most 16 unauthenticated
@@ -529,11 +461,9 @@ accounting values, not RSS or remote payload lane measurements.
 
 Every response write has a two-second deadline capped by principal expiry.
 A stalled reader is closed and its connection work is canceled. This bounds
-socket write retention; the broader response-allocation, persistence-stall,
-mixed-workload and host-capacity matrix remains under the Phase5 acceptance gate.
+socket write retention; the remaining validation gaps are tracked in the acceptance record.
 `make remote-ingress` exercises real sockets and SSH with owner connection/byte
 pressure, anonymous/partial JSON, slow output and a held remote response.
-
 
 ## Shared CLI routing and resource status
 
@@ -558,7 +488,6 @@ actual CLI/MCP processes, default-deny and cross-project status, directory
 listing, and absence of SSH/rsync fallback or local registry writes for
 unsupported shared commands.
 
-
 ## Administrative warm pool health
 
 `rdev broker status --pool` and MCP `rdev_broker_pool` require a separate
@@ -574,25 +503,10 @@ pool projection contains host names, owner names, commands, paths, secret values
 or output. Global `pool.health` and `audit.health` reject host-scoped/wire request
 envelopes; an exact-host health grant cannot expose global information.
 
-Warm reasons currently include `capacity_lru`, `capacity_reload`, `idle_ttl`,
-`last_client` and `shutdown`. Per-owner connection setup/retry diagnostics are described below; wider failure matrices remain open. A blocked detached bulk close keeps
+Warm reasons include `capacity_lru`, `capacity_reload`, `idle_ttl`,
+`last_client` and `shutdown`. A blocked detached bulk close keeps
 its host slot reserved, with at most one such closer per host; it runs outside
 the daemon signal/reload loop. Shutdown waits within its existing deadline.
-
-`make remote-warm-pool` uses the actual daemon and real SSH against 100 configured
-logical aliases on one Linux endpoint. It checks zero cold SSH sessions, the
-16-host retained cap, LRU, active exec and detached observation preservation,
-canceled cold waiters, warm control, live shrink/rejected reload, TTL and final
-client cleanup. It does not substitute for a 100-machine failure/recovery matrix.
-
-
-`make remote-mux-capacity` validates native OpenSSH behavior with a private master
-at the real server's session limit. It covers an already full master and filling
-the final slot after probe but before installation. It checks retained base/bulk
-sessions, project identity, one approved append and preservation of preexisting
-sessions. Production SSH setup and retry behavior remain unchanged by the warm
-pool implementation.
-
 
 ## Broker route and administrative host boundaries
 
@@ -615,13 +529,6 @@ host to `approval_spec.host`. Administrators with explicit global grants can use
 an empty outer host. Administrative requests cannot include an outer wire frame.
 These checks do not replace the target principal's operation policy or exact
 request/target/policy approval binding.
-
-`make remote-routes` runs the actual daemon and SSH: missing-handler negatives,
-pre-dial malformed rejection, durable grant/revoke and SIGKILL, scoped approval
-issuance, approval preservation, exactly-once appends and host/project-filtered
-mutation outcomes. Rejections use the fixed `route_rejected` audit result without
-recording raw request parameters.
-
 
 ## Owner-scoped protocol lane traffic
 
@@ -649,13 +556,6 @@ restart or idle-history eviction and are not durable billing records. CRLF input
 is normalized to the protocol's LF delimiter. The existing `bulk_payload_bytes`
 field and pacing behavior retain their prior semantics.
 
-`make remote-lane-traffic` compares real CLI/MCP snapshots byte-for-byte with a
-separate transparent SSH recorder that saves only sizes, fixed lanes and protocol
-principal hashes. It covers text/binary reads, streamed exec, a deliberately lost
-read terminal and retry, frontend SIGKILL, automatic cancellation and late frames,
-plus same-client/different-project and default-denied status queries.
-
-
 ## Correlating broker request outcomes
 
 After successful owner binding, broker responses include a server-generated
@@ -680,12 +580,6 @@ so accepted/written/pending counts are live snapshots. Request acknowledgment do
 not synchronously fsync audit: a crash can still lose the asynchronous tail, and
 persistent `audit_incomplete` remains the signal for that uncertainty.
 
-`make remote-audit-routes` verifies distinct references despite reused caller IDs,
-local success and rejection outcomes, real approved append/admission/query
-correlation, project isolation, and payload/token exclusion. It flushes through
-owner audit queries before SIGKILL, then verifies recovery of those flushed traces.
-
-
 ## Connection setup and retry diagnostics
 
 Owner status includes `scheduler.connection`: dial attempts/successes/currently
@@ -704,15 +598,6 @@ before writing an application frame. Bootstrap SSH subprocesses are phases of a
 single dial, not separate attempts. These counters share the scheduler's bounded
 recent-owner history and reset on restart/history eviction; concurrent snapshots
 can observe individual counters at slightly different instants.
-
-`make remote-connection-diagnostics` verifies actual SSH success, injected probe
-failure, missing local agent artifacts, a real remote installation obstruction,
-held-handshake cancellation and recovery while another project keeps its shared
-agent PID. `make remote-lane-traffic` additionally checks one actual read retry,
-three base/bulk setup attempts and zero borrowed dial/retry counts in the other
-project's CLI/MCP status. The complete phase/cause/host failure matrix remains
-separate acceptance work.
-
 
 ## Shared principal-owned credentials
 
@@ -763,16 +648,8 @@ secret names. Startup durably retires bindings whose configured target changed;
 returning to the earlier host definition does not reactivate those bindings.
 The archive rejects new versions at 256 versions / 1 MiB per owner and
 4096 versions / 16 MiB globally; serialized state is capped at 20 MiB. It never
-automatically drops old output protection. Safe archive retirement and extended
-retention/storage-failure/upgrade matrices remain acceptance work, along with
-explicit declarative-secret principal delegation.
-
-`make remote-secrets` verifies actual CLI/MCP registration, owner/host/use-grant
-negatives, SSH environment hashes and redaction, expanded-byte accounting and
-cancel cleanup, version-bound approvals, detached job output after deletion and
-SIGKILL, mutation identity reuse, real storage obstruction, missing-state startup
-denial, target replacement/return retirement and low-sensitivity metadata.
-
+automatically drops old output protection. Automatic archive retirement and declarative delegation are not implemented;
+capacity exhaustion rejects new versions while preserving historical redaction.
 
 ## Import a shared credential from a remote file
 
@@ -804,30 +681,6 @@ A failed or canceled probe leaves the registry unchanged. As with inline set,
 `RDEV_OPERATION_ID`/MCP `operation_id` support crash-outcome queries without
 silently repeating an import.
 
-`make remote-secret-import` exercises actual CLI/MCP calls, split import/read
-permissions, missing/short/binary/64 KiB/oversized sources, path/content
-substitution, repeated raw reads, project isolation, a held real SSH source
-response canceled by its frontend, preservation of the other project's base
-agent, and daemon SIGKILL recovery. Full batch and committed validation are
-recorded in the Phase5 runtime document. Declarative principal delegation, secret
-archive retirement, wider archive capacity/mixed-load cases, broader storage/
-upgrade cases and shared sync/session workflows remain open.
-
-
-`make remote-secret-qos` provisions 512 historical versions through authenticated,
-separately approved RPCs (two projects, 256 versions each), verifies all retired
-values remain redacted before and after SIGKILL, then runs the real 20-process
-SSH bulk/control scenario three times. It keeps the existing 2x control p95 SLO,
-weighted fairness and three-second no-progress assertions, owner SIGKILL checks
-and bulk idle TTL checks. This covers a populated archive with fixed short
-synthetic credentials; the global 4096-version/16 MiB limit, concurrent archive
-mutation under load and mixed exec/job/sync remain separate acceptance cases.
-Redaction caches immutable escaped-value plans across calls and in-flight
-snapshots, and skips full matching only when a conservative compacted-value trie
-proves no registered value could occur. Rotation/deletion invalidate the live
-plan while old snapshots retain their original protection.
-
-
 ## Shared sync previews
 
 `rdev sync HOST push LOCAL REMOTE -dry-run` and the corresponding `pull` command
@@ -852,9 +705,7 @@ files fail instead of blocking the scan. Cancellation terminates the preview's r
 and auxiliary SSH process group, preserving the already running shared master.
 Auxiliary SSH may reuse that master but cannot create a persistent replacement.
 
-`make remote-sync-preview` exercises actual daemon/CLI/MCP/rsync/SSH behavior,
-project/host/delete denial, output redaction and limits, held-server cancellation,
-unchanged trees and SIGKILL recovery. Shared mutating sync currently fails with
+Shared mutating sync currently fails with
 `shared sync execution requires a prepared manifest`; immutable approved plans
 and durable execution are still being implemented. Preview manifests describe
 observed local content and metadata and are not execution approvals. Rsync traffic is not

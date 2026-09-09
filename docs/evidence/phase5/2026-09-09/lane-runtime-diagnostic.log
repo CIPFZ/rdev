@@ -1,6 +1,0 @@
-=== RUN   TestRemoteBrokerLaneTraffic
-    remote_traffic_test.go:156: real binary read/retry failed: exit status 1 remote file contains binary data; use rdev sync to fetch it
---- FAIL: TestRemoteBrokerLaneTraffic (2.93s)
-FAIL
-FAIL	github.com/CIPFZ/rdev/cmd/rdevd	2.936s
-FAIL

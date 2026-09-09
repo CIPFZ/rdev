@@ -1,4 +1,0 @@
-predecessor-31a3500: child exits 0 200 ms after stdout EOF; wrapper exit=241; output_preserved=True
-predecessor-31a3500: child exits 7 200 ms after stdout EOF; wrapper exit=241; output_preserved=True
-corrected: child exits 0 200 ms after stdout EOF; wrapper exit=0; output_preserved=True
-corrected: child exits 7 200 ms after stdout EOF; wrapper exit=7; output_preserved=True

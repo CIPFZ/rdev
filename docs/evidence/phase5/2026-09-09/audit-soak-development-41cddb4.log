@@ -1,7 +1,0 @@
-=== RUN   TestRemoteBrokerAuditSoak
-    remote_audit_soak_test.go:216: audit epoch=1: processes=20 calls=60239 written_before_stop=65959 rotations=2 signal=killed unclean_recoveries_expected=1 max_rss_kb=38468 max_fd=33
-    remote_audit_soak_test.go:216: audit epoch=2: processes=20 calls=60314 written_before_stop=66057 rotations=2 signal=terminated unclean_recoveries_expected=1 max_rss_kb=38468 max_fd=33
-    remote_audit_soak_test.go:224: real audit soak completed: active_seconds=120 elapsed_seconds=121.551 calls=120553 written_before_stops=132016 rotations=4 unclean_recoveries=1 max_rss_kb=38468 max_fd=33; bounded private segments, exact-project queries, zero reported sink drops/errors, explicit persistent possible crash-tail loss
---- PASS: TestRemoteBrokerAuditSoak (122.26s)
-PASS
-ok  	github.com/CIPFZ/rdev/cmd/rdevd	122.264s

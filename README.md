@@ -658,6 +658,10 @@ Apache-2.0，尚未取得转授权同意的原贡献仍是 MIT。两者都允许
 Apache-2.0 的第 4 条要求保留其 NOTICE 和变更声明。
 
 
-共享 `rdevd` 默认要求 principal 凭证。私有签名密钥生成、短期 token 发放、
-SIGHUP 轮换、服务安装与运行时验证见 [rdevd 运维说明](docs/rdevd-operations.md)。
-Phase5 的真实证据和剩余缺口见 [验收记录](docs/phase5-acceptance.md)。
+## 项目文档
+
+- [rdevd 运维说明](docs/rdevd-operations.md)：凭证、权限、服务安装、配置和故障恢复。
+- [Phase5 验收记录](docs/phase5-acceptance.md)：当前状态与剩余任务。
+- [运行验证索引](docs/phase5-runtime-evidence.md)：提交、复现命令和正式测试证据。
+- [架构与分阶段计划](docs/rdev-evolution-security-plan.md)：设计、原始要求及后续阶段。
+- [安全说明](SECURITY.md)与[Phase0–1 独立审查](docs/security/phase0-1-codex-security-review.md)。
