@@ -12,16 +12,16 @@ to `origin/main` after fetch. No original platform target or gate is waived.
 | P8-01 | Strict SSHSIG manifest/trust policy, exact six-binary and metadata binding, linked-dependency notices, online source/binary vulnerability audits, two independent clean builds with six equal digests, full-bundle test signing and eight tamper refusals | Official authorized signer/root and corresponding final release identity; test root is not official |
 | P8-02 | Namespace inode lock, bounded staging, durable journal, real hello/state readiness and verified rollback implementation; subprocess lock/SIGKILL window tests; actual predecessor upgrade retains original supervisors and once-only effects | Full real-agent upgrade/automatic and explicit rollback/fault-window matrix; unit fixture agents do not certify production rollback |
 | P8-03 | Shared administrator verification, signed test-root CLI/broker/agent runtime, channel/pin/rollback policy negatives, low-sensitivity audit, typed rejection and uncertainty semantics | Full historical channel/rollback combinations and official identity deployment remain unverified |
-| P8-04 | Local check/race, actual ten-target fuzz, real IPv4/IPv6/ProxyJump and isolated auth/host-key negatives; hosted runs actually executed | ca4a2c1 policy readiness confirmed an unsupported extended ACL; isolated policy location correction and hosted rerun pending. Full declared DNS/storage/half-close/failure matrix remains incomplete |
-| P8-05 | Actual 100 independent sshd/agent targets and 20 clients: 305.309s bounded mixed workload passed with six fault stages, 220 completed mutations and 160 exact markers; immutable 047 bytes | First actual 24h attempt failed after 10.147s because the fixture requested a job wall limit above 3600s. Corrected long-run workload, continuous 24h and full fairness/Fleet/in-flight/GC/metric coverage pending; no physical-100 topology supplied |
+| P8-04 | Local check/race, actual ten-target fuzz, real IPv4/IPv6/ProxyJump and isolated auth/host-key negatives; complete hosted 0bc1d93 run passed with actual source/run/artifact and two-clean-build identity binding | Full declared DNS/storage/half-close/failure matrix remains incomplete |
+| P8-05 | Actual 100 independent sshd/agent targets and 20 clients: corrected 0bc1d93 mixed short run passed 308.664s, six fault stages, 220 completed mutations and 160 exact markers; immutable 047 bytes | New actual 24h run started, not passed. Full fairness/Fleet/in-flight/GC/metric coverage and physical-100 topology remain pending; failed earlier attempts are preserved separately |
 | P8-06 | Actual Phase7 predecessor clean build: retained-supervisor upgrade, old CLI/MCP→new broker/agent and new CLI/MCP→old broker/agent shared read/policy cases passed | Formal N-1 release identity; full standalone/state rollback/approval/archive/channel matrix |
 
 | Production Gate | Status and evidence boundary |
 |---|---|
-| 1. High/Medium findings closed | Passed for independently reviewed product source 047a0f5; no unresolved confirmed High/Medium and no agent-made risk acceptance. Workflow-only delta independently reviewed. |
+| 1. High/Medium findings closed | Passed for independently reviewed product source 047a0f5; no unresolved confirmed High/Medium and no agent-made risk acceptance. Harness/CI deltas independently accepted at 0bc1d93. |
 | 2. All declared Tier 1 runtime | Pending. Linux amd64/OpenSSH/XFS and actual IPv4/IPv6/ProxyJump exercised. Linux arm64 and Darwin runtime not run; macOS remains explicitly deferred. Cross-builds do not pass these targets. |
 | 3. Official signature, SBOM, provenance, audits, notices | Blocked on authorized official signing identity/root. Local exact-byte audits/notices/SBOM/provenance and isolated test signatures passed. |
-| 4. Real continuous 24h within budgets | Pending; no completed 24h evidence. Starting or supervising a run is not passing it. |
+| 4. Real continuous 24h within budgets | Pending; run 5f68aaab657347af8bf3dc6a69589416 started at 2026-09-09 13:29:12.940 UTC. No completed 24h evidence; starting or supervising is not passing. |
 | 5. Complete upgrade/rollback/crash/network/migration drills | Partial. Actual retained-job upgrade, broker/network/mutation recovery passed; full real rollback and historical state matrix still pending. |
 
 The available environment is Linux amd64 / OpenSSH 9.3p2 / XFS, Go 1.26.8,
@@ -29,8 +29,9 @@ The available environment is Linux amd64 / OpenSSH 9.3p2 / XFS, Go 1.26.8,
 The isolated-instance topology shares one kernel/filesystem/network fault domain;
 physical machine count is unverified. A non-root SSH preflight also passed on
 this Linux system; it does not certify the Ubuntu hosted runner. A GitHub runner
-actually executed workflows, but anonymous API/log access is rate-limited or
-requires authentication. No formal signer, arm64/Darwin runtime or authorized
+actually passed the complete bd98346 and 0bc1d93 workflows. Anonymous API/log access remains
+rate-limited or requires authentication; public run/step metadata is available.
+No formal signer, arm64/Darwin runtime or authorized
 100-machine topology has been supplied. No production release/deployment,
 repository permission/secret change or cloud purchase was performed.
 
@@ -197,7 +198,7 @@ rerun; the earlier 5-second frame-fuzz deadline failure remains recorded.
 
 The 100/20 short run `d2af4afefe934435b92360d7cf1133ea` used harness `a0ed8d5`
 and product bytes `047a0f5`, from 2026-09-09 12:58:14.080 UTC to 13:03:46.274 UTC
-including setup and teardown. It completed 305.309 seconds of measured workload,
+including final idle and teardown. It completed 305.309 seconds of measured workload,
 4,341 pings, 220 durable completed mutations and 160 exact one-byte markers.
 Observer kill, partial/all SSH-path interruption, broker kill, quiesced client
 kill and serving-agent kill recovered. Peak RSS was 4,276,420,608 bytes, FD 2,956,
@@ -206,6 +207,8 @@ predeclared budgets. Five final idle samples showed base transports 16→0 and
 goroutines 73→9; this short window does not prove hourly/24h resource stability.
 Cleanup reported no remaining identity-bound managed process. The 100 targets
 share one Linux kernel/filesystem and are not 100 physical machines.
+These are separate sshd processes/ports and agent install/state/business
+directories under one OS account; they are not containers or VMs.
 
 The initial 100/20 attempt remains failed: its sync was `not_sent`; independent
 reservation accounting strongly supports ingress quota, but the original helper
@@ -226,8 +229,48 @@ job. The predeclared 100/20 daily mutation ceiling becomes 7080: 5040 ordinary,
 1440 logger starts/removals and 600 Fleet targets, below global 8192 and per-owner
 1024 limits. Same-principal credentials renew after 12 hours from actual issue
 time, without changing policy, broker state or namespaces. This corrected
-long-run workload still needs real execution; its parameters do not validate
+long-run workload still needs completed continuous validation; its parameters do not validate
 the failed attempt retroactively.
+
+The corrected frozen harness `0bc1d93` passed a new short run
+`45c8ca75371441c69bf46de16e3aa599`: 308.664 seconds, all 20 clients completing a
+mixed cycle, 4,385 pings, 230 expected fault errors, zero unexpected errors,
+220 completed mutations and 160 exact markers. Six fault stages recovered and
+no managed process remained after cleanup. Peak RSS was 4,290,998,272 bytes,
+FD 2,940, processes 494, disk 453,555,387 bytes and goroutines 142. This revision
+also passed fresh `make check`, full-repository race and all 17 Python regressions.
+The later 24h run uses these same frozen harness and 047 product bytes.
+
+Current long-run state is private and persistent at
+`/tmp/rdev-p8-soak-0bc1d93`, run ID `5f68aaab657347af8bf3dc6a69589416`,
+supervisor PID `667709` (process start ticks `192573725`). Workload began
+2026-09-09 13:29:12.940 UTC; its earliest nominal 24h point is
+2026-09-10 13:29:12.940 UTC, followed by final idle and cleanup checks.
+The JSON evidence records a timestamped snapshot; query the run for current
+health. `run.json` binds immutable inputs; `status.json`, `samples.jsonl`,
+`supervisor.log`, `worker-*.json` and `fleet-results.json` retain progress.
+Do not restart this run across sessions or add failed/short durations to it.
+
+```sh
+python3 scripts/scale-soak.py status --run /tmp/rdev-p8-soak-0bc1d93
+python3 scripts/scale-soak.py cancel --run /tmp/rdev-p8-soak-0bc1d93
+```
+
+Hosted run [34356126067](https://github.com/CIPFZ/rdev/actions/runs/34356126067)
+on `bd98346` passed build/check, real IPv4/IPv6/ProxyJump, race, fuzz, Python,
+online release audit and reproducibility. Earlier failed runs remain recorded;
+the real policy preflight identified an unsupported extended ACL. Moving the
+test policy to an independently private safe `/tmp` directory preserves the
+production ACL refusal and leaves account ACLs unchanged. A real `setfacl`
+regression verifies both refusal and admission. Hosted bytes have their own
+commit stamps; they are separate from the locally signed 047 candidate.
+The final engineering-source run
+[34357317492](https://github.com/CIPFZ/rdev/actions/runs/34357317492) on `0bc1d93`
+also passed every required step, including actual hashing of the six binaries
+and four metadata files, comparison against the manifest and both clean builds,
+and a public source/run/attempt identity notice. Exact runner-reported digests
+are in the JSON evidence. The hosted artifact archive was not downloaded for
+independent local rehash, and the hosted candidate has no official signature.
 
 To execute a new accepted harness against the frozen candidate, use an unused
 private run directory. `--artifact-source` requires a clean checkout, identical

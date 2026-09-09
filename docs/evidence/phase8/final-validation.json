@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "recorded_at": "2026-09-09T13:19:06.761253+00:00",
+  "recorded_at": "2026-09-09T13:39:12.248428+00:00",
   "phase8_status": "in-progress",
   "production_certified": false,
   "handoff_commit": "e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e",
@@ -724,10 +724,94 @@
     }
   ],
   "soak": {
-    "status": "not-running",
+    "run_id": "5f68aaab657347af8bf3dc6a69589416",
+    "status": "running",
+    "source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+    "artifact_source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "supervisor": {
+      "pid": 667709,
+      "start_ticks": "192573725"
+    },
+    "seconds": 86400,
+    "targets": 100,
+    "clients": 20,
+    "artifacts": {
+      "agents/rdev-agent-linux-amd64": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+      "harness.py": "2cf741f7d5e09c2c07c74d6ea37a5acb4152b199574003830b812e3151cc3332",
+      "rdevd": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4"
+    },
+    "mutation_budget": {
+      "admin_owner_mutations_max": 600,
+      "cycles_per_client_max": 72,
+      "fleet_mutations_max": 600,
+      "logger_generations_per_client_max": 36,
+      "logger_mutations_max": 1440,
+      "ordinary_mutations_max": 5040,
+      "ordinary_owner_mutations_max": 324,
+      "total_mutations_max": 7080
+    },
+    "logger_policy": {
+      "duration_deadlines": "earlier of run end and next generation's original worker schedule, minus45s; maintenance shortens this generation without changing mutation cadence",
+      "duration_seconds_max": 2350,
+      "every_mutation_cycles": 2,
+      "gaps": "nominal 50 seconds plus scheduling, maintenance and final-run margin; not a continuous 24h job",
+      "kind": "periodic bounded detached jobs",
+      "nominal_generation_interval_seconds": 2400,
+      "retained_evidence": "unique generation marker, start/removal operation IDs, job-start tombstones and broker mutation ledger; no namespace reset",
+      "wall_timeout_seconds": 3500
+    },
+    "credential_policy": {
+      "public_evidence": "renewal time/count only; tokens remain in private credential files",
+      "refresh_after_issue_seconds": 43200,
+      "same_principals": true,
+      "ttl_seconds": 86400
+    },
+    "predeclared_bounds": {
+      "disk_bytes": 8589934592,
+      "fds": 32768,
+      "goroutines": 4096,
+      "idle_goroutine_growth": 128,
+      "idle_interval_seconds": 3600,
+      "idle_rss_growth_bytes": 268435456,
+      "idle_seconds": 330,
+      "job_log_bytes": 4096,
+      "managed_observed_cpu_cores": 12,
+      "max_sample_gap_seconds": 45,
+      "mutation_cycle_seconds": 1200,
+      "mutation_operations": 8192,
+      "processes": 2500,
+      "request_deadline_seconds": 30,
+      "rss_bytes": 12884901888,
+      "sample_seconds": 5,
+      "warm_hosts": 16
+    },
+    "elapsed_seconds": 594.2221888850909,
+    "path": "/tmp/rdev-p8-soak-0bc1d93",
     "continuous_24h_passed": false,
-    "reason": "first actual long-duration attempt failed; bounded logger correction and new short validation required",
-    "correction": "Accepted bounded periodic logger fixture: max2350s/wall3500s, narrowed to next scheduled generation deadline minus45s after maintenance delays; 7080 retained mutations maximum. New short/24h execution still pending."
+    "snapshot_at": "2026-09-09T13:39:12.248230+00:00",
+    "snapshot_only": true,
+    "started_at": "2026-09-09T13:29:12.939736+00:00",
+    "observed_wall_elapsed_seconds": 599.308507680893,
+    "earliest_nominal_24h_at": "2026-09-10T13:29:12.939736+00:00",
+    "live_queries": {
+      "status": "python3 scripts/scale-soak.py status --run /tmp/rdev-p8-soak-0bc1d93",
+      "cancel": "python3 scripts/scale-soak.py cancel --run /tmp/rdev-p8-soak-0bc1d93",
+      "cleanup": "python3 scripts/scale-soak.py cleanup --run /tmp/rdev-p8-soak-0bc1d93"
+    },
+    "evidence_files": [
+      "run.json",
+      "status.json",
+      "samples.jsonl",
+      "supervisor.log",
+      "worker-*.json",
+      "fleet-results.json"
+    ],
+    "boundary": "Ongoing immutable-byte run is not a passed 24h or full Production Gate; final evaluation must inspect all samples, faults, gaps, budgets and cleanup. Failed attempts remain separate.",
+    "frozen_run_reference": {
+      "path": "/tmp/rdev-p8-soak-0bc1d93/run.json",
+      "sha256": "d38bd2697b489ab6fd4be6268d9abe942fd151e79700bf87d026c34a57c8c611"
+    },
+    "topology_detail": "100 distinct loopback ports and sshd processes, separate agent install/state and business directories; same OS account, kernel and filesystem, no VM/container or physical-machine-count claim."
   },
   "compatibility_matrix": "compatibility-matrix.json",
   "production_gates": [
@@ -805,6 +889,18 @@
     {
       "path": "/tmp/rdev-p8-final-047a0f5/remote-race.log",
       "sha256": "cdbcb4381e68b4cdf4aaf3e1a1412175bb05276c889fae894b6e4616d524ce8e"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-0bc1d93/check.log",
+      "sha256": "f7c6d0a00f24c433e26e5b809b6ab192048606e4d5db13ab008f9e31fc0d8bd1"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-0bc1d93/race.log",
+      "sha256": "04abe3e688b364438c1fbdbfadf6877c7a038132783ee038cb5a654cfea9d28a"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-0bc1d93/python.log",
+      "sha256": "1d928e55557ff1c9a11c2beb85fcf1f9c745102e83ffeda403e319a558a1af39"
     }
   ],
   "independent_review": {
@@ -826,7 +922,7 @@
         "status": "accepted"
       }
     ],
-    "final_harness_document_delta": "Harness accepted by root and independent review_supply after actual ACL regression and 15 scale regressions; final runtime and evidence closure pending.",
+    "final_harness_document_delta": "Accepted at 0bc1d93 by independent review_supply, with product047 and pending certification boundaries; later evidence-only closure reviewed separately.",
     "supply_chain_recheck": {
       "reviewer": "review_supply",
       "scope": "047 exact signed/repro/runtime bytes; no official identity claim",
@@ -862,11 +958,26 @@
         "actual_acl_regression": "passed; real setfacl and production LoadPolicy",
         "workflow_digest_calculation": "passed against actual047 release/repro; local-only"
       },
-      "status": "accepted-engineering-not-production-certified"
+      "status": "accepted-engineering-not-production-certified",
+      "source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+      "evidence": {
+        "path": "/tmp/rdev-review-supply-delta-0bc1d93.json",
+        "sha256": "42318c393dbe0cc87b31b007c09ee3afdb0e627dd1d5b1b7ab712a3a1e3f6644"
+      }
+    },
+    "short_runtime_acceptance": {
+      "reviewer": "review_supply",
+      "source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+      "artifact_source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+      "status": "accepted-workload-scope",
+      "evidence": {
+        "path": "/tmp/rdev-review-final-runtime-0bc1d93.json",
+        "sha256": "db7549d7026e7c158695d3cecb1a1167fd1c0523787e7f8bd0052769de725a76"
+      }
     }
   },
   "hosted_ci": {
-    "status": "failed-latest-observed-run",
+    "status": "passed",
     "runs": [
       {
         "run_id": 34350597391,
@@ -1418,9 +1529,635 @@
             "completed-at": "2026-09-09T13:13:07Z"
           }
         ]
+      },
+      {
+        "run_id": 34356126067,
+        "source_commit": "bd983460e21028baf5453341a496ebdeca53b414",
+        "url": "https://github.com/CIPFZ/rdev/actions/runs/34356126067",
+        "checked_at": "2026-09-09T13:28:29.389249+00:00",
+        "status": "passed",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:17:21Z",
+            "completed-at": "2026-09-09T13:17:23Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:17:23Z",
+            "completed-at": "2026-09-09T13:17:24Z"
+          },
+          {
+            "name": "Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:17:24Z",
+            "completed-at": "2026-09-09T13:17:26Z"
+          },
+          {
+            "name": "Install local SSH fixture dependencies",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:17:26Z",
+            "completed-at": "2026-09-09T13:17:38Z"
+          },
+          {
+            "name": "Bind runner and tool identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:17:38Z",
+            "completed-at": "2026-09-09T13:17:38Z"
+          },
+          {
+            "name": "Build, vet, test, and check embedded agents",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:17:38Z",
+            "completed-at": "2026-09-09T13:19:21Z"
+          },
+          {
+            "name": "Real IPv4, IPv6 and ProxyJump runtime",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:19:21Z",
+            "completed-at": "2026-09-09T13:21:06Z"
+          },
+          {
+            "name": "Summarize SSH failures without test payloads",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:21:06Z",
+            "completed-at": "2026-09-09T13:21:06Z"
+          },
+          {
+            "name": "Race instrumentation",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:21:06Z",
+            "completed-at": "2026-09-09T13:23:31Z"
+          },
+          {
+            "name": "Coverage-guided fuzz smoke",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:23:31Z",
+            "completed-at": "2026-09-09T13:26:00Z"
+          },
+          {
+            "name": "Harness supervision regressions",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:26:00Z",
+            "completed-at": "2026-09-09T13:26:07Z"
+          },
+          {
+            "name": "Online release audit and artifact binding",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:26:07Z",
+            "completed-at": "2026-09-09T13:26:34Z"
+          },
+          {
+            "name": "Independent clean build reproducibility",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:26:34Z",
+            "completed-at": "2026-09-09T13:27:50Z"
+          },
+          {
+            "name": "Preserve evidence",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:27:50Z",
+            "completed-at": "2026-09-09T13:27:53Z"
+          },
+          {
+            "name": "Post Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:27:53Z",
+            "completed-at": "2026-09-09T13:27:59Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:27:59Z",
+            "completed-at": "2026-09-09T13:27:59Z"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:27:59Z",
+            "completed-at": "2026-09-09T13:27:59Z"
+          }
+        ]
+      },
+      {
+        "run_id": 34357317492,
+        "source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+        "url": "https://github.com/CIPFZ/rdev/actions/runs/34357317492",
+        "checked_at": "2026-09-09T13:38:29.184834+00:00",
+        "status": "passed",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:28:46Z",
+            "completed-at": "2026-09-09T13:28:48Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:28:48Z",
+            "completed-at": "2026-09-09T13:28:49Z"
+          },
+          {
+            "name": "Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:28:49Z",
+            "completed-at": "2026-09-09T13:29:06Z"
+          },
+          {
+            "name": "Install local SSH fixture dependencies",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:29:06Z",
+            "completed-at": "2026-09-09T13:29:19Z"
+          },
+          {
+            "name": "Bind runner and tool identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:29:19Z",
+            "completed-at": "2026-09-09T13:29:20Z"
+          },
+          {
+            "name": "Build, vet, test, and check embedded agents",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:29:20Z",
+            "completed-at": "2026-09-09T13:30:01Z"
+          },
+          {
+            "name": "Real IPv4, IPv6 and ProxyJump runtime",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:30:01Z",
+            "completed-at": "2026-09-09T13:31:48Z"
+          },
+          {
+            "name": "Summarize SSH failures without test payloads",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:31:48Z",
+            "completed-at": "2026-09-09T13:31:48Z"
+          },
+          {
+            "name": "Race instrumentation",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:31:48Z",
+            "completed-at": "2026-09-09T13:33:42Z"
+          },
+          {
+            "name": "Coverage-guided fuzz smoke",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:33:42Z",
+            "completed-at": "2026-09-09T13:35:31Z"
+          },
+          {
+            "name": "Harness supervision regressions",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:35:31Z",
+            "completed-at": "2026-09-09T13:35:38Z"
+          },
+          {
+            "name": "Online release audit and artifact binding",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:35:38Z",
+            "completed-at": "2026-09-09T13:35:52Z"
+          },
+          {
+            "name": "Independent clean build reproducibility",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:35:52Z",
+            "completed-at": "2026-09-09T13:37:18Z"
+          },
+          {
+            "name": "Record exact hosted artifact identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:37:18Z",
+            "completed-at": "2026-09-09T13:37:18Z"
+          },
+          {
+            "name": "Preserve evidence",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:37:18Z",
+            "completed-at": "2026-09-09T13:37:22Z"
+          },
+          {
+            "name": "Post Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:37:22Z",
+            "completed-at": "2026-09-09T13:37:22Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:37:22Z",
+            "completed-at": "2026-09-09T13:37:22Z"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:37:22Z",
+            "completed-at": "2026-09-09T13:37:22Z"
+          }
+        ]
       }
     ],
-    "latest_observed_failure": "ca4a2c1 real LoadPolicy preflight rejected unsupported extended ACL before business SSH; test policy location correction pending. Product trust validation remains unchanged.",
-    "artifact_binding": "047 local signed/repro bytes are not hosted artifacts. Failed runs skipped hosted release audit/repro. Public run/step metadata observed; artifact payload retrieval not available without authentication."
+    "latest_observed_failure": "Historical ca4a2c1 unsupported extended ACL refusal; bd98346 fixed the isolated policy location. Both bd98346 and 0bc1d93 complete hosted runs passed.",
+    "artifact_binding": "Reviewed 0bc1d93 workflow actually hashed six binaries and four metadata files, matched manifest and both clean builds, and emitted exact source/run/attempt binding in a public notice. Artifact archives were not downloaded locally; this is observed runner evidence, not independent local rehash of hosted files. Local 047 signed bytes remain separate.",
+    "accepted_source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+    "accepted_run_id": 34357317492,
+    "artifact_identity": {
+      "artifacts": {
+        "rdev": "bca3fc421d58e24a94f107030b97fc7fda04869983ecfa1148b82bb9c227709a",
+        "rdev-agent-darwin-amd64": "75f36dbdd21e635058bc0cdff25294c098b94eda3c3cf83a224e4274b9bb38fa",
+        "rdev-agent-darwin-arm64": "5a1260602ce2c89e0dc09bdb15f8dd651615a301a50fe93e0ded70cfd4d290b1",
+        "rdev-agent-linux-amd64": "0e2c74bdbd53a7633cbaf6fc3c21ecace61bd40fda4366bf8ee4e6692f319096",
+        "rdev-agent-linux-arm64": "1a205ba17898d1dc24b109a0072a8aacd028be32260a70c8a6e19bbbf452b0c8",
+        "rdevd": "a548b2ba5765da76b53c947c8ee6fbe677be20054baad5810c0b2dde8b29d03e"
+      },
+      "metadata": {
+        "THIRD_PARTY_NOTICES.txt": "2621014ca426b9607f54e1f710bb0639e759190b1a6a4e2010b57fe6991761cf",
+        "manifest.json": "a17a6343c02dde17d9cabb86b2bbc82720bb680dfb2f53b9573b329ccf71b4ff",
+        "provenance.intoto.json": "35b57cfe5a82ec98bc526fac061fe6ac3266475681e3f79dc0c1d0d58d96f346",
+        "sbom.cdx.json": "806d416d2b2e4be9133f0198099b5906d1f3fbc1a6867cf72bdc3bf5260a2400"
+      },
+      "official_signature": false,
+      "reproducible_release_bytes": true,
+      "run_attempt": 1,
+      "run_id": 34357317492,
+      "source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1"
+    },
+    "evidence": [
+      {
+        "path": "/tmp/rdev-p8-ci-0bc1d93/ci-job.html",
+        "sha256": "b17615beee3d82c91e8a7576ecfadc606f8767553fa84e82643e55949762cedc"
+      },
+      {
+        "path": "/tmp/rdev-p8-ci-0bc1d93/hosted-ci.json",
+        "sha256": "771e1f48f4dd9a66e2863ef15da23e87c0a3691d214fb6c4e886a0ce9cce12e5"
+      },
+      {
+        "path": "/tmp/rdev-p8-ci-0bc1d93/artifact-identity.json",
+        "sha256": "e4b293af89c83afb4e00c7d3e7570f0073ff051a6c37599c550d9a2f5f907780"
+      }
+    ]
+  },
+  "latest_harness_source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+  "latest_local_validation": {
+    "source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+    "product_artifact_source": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "steps": [
+      {
+        "name": "check",
+        "command": [
+          "make",
+          "GO=/data/tmp/rdev-toolchain/go/bin/go",
+          "check"
+        ],
+        "started_at": "2026-09-09T13:19:17.565220+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T13:19:57.940660+00:00"
+      },
+      {
+        "name": "race",
+        "command": [
+          "/data/tmp/rdev-toolchain/go/bin/go",
+          "test",
+          "-race",
+          "./...",
+          "-count=1",
+          "-timeout=20m"
+        ],
+        "started_at": "2026-09-09T13:19:57.940921+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T13:21:51.904435+00:00"
+      },
+      {
+        "name": "python",
+        "command": [
+          "python3",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts",
+          "-p",
+          "test_*.py"
+        ],
+        "started_at": "2026-09-09T13:21:51.904813+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T13:21:58.334979+00:00"
+      }
+    ]
+  },
+  "source_binding_check": {
+    "from_product_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "to_harness_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+    "production_build_input_diff": [],
+    "excluded_test_only_differences": [
+      "cmd/rdevd/remote_policy_test.go",
+      "cmd/rdevd/release_policy_fixture_test.go"
+    ]
+  },
+  "scale_short_recheck": {
+    "run_id": "45c8ca75371441c69bf46de16e3aa599",
+    "source_commit": "0bc1d935ebb72ef369928de03548d0c657bcc3f1",
+    "artifact_source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "status": "workload-scope-passed",
+    "targets": 100,
+    "targets_visited": 100,
+    "clients": 20,
+    "shared_host_instances": 1,
+    "physical_machine_count": "unverified",
+    "fault_domain": "one shared Linux kernel and filesystem",
+    "elapsed_seconds": 308.6641718801111,
+    "predeclared_bounds": {
+      "disk_bytes": 8589934592,
+      "fds": 32768,
+      "goroutines": 4096,
+      "idle_goroutine_growth": 128,
+      "idle_interval_seconds": 3600,
+      "idle_rss_growth_bytes": 268435456,
+      "idle_seconds": 330,
+      "job_log_bytes": 4096,
+      "managed_observed_cpu_cores": 12,
+      "max_sample_gap_seconds": 45,
+      "mutation_cycle_seconds": 1200,
+      "mutation_operations": 8192,
+      "processes": 2500,
+      "request_deadline_seconds": 30,
+      "rss_bytes": 12884901888,
+      "sample_seconds": 5,
+      "warm_hosts": 16
+    },
+    "mutation_budget": {
+      "admin_owner_mutations_max": 100,
+      "cycles_per_client_max": 1,
+      "fleet_mutations_max": 100,
+      "logger_generations_per_client_max": 1,
+      "logger_mutations_max": 40,
+      "ordinary_mutations_max": 80,
+      "ordinary_owner_mutations_max": 6,
+      "total_mutations_max": 220
+    },
+    "logger_policy": {
+      "duration_deadlines": "earlier of run end and next generation's original worker schedule, minus45s; maintenance shortens this generation without changing mutation cadence",
+      "duration_seconds_max": 2350,
+      "every_mutation_cycles": 2,
+      "gaps": "nominal 50 seconds plus scheduling, maintenance and final-run margin; not a continuous 24h job",
+      "kind": "periodic bounded detached jobs",
+      "nominal_generation_interval_seconds": 2400,
+      "retained_evidence": "unique generation marker, start/removal operation IDs, job-start tombstones and broker mutation ledger; no namespace reset",
+      "wall_timeout_seconds": 3500
+    },
+    "credential_policy": {
+      "public_evidence": "renewal time/count only; tokens remain in private credential files",
+      "refresh_after_issue_seconds": 43200,
+      "same_principals": true,
+      "ttl_seconds": 86400
+    },
+    "artifacts": {
+      "agents/rdev-agent-linux-amd64": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+      "harness.py": "2cf741f7d5e09c2c07c74d6ea37a5acb4152b199574003830b812e3151cc3332",
+      "rdevd": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4"
+    },
+    "completed_fleet_targets": 100,
+    "completed_ordinary_mutations": 120,
+    "marker_proofs": 160,
+    "final_storage_records": {
+      "broker_ambiguous_records": 0,
+      "broker_mutation_records": 220,
+      "job_start_tombstones": 140,
+      "max_owner_mutation_records": 100,
+      "retained_job_directories": 100,
+      "sync_outcomes": 20
+    },
+    "remaining_managed_processes": [],
+    "missing_coverage": [
+      "saturated owner/lane fairness and quota SLO",
+      "Fleet threshold/cancel/subset-retry fault stages",
+      "in-flight mutation crash/ambiguity fault stages",
+      "automatic retention GC removal proof",
+      "CPU final ticks for processes exiting between samples",
+      "dial/reconnect/backoff/queue distribution acceptance thresholds",
+      "metric collectors beyond fixed observe.Registry counters",
+      "production topology and cross-machine network",
+      "strict control latency SLO",
+      "all Production Gates",
+      "330-second periodic idle resource regression windows were not run"
+    ],
+    "workload_admission": {
+      "basis": "28 MiB per sync plus 8 MiB per wait compete for unchanged global64MiB/owner32MiB ingress; control and ordinary work retain headroom",
+      "large_response_concurrency": 1,
+      "saturated_sync_throughput_certification": false,
+      "scope": "retained sync prepare+execute and job_wait; all 20 clients and daily mutation count retained",
+      "max_worker_cumulative_wait_seconds": 3.8394172759726644
+    },
+    "started_at": "2026-09-09T13:22:59.741629+00:00",
+    "ended_at": "2026-09-09T13:28:35.293480+00:00",
+    "elapsed_boundary": "measured workload elapsed; ended_at additionally includes final idle and teardown",
+    "sample_count": 53,
+    "sample_interval_seconds": 5,
+    "max_sample_gap_seconds": 29.03124737739563,
+    "peaks": {
+      "rss_bytes": 4290998272,
+      "fds": 2940,
+      "processes": 494,
+      "disk_bytes": 453555387,
+      "goroutines": 142,
+      "managed_observed_cpu_cores": 0.8560855791938261
+    },
+    "clients_summary": {
+      "independent_processes": 20,
+      "ping_calls": 4385,
+      "unexpected_errors": 0,
+      "completed_cycles": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "expected_fault_errors": 230
+    },
+    "ping_latency": {
+      "classification": "warm means same agent PID as this worker previous visit to the target; includes broker connection setup when needed",
+      "bucket_upper_ms": [
+        1,
+        2,
+        5,
+        10,
+        20,
+        50,
+        100,
+        200,
+        500,
+        1000,
+        2000,
+        5000,
+        10000,
+        30000,
+        null
+      ],
+      "histograms": {
+        "cold_ms": [
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          103,
+          728,
+          1490,
+          1647,
+          292,
+          99,
+          1,
+          13,
+          0
+        ],
+        "warm_ms": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          2,
+          8,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "quantile_upper_bounds_ms": {
+        "cold_ms": {
+          "p95": 2000,
+          "p99": 5000
+        },
+        "warm_ms": {
+          "p95": 500,
+          "p99": 500
+        }
+      },
+      "strict_scale_slo_certified": false
+    },
+    "fault_events": [
+      {
+        "phase": "observer-process-SIGKILL",
+        "result": "independent wait deadline and detached job preserved",
+        "time_unix": 1788960249.7666025
+      },
+      {
+        "phase": "partial-sshd-path-stop",
+        "result": "recovered",
+        "started_unix": 1788960267.8836477,
+        "ended_unix": 1788960295.9524276
+      },
+      {
+        "phase": "broker-SIGKILL-after-completed-mutations",
+        "result": "recovered",
+        "started_unix": 1788960332.2358658,
+        "ended_unix": 1788960343.5659347
+      },
+      {
+        "phase": "all-sshd-path-stop",
+        "result": "recovered",
+        "started_unix": 1788960364.7163174,
+        "ended_unix": 1788960394.876535
+      },
+      {
+        "phase": "client-SIGKILL-quiesced-cycle",
+        "result": "restored counters, principal and next cycle without replay",
+        "time_unix": 1788960395.9882214
+      },
+      {
+        "phase": "agent-SIGKILL-serve-only",
+        "result": "reconnected",
+        "time_unix": 1788960396.192547
+      }
+    ],
+    "idle_samples": [
+      {
+        "time_unix": 1788960493.5653882,
+        "rss_bytes": 3540471808,
+        "fds": 2649,
+        "processes": 434,
+        "base_transports": 0,
+        "goroutines": 88
+      },
+      {
+        "time_unix": 1788960498.720946,
+        "rss_bytes": 3317981184,
+        "fds": 2313,
+        "processes": 402,
+        "base_transports": 0,
+        "goroutines": 9
+      },
+      {
+        "time_unix": 1788960503.8702593,
+        "rss_bytes": 3315888128,
+        "fds": 2313,
+        "processes": 402,
+        "base_transports": 0,
+        "goroutines": 9
+      },
+      {
+        "time_unix": 1788960509.0202231,
+        "rss_bytes": 3317350400,
+        "fds": 2313,
+        "processes": 402,
+        "base_transports": 0,
+        "goroutines": 9
+      },
+      {
+        "time_unix": 1788960514.1706655,
+        "rss_bytes": 3317374976,
+        "fds": 2313,
+        "processes": 402,
+        "base_transports": 0,
+        "goroutines": 9
+      }
+    ],
+    "evidence": [
+      {
+        "path": "/tmp/rdev-p8-scale-0bc1d93/run.json",
+        "sha256": "a5f753c82c024181e2ebbb283772c1a4631529f03e9730d149a551cbe349e90c"
+      },
+      {
+        "path": "/tmp/rdev-p8-scale-0bc1d93/status.json",
+        "sha256": "92543a1ff7d32f2b474c9e0562d9cd29c087238b312ae9682e7af60bc5268d15"
+      },
+      {
+        "path": "/tmp/rdev-p8-scale-0bc1d93/samples.jsonl",
+        "sha256": "53f0861f158ac9df18af02fc5b4d310bcf6726fbb1fa9006292f0558b464348d"
+      },
+      {
+        "path": "/tmp/rdev-p8-scale-0bc1d93/fleet-results.json",
+        "sha256": "78215de2e5a34ddb01f6aa30be5bbd647e6270cf734cf5de6ce4e7ac642673f0"
+      }
+    ],
+    "topology_detail": "100 distinct loopback ports and sshd processes, separate agent install/state and business directories; same OS account, kernel and filesystem, no VM/container or physical-machine-count claim."
   }
 }

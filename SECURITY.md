@@ -264,8 +264,10 @@ checksums and artifact-bound manifest/SBOM/provenance metadata. `verify-release`
 rechecks the local output. Local unsigned provenance does not authenticate a
 publisher; configured or skipped CI is not an executed gate. Phase8 adds SSHSIG manifests, administrator channel/root/pin policy, linked
 dependency notices and namespace-locked health/rollback transactions. Official
-signer identity, actual hosted CI, complete platform/upgrade matrices and 24h
-production certification remain pending; see [Phase8 acceptance](docs/phase8-acceptance.md). Go binaries link
+signer identity, complete platform/upgrade matrices and 24h production
+certification remain pending. Hosted validation has actually passed for the
+recorded source; exact run/artifact identities and later-run status are in
+[Phase8 acceptance](docs/phase8-acceptance.md). Go binaries link
 dependency code, including the MCP SDK, regardless of whether it is vendored.
 
 Release trust is read only from the administrator-owned private policy, including
