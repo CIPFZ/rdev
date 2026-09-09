@@ -35,6 +35,9 @@ func TestRemoteBrokerWarmPool(t *testing.T) {
 			}
 		}
 	}
+	if err := policy.Grant(a.Key(), "job.events"); err != nil {
+		t.Fatal(err)
+	}
 	for _, op := range []string{"pool.health", "audit.health"} {
 		if err := policy.GrantHost(b.Key(), "runtime-host", op, op); err != nil {
 			t.Fatal(err)
@@ -200,8 +203,25 @@ func TestRemoteBrokerWarmPool(t *testing.T) {
 	if health().Evictions["idle_ttl"].Count == 0 {
 		t.Fatal("TTL reason not observable")
 	}
-	// Detached observation must keep the host reserved after its final local
-	// subscriber disconnects, and release it when the remote job terminates.
+	// A detached logical observer survives its last subscriber and retains its
+	// resources, while each bounded remote wait yields the active/warm host slot.
+	// Exercise both independent limits at one: a continued observation must not
+	// permanently prevent another owner from using a cold host.
+	config.MaxHosts = 1
+	logPath := filepath.Join(d.dir, "daemon.log")
+	beforeReload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloads := strings.Count(string(beforeReload), "configuration reloaded")
+	saveConfig()
+	if err := d.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	awaitRuntime(t, 5*time.Second, "active-host limit reloaded for observation handoff", func() bool {
+		data, err := os.ReadFile(logPath)
+		return err == nil && strings.Count(string(data), "configuration reloaded") > reloads
+	})
 	jobCall := func(wire *proto.Request) broker.Response {
 		req := broker.Request{Owner: a, Host: "runtime-host", Operation: wire.Op, Wire: wire}
 		if broker.RequiresApproval(req) {
@@ -214,6 +234,12 @@ func TestRemoteBrokerWarmPool(t *testing.T) {
 		t.Fatal("detached job start failed")
 	}
 	jobID := startedJob.Wire.Job.Info.ID
+	jobPID := startedJob.Wire.Job.Info.PID
+	observationBasePID := ping(wa, a, "runtime-host")
+	logicalObservation := func(observers int) bool {
+		r := policyRuntimeRequest(t, wa, broker.Request{Owner: a, Operation: "status"})
+		return r.OK && r.SharedWaits != nil && r.SharedWaits.Observers == observers && r.SharedWaits.Subscribers == 0 && r.Ingress != nil && (r.Ingress.ObservationBytes > 0) == (observers > 0)
+	}
 	waitWire := connect(a)
 	if err := waitWire.enc.Encode(broker.Request{Owner: a, Host: "runtime-host", Operation: proto.OpJobWait, Wire: &proto.Request{Op: proto.OpJobWait, Job: &proto.JobParams{ID: jobID}}}); err != nil {
 		t.Fatal(err)
@@ -221,35 +247,59 @@ func TestRemoteBrokerWarmPool(t *testing.T) {
 	awaitRuntime(t, 5*time.Second, "shared remote observation lease", func() bool { return health().ActiveLeases == 1 })
 	waitWire.Close()
 	awaitRuntime(t, 5*time.Second, "zero-subscriber observation retained", func() bool {
-		r := policyRuntimeRequest(t, wa, broker.Request{Owner: a, Operation: "status"})
-		return r.SharedWaits != nil && r.SharedWaits.Observers == 1 && r.SharedWaits.Subscribers == 0 && health().ActiveLeases == 1
+		return logicalObservation(1)
 	})
 	deniedWait := policyRuntimeRequest(t, wb, broker.Request{Owner: b, Host: "runtime-host", Operation: proto.OpJobWait, Wire: &proto.Request{Op: proto.OpJobWait, Job: &proto.JobParams{ID: jobID}}})
 	if deniedWait.OK {
 		t.Fatal("pool observer leaked job to other project")
 	}
 	coldWait := connect(b)
-	_ = coldWait.SetDeadline(time.Now().Add(time.Minute))
+	coldStarted := time.Now()
+	_ = coldWait.SetDeadline(coldStarted.Add(10 * time.Second))
 	if err := coldWait.enc.Encode(coldReq); err != nil {
 		t.Fatal(err)
 	}
-	awaitRuntime(t, 5*time.Second, "cold queued behind detached observer", func() bool { return health().Queued == 1 })
-	time.Sleep(6 * time.Second)
-	if h := health(); h.ActiveLeases != 1 || h.ReservedHosts != 1 || h.Queued != 1 {
-		t.Fatal("TTL/capacity evicted a detached observation")
+	if err := coldWait.dec.Decode(&response); err != nil || !response.OK || response.Wire == nil || !response.Wire.OK || response.Wire.Ping == nil {
+		t.Fatal("cold request did not progress between bounded observations", err)
+	}
+	coldElapsed := time.Since(coldStarted)
+	if !logicalObservation(1) {
+		t.Fatal("cold host admission discarded the detached observer or its resources")
+	}
+	if h := health(); h.ActiveHosts > 1 || h.ReservedHosts > 1 {
+		t.Fatal("observation handoff exceeded active/warm host limits", h)
+	}
+	reconnectedBasePID := ping(wa, a, "runtime-host")
+	if reconnectedBasePID == observationBasePID {
+		t.Fatal("cold capacity handoff did not replace the old base connection")
+	}
+	stillRunning := jobCall(&proto.Request{Op: proto.OpJobStatus, Job: &proto.JobParams{ID: jobID}})
+	if !stillRunning.OK || stillRunning.Wire == nil || !stillRunning.Wire.OK || stillRunning.Wire.Job == nil || stillRunning.Wire.Job.Info == nil || stillRunning.Wire.Job.Info.PID != jobPID || stillRunning.Wire.Job.Info.State != proto.JobRunning {
+		t.Fatal("connection handoff replaced or stopped the detached supervisor")
 	}
 	stopped := jobCall(&proto.Request{Op: proto.OpJobStop, Job: &proto.JobParams{ID: jobID, Signal: "TERM"}})
 	if !stopped.OK || stopped.Wire == nil || !stopped.Wire.OK {
 		t.Fatal("warm job stop blocked by cold waiter")
 	}
-	if err := coldWait.dec.Decode(&response); err != nil || !response.OK {
-		t.Fatal("cold request did not progress after observer completed")
+	awaitRuntime(t, 5*time.Second, "reconnected terminal observer releases its resources", func() bool { return logicalObservation(0) })
+	history := policyRuntimeRequest(t, wa, broker.Request{Owner: a, Host: "runtime-host", Operation: "job.events", JobEvents: &broker.JobEventQuery{ID: jobID}})
+	if !history.OK || history.History == nil {
+		t.Fatal("reconnected job history missing", history.Error)
+	}
+	terminalEvents := 0
+	for _, event := range history.History.Events {
+		if event.State == proto.JobExited && event.PID == jobPID {
+			terminalEvents++
+		}
+	}
+	if terminalEvents != 1 {
+		t.Fatal("reconnected observation lost or duplicated the terminal event", terminalEvents)
 	}
 	removed := jobCall(&proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: jobID}})
 	if !removed.OK || removed.Wire == nil || !removed.Wire.OK {
 		t.Fatal("owned job cleanup failed after eviction")
 	}
-	t.Log("zero-subscriber shared wait retained its warm host through TTL/capacity pressure; another project was denied job observation; approved warm stop released observation and queued cold host progressed")
+	t.Logf("zero-subscriber logical observation retained owner/resources with max_hosts=max_warm_hosts=1; cold host progressed in %s; base PID %d -> %d; original supervisor PID %d survived; another project was denied; reconnected stop persisted one terminal event and released observation resources", coldElapsed, observationBasePID, reconnectedBasePID, jobPID)
 	// A rejected shrink retains the previous capacity.
 	config.MaxWarmHosts = -1
 	saveConfig()
