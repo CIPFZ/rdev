@@ -61,6 +61,12 @@ func TestRemotePhase6FrontendContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.start()
+	// Keep business destinations outside the agent's changing state tree. A
+	// single-file rename binds its parent snapshot; using namespace itself would
+	// correctly fail when sync staging/outcome records change that same tree.
+	if out, err := ssh("import os,sys\nos.makedirs(os.path.expanduser('~/'+sys.argv[1]+'/literal-targets'),mode=0o700)\n"); err != nil {
+		t.Fatalf("literal sync fixture: %v %s", err, out)
+	}
 	token := d.token(owner, "10m")
 	adminWire := d.dial(runtimeApprovalAdmin(), d.token(runtimeApprovalAdmin(), "10m"), true)
 	for _, mode := range []struct {
@@ -256,7 +262,7 @@ func TestRemotePhase6FrontendContracts(t *testing.T) {
 				}
 				// Local operand spelling is preserved. The remote path deliberately
 				// retains the existing safe-ASCII boundary used by rsync over SSH.
-				remoteSuffix := fmt.Sprintf("/%s-literal-%d", mode.name, index)
+				remoteSuffix := fmt.Sprintf("/literal-targets/%s-literal-%d", mode.name, index)
 				remote := "~/" + namespace + remoteSuffix
 				local := localName
 				if mode.shared && mode.mcp {
