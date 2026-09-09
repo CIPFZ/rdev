@@ -122,6 +122,7 @@ type Scheduler struct {
 	lanes      map[Lane]schedulerCount
 	owners     map[string]schedulerCount
 	hosts      map[string]schedulerCount
+	hostWait   []string
 	ownerLanes map[string]map[Lane]WorkCount
 	total      schedulerCount
 	running    map[*scheduledItem]bool
@@ -279,6 +280,14 @@ func (s *Scheduler) changeLocked(item *scheduledItem, active, queued int) {
 	s.lanes[item.lane] = adjustCount(s.lanes[item.lane], item, active, queued)
 	s.owners[item.owner] = adjustCount(s.owners[item.owner], item, active, queued)
 	s.hosts[item.host] = adjustCount(s.hosts[item.host], item, active, queued)
+	if s.hosts[item.host].Queued == 0 {
+		for i, host := range s.hostWait {
+			if host == item.host {
+				s.hostWait = append(s.hostWait[:i], s.hostWait[i+1:]...)
+				break
+			}
+		}
+	}
 	if s.ownerLanes[item.owner] == nil {
 		s.ownerLanes[item.owner] = make(map[Lane]WorkCount)
 	}
@@ -308,7 +317,24 @@ func (s *Scheduler) eligibleLocked(item *scheduledItem) bool {
 				activeHosts++
 			}
 		}
-		if activeHosts >= s.maxHosts {
+		if activeHosts >= s.maxHosts || len(s.hostWait) > 0 {
+			waiting := false
+			for _, h := range s.hostWait {
+				waiting = waiting || h == item.host
+			}
+			if !waiting {
+				s.hostWait = append(s.hostWait, item.host)
+			}
+		}
+		if activeHosts >= s.maxHosts || len(s.hostWait) > 0 && s.hostWait[0] != item.host {
+			return false
+		}
+	} else if len(s.hostWait) > 0 {
+		// A host waiting for the active-host limit needs an existing host to
+		// quiesce. This is independent of the warm transport pool capacity.
+		// Keep one control call available for in-flight work (e.g. job_stop),
+		// but do not allow overlapping pings to retain the host indefinitely.
+		if item.lane != LaneControl || host.Active > host.nonControlActive {
 			return false
 		}
 	}
@@ -326,12 +352,24 @@ func (s *Scheduler) eligibleLocked(item *scheduledItem) bool {
 		}
 		item.releaseHost = release
 	}
+	if host.Active == 0 && len(s.hostWait) > 0 && s.hostWait[0] == item.host {
+		s.hostWait = s.hostWait[1:]
+	}
 	return true
 }
+
 func (s *Scheduler) scheduleLocked() {
 	if s.closed {
 		return
 	}
+	// Cancellation/removal must not leave a host at the front of admission.
+	waiting := s.hostWait[:0]
+	for _, host := range s.hostWait {
+		if s.hosts[host].Queued > 0 {
+			waiting = append(waiting, host)
+		}
+	}
+	s.hostWait = waiting
 	for _, lane := range schedulerLanes {
 		q := s.queues[lane]
 		q.RemoveIf(func(v any) bool {

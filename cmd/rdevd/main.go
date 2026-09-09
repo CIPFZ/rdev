@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -526,9 +525,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			var mutation *broker.MutationIntent
 			var err error
 			if req.Wire.Op == proto.OpJobWait && req.Wire.Job != nil {
-				jobKey, _ := json.Marshal([]any{req.Owner, req.Host, req.Wire.Job, req.Wire.DeadlineUnixMilli})
-				jobDigest := sha256.Sum256(jobKey)
-				wireResp, err = service.DispatchSharedIngress(requestCtx, req.Owner.Key(), hex.EncodeToString(jobDigest[:]), item.bytes, dispatch)
+				wireResp, err = service.DispatchJobWait(requestCtx, req.Owner, req.Host, req.Wire)
 			} else if broker.IsWireMutation(req) {
 				wireResp, mutation, err = service.DispatchMutation(requestCtx, req, approvedPlan)
 			} else {

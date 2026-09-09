@@ -417,3 +417,93 @@ func privateTestSocket(t *testing.T) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "broker.sock")
 }
+
+func TestServeConnSharesJobWaitAcrossSubscriberParameters(t *testing.T) {
+	service := broker.NewService(nil)
+	defer service.Close(context.Background())
+	if err := service.Client().Hosts.Add(transport.Host{Name: "h", Addr: "test.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	owner := broker.Owner{ClientID: "wait-variants", ProjectID: "p"}
+	if err := service.Grant(owner, proto.OpJobWait); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Jobs.Put(broker.JobRef{ID: "one-job", Host: "h", Owner: owner.Key()}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	waits := 0
+	released := make(chan struct{})
+	service.SetDispatcher(func(ctx context.Context, _ string, req *proto.Request) (*proto.Response, error) {
+		result := &proto.JobResult{Info: &proto.JobInfo{ID: "one-job", State: proto.JobRunning}}
+		if req.Op == proto.OpJobWait {
+			mu.Lock()
+			waits++
+			mu.Unlock()
+			select {
+			case <-released:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			result.Info.State = proto.JobExited
+			result.Logs = "zero\none\ntwo"
+			result.LogsTruncation, _ = proto.NewTruncation(12, 12)
+		}
+		return &proto.Response{OK: true, OperationID: "op_one_shared_wait", Terminal: true, Execution: proto.StateCompleted, Job: result}, nil
+	})
+	clients := make([]net.Conn, 0, 2)
+	decoders := make([]*json.Decoder, 0, 2)
+	for _, tail := range []int{1, 2} {
+		a, b := net.Pipe()
+		clients = append(clients, a)
+		defer a.Close()
+		go serveConn(b, service)
+		enc, dec := json.NewEncoder(a), json.NewDecoder(a)
+		if err := enc.Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion}); err != nil {
+			t.Fatal(err)
+		}
+		var hello proto.BrokerHelloResponse
+		if err := dec.Decode(&hello); err != nil || !hello.OK {
+			t.Fatal(err, hello)
+		}
+		if err := enc.Encode(broker.Request{Owner: owner, Operation: proto.OpJobWait, Host: "h", Wire: &proto.Request{Op: proto.OpJobWait, Job: &proto.JobParams{ID: "one-job", WaitTimeoutSec: 40, TailOnExit: tail}}}); err != nil {
+			t.Fatal(err)
+		}
+		decoders = append(decoders, dec)
+	}
+	end := time.Now().Add(time.Second)
+	for service.SharedWaitStatus(owner.Key()).Subscribers != 2 && time.Now().Before(end) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := service.SharedWaitStatus(owner.Key()); got != (broker.SharedWaitStatus{Observers: 1, Subscribers: 2}) {
+		t.Fatal("same job split by tail options", got)
+	}
+	end = time.Now().Add(time.Second)
+	for time.Now().Before(end) {
+		mu.Lock()
+		n := waits
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	n := waits
+	mu.Unlock()
+	if n != 1 {
+		t.Fatal("duplicate remote observation", n)
+	}
+	close(released)
+	for i, dec := range decoders {
+		_ = clients[i].SetReadDeadline(time.Now().Add(time.Second))
+		var r broker.Response
+		if err := dec.Decode(&r); err != nil || !r.OK || r.Wire == nil || r.Wire.Job == nil {
+			t.Fatal("wait failed", err, r.Error)
+		}
+		want := []string{"two", "one\ntwo"}[i]
+		if r.Wire.Job.Logs != want || r.Wire.OperationID != "op_one_shared_wait" {
+			t.Fatal("subscriber projection changed", r.Wire.Job)
+		}
+	}
+}

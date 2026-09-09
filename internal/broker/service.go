@@ -43,6 +43,7 @@ type Service struct {
 	readiness        Readiness
 	sharedMu         sync.Mutex
 	shared           map[sharedKey]*sharedDispatch
+	jobWaits         map[jobObservationKey]*jobObservation
 	observationCtx   context.Context
 	stopObservations context.CancelFunc
 	Jobs             *JobRegistry
@@ -73,6 +74,7 @@ func NewService(lookup client.AgentLookup) *Service {
 	observationCtx, stopObservations := context.WithCancel(context.Background())
 	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[sharedKey]*sharedDispatch), Jobs: NewJobRegistry(), observationCtx: observationCtx, stopObservations: stopObservations}
 	s.SetReady(true)
+	s.jobWaits = make(map[jobObservationKey]*jobObservation)
 	s.syncPlans = make(map[string]*preparedSync)
 	s.Secrets = NewSecretRegistry(s.client.Secrets)
 	s.Mutations = NewMutationRegistry()
@@ -177,6 +179,13 @@ func (s *Service) dispatchShared(ctx context.Context, owner, request string, byt
 		return nil, ErrClosed
 	}
 	ownerObservers, ownerSubscribers, totalSubscribers := 0, 0, 0
+	for k, current := range s.jobWaits {
+		totalSubscribers += current.subscribers
+		if k.owner == owner {
+			ownerObservers++
+			ownerSubscribers += current.subscribers
+		}
+	}
 	for k, current := range s.shared {
 		totalSubscribers += current.subscribers
 		if k.owner == owner {
@@ -191,7 +200,7 @@ func (s *Service) dispatchShared(ctx context.Context, owner, request string, byt
 	current := s.shared[key]
 	if current == nil {
 		limits := s.config.Get().QoS.effective()
-		if len(s.shared) >= limits.MaxActive+limits.MaxQueued || ownerObservers >= limits.PerOwner+limits.PerOwnerQueued {
+		if len(s.shared)+len(s.jobWaits) >= limits.MaxActive+limits.MaxQueued || ownerObservers >= limits.PerOwner+limits.PerOwnerQueued {
 			s.sharedMu.Unlock()
 			return nil, ErrQueueFull
 		}
@@ -245,6 +254,12 @@ func (s *Service) SharedWaitStatus(owner string) SharedWaitStatus {
 	defer s.sharedMu.Unlock()
 	var result SharedWaitStatus
 	for key, current := range s.shared {
+		if key.owner == owner {
+			result.Observers++
+			result.Subscribers += current.subscribers
+		}
+	}
+	for key, current := range s.jobWaits {
 		if key.owner == owner {
 			result.Observers++
 			result.Subscribers += current.subscribers

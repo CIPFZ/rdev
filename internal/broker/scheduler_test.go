@@ -262,3 +262,109 @@ func TestSchedulerBulkByteBudgetPreservesControlAndChargesExactOwner(t *testing.
 		t.Fatal(ctx.Err())
 	}
 }
+
+// The active-host budget and warm-transport budget are independent. In all
+// three configurations, overlapping work on one host must yield to another
+// owner, retain one stop/control call, and regain admission after the handoff.
+func TestSchedulerMaxHostsFairHandoff(t *testing.T) {
+	for _, warm := range []int{0, 1, 16} {
+		t.Run(fmt.Sprint(warm), func(t *testing.T) {
+			s := NewScheduler(QoSConfig{}, 1)
+			if warm > 0 {
+				p := NewHostPool(warm, func(string) func() { return func() {} })
+				s.SetHostPool(p)
+				defer p.Close(context.Background())
+			}
+			defer s.Close(context.Background())
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			type work struct {
+				started chan struct{}
+				finish  chan struct{}
+				done    chan error
+			}
+			start := func(host, owner string, lane Lane) work {
+				w := work{make(chan struct{}), make(chan struct{}), make(chan error, 1)}
+				go func() {
+					_, err := s.Do(ctx, host, owner, lane, func(ctx context.Context) (*proto.Response, error) {
+						close(w.started)
+						select {
+						case <-w.finish:
+						case <-ctx.Done():
+						}
+						return &proto.Response{OK: true}, nil
+					})
+					w.done <- err
+				}()
+				return w
+			}
+			await := func(ch <-chan struct{}) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			}
+			for round := 0; round < 10; round++ {
+				hot := []work{start("hot", "hot-owner", LaneExec), start("hot", "hot-owner", LaneExec)}
+				await(hot[0].started)
+				await(hot[1].started)
+				cold := start("cold", "cold-owner", LaneExec)
+				awaitScheduler(t, s, "cold-owner", 0, 1)
+				replacement := start("hot", "hot-owner", LaneExec)
+				awaitScheduler(t, s, "hot-owner", 2, 1)
+				stop := start("hot", "stop-owner", LaneControl)
+				await(stop.started)
+				overlap := start("hot", "ping-owner", LaneControl)
+				awaitScheduler(t, s, "ping-owner", 0, 1)
+				close(hot[0].finish)
+				<-hot[0].done
+				select {
+				case <-replacement.started:
+					t.Fatal("hot work bypassed host handoff")
+				default:
+				}
+				close(hot[1].finish)
+				<-hot[1].done
+				close(stop.finish)
+				<-stop.done
+				await(cold.started)
+				select {
+				case <-overlap.started:
+					t.Fatal("hot pings stole the cold host slot")
+				default:
+				}
+				close(cold.finish)
+				<-cold.done
+				await(overlap.started)
+				close(overlap.finish)
+				<-overlap.done
+				await(replacement.started)
+				close(replacement.finish)
+				<-replacement.done
+			}
+		})
+	}
+}
+
+func TestSchedulerMaxHostsCanceledHandoffDoesNotBlockHotHost(t *testing.T) {
+	s := NewScheduler(QoSConfig{}, 1)
+	defer s.Close(context.Background())
+	hotCtx, stopHot := context.WithCancel(t.Context())
+	defer stopHot()
+	hot := scheduleBlock(s, hotCtx, "hot", "hot-owner", LaneExec, nil)
+	awaitScheduler(t, s, "hot-owner", 1, 0)
+	coldCtx, stopCold := context.WithCancel(t.Context())
+	cold := scheduleBlock(s, coldCtx, "cold", "cold-owner", LaneExec, nil)
+	awaitScheduler(t, s, "cold-owner", 0, 1)
+	stopCold()
+	<-cold
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, err := s.Do(ctx, "hot", "another-owner", LaneExec, func(context.Context) (*proto.Response, error) { return nil, nil }); err != nil {
+		t.Fatal(err)
+	}
+	stopHot()
+	<-hot
+}
