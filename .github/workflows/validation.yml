@@ -149,6 +149,32 @@ jobs:
           RDEV_GO: go
           RDEV_REPRO_OUT: ${{ runner.temp }}/rdev-evidence/repro
         run: sh scripts/reproducible-build.sh
+      - name: Isolated test-signature SSH upgrade and rollback
+        run: |
+          # This generated test identity has no production trust or secrets.
+          # Keep policy ancestors outside the runner's extended home ACLs.
+          fixture="/tmp/rdev-p8-signed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          python3 scripts/prepare-signed-test-releases.py --go "$(command -v go)" \
+            --out "$fixture" --frozen "$RUNNER_TEMP/rdev-evidence/release"
+          python3 scripts/isolated-ssh.py --go "$(command -v go)" \
+            --out "$RUNNER_TEMP/rdev-evidence/signed-ssh" \
+            --signed-previous-policy "$fixture/previous-policy.json" \
+            --signed-candidate-policy "$fixture/candidate-policy.json" \
+            --signed-frozen-policy "$fixture/frozen-policy.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          run = int(os.environ["GITHUB_RUN_ID"])
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          fixture = pathlib.Path(f"/tmp/rdev-p8-signed-{run}-{attempt}")
+          prepared = json.loads((fixture / "result.json").read_text())
+          runtime = json.loads((pathlib.Path(os.environ["RUNNER_TEMP"]) / "rdev-evidence/signed-ssh/result.json").read_text())
+          assert prepared["status"] == runtime["status"] == "passed"
+          assert prepared["private_test_key_removed"] and prepared["signing_identity"]["test_only"]
+          assert not prepared["official_identity"] and prepared["source_commit"] == os.environ["GITHUB_SHA"]
+          assert all(v["status"] == "passed" and not v["draft_fixture"] and not v["source_dirty"] and v["inputs_unchanged"] for v in runtime["signed_runtime"].values())
+          summary = {"run_id": run, "run_attempt": attempt, "source_commit": prepared["source_commit"], "official_identity": False, "signing_identity": prepared["signing_identity"], "bundles": prepared["bundles"], "ipv4_ipv6_proxyjump_signed_runtime": "passed"}
+          print("::notice title=Isolated signed test identities::" + json.dumps(summary, sort_keys=True))
+          PY
       - name: Record exact hosted artifact identities
         run: |
           python3 - <<'PY'
@@ -198,6 +224,22 @@ jobs:
             ${{ runner.temp }}/rdev-evidence/ssh/jump.log
             ${{ runner.temp }}/rdev-evidence/ssh/v4.log
             ${{ runner.temp }}/rdev-evidence/ssh/v6.log
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/result.json
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/ephemeral-test-key.pub
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/*-policy.json
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/bundles/*/release.json
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/bundles/*/release.json.sig
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/bundles/*/manifest.json
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/bundles/*/sbom.cdx.json
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/bundles/*/provenance.intoto.json
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/bundles/*/THIRD_PARTY_NOTICES.txt
+            /tmp/rdev-p8-signed-${{ github.run_id }}-${{ github.run_attempt }}/bundles/*/rdev*
+            ${{ runner.temp }}/rdev-evidence/signed-ssh/result.json
+            ${{ runner.temp }}/rdev-evidence/signed-ssh/recovery.json
+            ${{ runner.temp }}/rdev-evidence/signed-ssh/*-runtime.log
+            ${{ runner.temp }}/rdev-evidence/signed-ssh/*-signed/result.json
+            ${{ runner.temp }}/rdev-evidence/signed-ssh/*-signed/signed-ssh.log
             ${{ runner.temp }}/rdev-evidence/release/
             ${{ runner.temp }}/rdev-evidence/repro/result.json
             ${{ runner.temp }}/rdev-evidence/repro/build-environment.json

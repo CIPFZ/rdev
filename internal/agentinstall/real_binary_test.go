@@ -11,7 +11,8 @@ package agentinstall
 // Fault tests run this package's installer in a test subprocess and use its
 // existing durable-point hooks; all hello/readiness checks execute real agents.
 // Fault hooks change permissions or state in private fixtures, never code bytes.
-// Decisions here model an already authorized unsigned dev caller. These tests
+// Decisions model an already authorized caller; signed activation reconstructs
+// test-root decision metadata, without supplying or verifying a signature. Tests
 // do not exercise SSH upload, signature verification or administrator rollback
 // authorization, and cannot certify those entry boundaries by themselves.
 
@@ -534,5 +535,237 @@ func TestRealAgentBinaryCrossProcessLockAndCAS(t *testing.T) {
 	}
 	if installed(t, root) != current.digest {
 		t.Fatal("stale CAS request overwrote the committed winner")
+	}
+}
+
+// Reconstruct the disk-visible publication boundary using the existing hook.
+// The recovery under test is the unmodified production executable. This is not
+// an additional SIGKILL/fsync fault or a physical power-loss test.
+func realPublished(t *testing.T, current, previous realAgent, replacement bool) string {
+	t.Helper()
+	root := rootDir(t)
+	old := ""
+	if replacement {
+		realCopy(t, previous, root)
+		old = previous.digest
+	}
+	err := install(context.Background(), root, current.path, current.decision(), old, func(point string) error {
+		if point == "published" {
+			return errors.New("stop for disk-state reconstruction")
+		}
+		return nil
+	})
+	realError(t, err, "ambiguous", "published")
+	if installed(t, root) != current.digest || realRecord(t, root).Phase != "switching" {
+		t.Fatal("fixture did not reach the actual publication boundary")
+	}
+	return root
+}
+
+func realDecisionBytes(t *testing.T, decision artifact.Decision) []byte {
+	t.Helper()
+	b, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(b, '\n')
+}
+
+func realActiveUnchanged(t *testing.T, root string, before os.FileInfo, digest string) {
+	t.Helper()
+	after, err := os.Stat(filepath.Join(root, targetName))
+	if err != nil || !os.SameFile(before, after) || installed(t, root) != digest {
+		t.Fatal("recovery republished or changed the active binary")
+	}
+}
+
+func TestRealAgentBinaryDecisionJournalRecovery(t *testing.T) {
+	current, previous := realAgents(t)
+	for _, replacement := range []bool{false, true} {
+		t.Run(fmt.Sprintf("published-decision-before-journal/replacement=%t", replacement), func(t *testing.T) {
+			root := realPublished(t, current, previous, replacement)
+			decision := realDecisionBytes(t, current.decision())
+			if err := os.WriteFile(filepath.Join(root, currentName), decision, 0600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(filepath.Join(root, targetName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			realEntry(t, current, "", "-recover-upgrades", root)
+			if realRecord(t, root).Phase != "committed" || realRecord(t, root).Candidate != current.decision() {
+				t.Fatal("recovery did not reconcile the committed decision")
+			}
+			journal, err := os.ReadFile(filepath.Join(root, journalName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			realEntry(t, current, "", "-recover-upgrades", root)
+			realPreserved(t, filepath.Join(root, currentName), decision)
+			realPreserved(t, filepath.Join(root, journalName), journal)
+			realActiveUnchanged(t, root, before, current.digest)
+			if replacement {
+				backup, err := os.ReadFile(filepath.Join(root, previousName))
+				if err != nil || artifact.Hash(backup) != previous.digest {
+					t.Fatal("reconciliation lost the actual predecessor")
+				}
+			}
+		})
+	}
+	for _, legacyJournal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("same-bytes-trust-activation/journal=%t", legacyJournal), func(t *testing.T) {
+			root := rootDir(t)
+			if legacyJournal {
+				realEntryInstall(t, current, root, "", "")
+			} else {
+				realCopy(t, current, root)
+			}
+			// This is already-authorized metadata from an isolated test root.
+			// It is not publisher signature verification or SSH authorization.
+			signed := current.decision()
+			signed.Unsigned, signed.TestRoot = false, true
+			signed.Channel, signed.Version, signed.Signer = "stable", "1.0.0", "isolated-test-metadata"
+			decision := realDecisionBytes(t, signed)
+			if err := os.WriteFile(filepath.Join(root, currentName), decision, 0600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(filepath.Join(root, targetName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				realEntry(t, current, "", "-recover-upgrades", root)
+				realEntryInstall(t, current, root, current.digest, "RDEV_AGENT_INSTALL_NOT_SENT:direction")
+				realPreserved(t, filepath.Join(root, currentName), decision)
+				if legacyJournal {
+					if !realRecord(t, root).Candidate.Unsigned {
+						t.Fatal("recovery fabricated completion of interrupted activation")
+					}
+				} else if _, err := os.Lstat(filepath.Join(root, journalName)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("recovery or refused downgrade invented a journal")
+				}
+			}
+			realEntry(t, current, "", "-install-candidate", root, string(decision), current.digest)
+			if realRecord(t, root).Candidate != signed || realRecord(t, root).Phase != "committed" {
+				t.Fatal("authorized activation retry did not finish the journal")
+			}
+			realEntry(t, current, "", "-recover-upgrades", root)
+			realEntryInstall(t, current, root, current.digest, "RDEV_AGENT_INSTALL_NOT_SENT:direction")
+			realPreserved(t, filepath.Join(root, currentName), decision)
+			realActiveUnchanged(t, root, before, current.digest)
+		})
+	}
+}
+
+func TestRealAgentBinaryRecordScratchRecovery(t *testing.T) {
+	current, previous := realAgents(t)
+	fragment := []byte(`{"interrupted_record":`)
+	t.Run("before-first-prepared-record", func(t *testing.T) {
+		root := rootDir(t)
+		path := filepath.Join(root, journalName+".tmp")
+		if err := os.WriteFile(path, fragment, 0600); err != nil {
+			t.Fatal(err)
+		}
+		realEntry(t, current, "", "-recover-upgrades", root)
+		realPreserved(t, path, fragment)
+		if installed(t, root) != "" {
+			t.Fatal("record-less recovery invented an installation")
+		}
+		realEntryInstall(t, current, root, "", "")
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("safe partial record scratch was not reclaimed on retry")
+		}
+	})
+	for _, name := range []string{currentName, journalName} {
+		for _, kind := range []string{"partial", "symlink", "fifo", "directory", "unsafe-mode", "oversized"} {
+			t.Run(name+"/"+kind, func(t *testing.T) {
+				root := realPublished(t, current, previous, true)
+				// A journal scratch write occurs only after the current decision
+				// write completed. Recreate that ordering, not arbitrary JSON.
+				if name == journalName {
+					if err := os.WriteFile(filepath.Join(root, currentName), realDecisionBytes(t, current.decision()), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				path := filepath.Join(root, name+".tmp")
+				victim := filepath.Join(t.TempDir(), "untouched")
+				if err := os.WriteFile(victim, fragment, 0600); err != nil {
+					t.Fatal(err)
+				}
+				content := fragment
+				var err error
+				switch kind {
+				case "symlink":
+					err = os.Symlink(victim, path)
+				case "fifo":
+					err = unix.Mkfifo(path, 0600)
+				case "directory":
+					err = os.Mkdir(path, 0700)
+				case "oversized":
+					content = make([]byte, (32<<10)+1)
+					err = os.WriteFile(path, content, 0600)
+				default:
+					err = os.WriteFile(path, content, 0600)
+					if err == nil && kind == "unsafe-mode" {
+						err = os.Chmod(path, 0620)
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				activeBefore, err := os.Stat(filepath.Join(root, targetName))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if kind != "partial" {
+					scratchBefore, err := os.Lstat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					marker := "RDEV_AGENT_INSTALL_AMBIGUOUS:record"
+					if name == journalName {
+						marker = "RDEV_AGENT_INSTALL_COMMITTED:record"
+					}
+					for i := 0; i < 2; i++ {
+						realEntry(t, current, marker, "-recover-upgrades", root)
+						after, err := os.Lstat(path)
+						if err != nil || !os.SameFile(scratchBefore, after) || scratchBefore.Mode() != after.Mode() {
+							t.Fatal("refusal removed or replaced unsafe scratch evidence")
+						}
+						if after.Mode().IsRegular() {
+							realPreserved(t, path, content)
+						}
+						realPreserved(t, victim, fragment)
+						realActiveUnchanged(t, root, activeBefore, current.digest)
+						if realRecord(t, root).Phase != "switching" {
+							t.Fatal("failed record persistence fabricated a durable phase")
+						}
+						backup, err := os.ReadFile(filepath.Join(root, rollbackName))
+						if err != nil || artifact.Hash(backup) != previous.digest {
+							t.Fatal("record failure lost rollback evidence")
+						}
+					}
+					// Only remove this test-owned object after proving conservative
+					// refusal; product recovery never removes the unsafe evidence.
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				realEntry(t, current, "", "-recover-upgrades", root)
+				realEntry(t, current, "", "-recover-upgrades", root)
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("safe record scratch survived successful reconciliation")
+				}
+				if realRecord(t, root).Phase != "committed" {
+					t.Fatal("record retry did not commit")
+				}
+				realActiveUnchanged(t, root, activeBefore, current.digest)
+				realPreserved(t, victim, fragment)
+				backup, err := os.ReadFile(filepath.Join(root, previousName))
+				if err != nil || artifact.Hash(backup) != previous.digest {
+					t.Fatal("record retry lost known-good predecessor")
+				}
+			})
+		}
 	}
 }

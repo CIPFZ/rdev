@@ -345,8 +345,25 @@ def main():
     parser.add_argument("--preflight-only", action="store_true", help="OpenSSH topology/fault checks only; no rdev runtime claim")
     parser.add_argument("--recover", choices=("status", "cleanup"), help="inspect or explicitly clean a retained failed fixture")
     parser.add_argument("--runtime-timeout", type=float, default=1250, help="whole runtime process-tree deadline in seconds")
-    parser.add_argument("--run", default="TestRemote(BrokerRoutes|BrokerFrontendBoundary|BrokerJobRecovery|BrokerPreparedSync|BrokerRetryCancellation|BrokerMutationCrashRecovery|FleetFrontendsAndRetry|Phase8MasterDisappearance|Phase8DNSFailure)$", help="explicit Go runtime test selection")
+    parser.add_argument("--run", default="TestRemote(BrokerRoutes|BrokerFrontendBoundary|BrokerJobRecovery|BrokerPreparedSync|BrokerRetryCancellation|BrokerMutationCrashRecovery|FleetFrontendsAndRetry|Phase8MasterDisappearance|Phase8DNSFailure|Phase8StreamFaults)$", help="explicit Go runtime test selection")
+    for role in ("previous", "candidate", "frozen"):
+        parser.add_argument("--signed-" + role + "-policy", type=Path, help="all three policies select the real test-root signed upgrade/rollback matrix")
     args = parser.parse_args()
+    signed_policies = {role: getattr(args, "signed_" + role + "_policy") for role in ("previous", "candidate", "frozen")}
+    signed = any(signed_policies.values())
+    if signed and (not all(signed_policies.values()) or args.preflight_only):
+        parser.error("signed runtime requires all three policies and cannot be preflight-only")
+    if signed:
+        signed_policies = {role: path.resolve(strict=True) for role, path in signed_policies.items()}
+        # The signed runner deliberately selects the frozen bundle's broker.
+        # Bind that same selection here, even when the caller supplied unrelated
+        # ordinary-runtime overrides. The runner/Go verifier validates trust.
+        config = json.loads(signed_policies["frozen"].read_text())
+        bundle = Path(config["bundle_dir"])
+        if not bundle.is_absolute():
+            parser.error("signed frozen bundle requires an absolute path")
+        bundle = bundle.resolve(strict=True)
+        os.environ.update(RDEV_TEST_AGENT_DIR=str(bundle), RDEV_TEST_DAEMON_BINARY=str(bundle / "rdevd"), RDEV_TEST_CLI_BINARY=str(bundle / "rdev"))
     if args.recover:
         recover(args.out.resolve(), args.recover)
         return
@@ -404,19 +421,37 @@ def main():
             raise RuntimeError("host-key failure injection was not observed")
         report["checks"]["host-key-denied"] = "passed"
         if not args.preflight_only:
-            policy = create_release_policy(fixture, args.out)
-            recovery["release_policy_root"] = str(policy.parent)
-            (args.out / "recovery.json").write_text(json.dumps(recovery, indent=2) + "\n")
-            report["release_trust"] = "isolated administrator unsigned-dev opt-in; not trusted release certification"
-            preflight_env = dict(os.environ, RDEV_RELEASE_POLICY=str(policy), RDEV_TEST_RELEASE_POLICY_PREFLIGHT="1")
-            with (args.out / "release-policy-preflight.log").open("wb") as log:
-                run([args.go, "test", "./cmd/rdevd", "-run", "^TestIsolatedReleasePolicyReadiness$", "-count=1", "-v"], env=preflight_env, cwd=repo, stdout=log, stderr=subprocess.STDOUT, timeout=120)
-            preflight = (args.out / "release-policy-preflight.log").read_text()
-            if "RDEV_SAFE_POLICY reason=accepted explicit=true" not in preflight or "--- PASS:" not in preflight:
-                raise RuntimeError("release policy preflight did not prove explicit fixture admission")
-            report["checks"]["release-policy-readiness"] = "passed"
+            if signed:
+                policy = signed_policies["frozen"]
+                report["release_trust"] = "actual isolated test-root signed bundles; no official identity or unsigned fallback"
+                report["signed_runtime"] = {}
+            else:
+                policy = create_release_policy(fixture, args.out)
+                recovery["release_policy_root"] = str(policy.parent)
+                (args.out / "recovery.json").write_text(json.dumps(recovery, indent=2) + "\n")
+                report["release_trust"] = "isolated administrator unsigned-dev opt-in; not trusted release certification"
+                preflight_env = dict(os.environ, RDEV_RELEASE_POLICY=str(policy), RDEV_TEST_RELEASE_POLICY_PREFLIGHT="1")
+                with (args.out / "release-policy-preflight.log").open("wb") as log:
+                    run([args.go, "test", "./cmd/rdevd", "-run", "^TestIsolatedReleasePolicyReadiness$", "-count=1", "-v"], env=preflight_env, cwd=repo, stdout=log, stderr=subprocess.STDOUT, timeout=120)
+                preflight = (args.out / "release-policy-preflight.log").read_text()
+                if "RDEV_SAFE_POLICY reason=accepted explicit=true" not in preflight or "--- PASS:" not in preflight:
+                    raise RuntimeError("release policy preflight did not prove explicit fixture admission")
+                report["checks"]["release-policy-readiness"] = "passed"
             for target in ("target-v4", "target-v6"):
                 env = dict(os.environ, TMPDIR=str(fixture / "tmp"), RDEV_TEST_RUNTIME_ROOT=str(fixture / "runtime"), RDEV_TEST_NAMESPACE_PREFIX=str(namespace.relative_to(Path.home())), RDEV_RUN_REMOTE="1", RDEV_TEST_REMOTE=target, RDEV_TEST_SSH_CONFIG=str(topology.config), RDEV_RELEASE_POLICY=str(policy))
+                if signed:
+                    output = args.out / (target + "-signed")
+                    command = [sys.executable, str(repo / "scripts/signed-upgrade-ssh.py"), "--go", args.go, "--out", str(output), "--remote", target, "--ssh-config", str(topology.config)]
+                    for role, path in signed_policies.items():
+                        command += ["--" + role + "-policy", str(path)]
+                    with (args.out / (target + "-runtime.log")).open("wb") as log:
+                        run(command, env=env, cwd=repo, stdout=log, stderr=subprocess.STDOUT, timeout=args.runtime_timeout)
+                    result = json.loads((output / "result.json").read_text())
+                    if result["status"] != "passed" or result["source_dirty"] or result["draft_fixture"] or not result["inputs_unchanged"]:
+                        raise RuntimeError("signed runtime did not pass with clean, immutable inputs")
+                    report["signed_runtime"][target] = result
+                    report["checks"][target + "-runtime"] = "passed"
+                    continue
                 with (args.out / (target + "-runtime.log")).open("wb") as log:
                     run([args.go, "test", "./cmd/rdevd", "-run", args.run, "-count=1", "-timeout=20m", "-v"], env=env, cwd=repo, stdout=log, stderr=subprocess.STDOUT, timeout=args.runtime_timeout)
                 text = (args.out / (target + "-runtime.log")).read_text()

@@ -17,6 +17,7 @@ CASES = (
     "ProductionEntry", "HealthAndStateRefusal", "PostSwitchRollback",
     "CommittedCleanupFailure", "ExplicitUnsignedDevRollback",
     "SIGKILLAndRecovery", "CrossProcessLockAndCAS",
+    "DecisionJournalRecovery", "RecordScratchRecovery",
 )
 
 
@@ -82,6 +83,7 @@ def main():
             "signature_ssh_and_formal_n_minus_one": "not exercised or certified",
             "durable_windows": "prepared, verified, switching, published, committed; replacement also rolled_back",
             "window_count": 11,
+            "reconstructed_record_states": "decision before committed journal, same-byte test-root metadata activation, interrupted fixed scratch and unsafe scratch refusal; actual production recovery entry",
         },
     }
     summary = args.out / "result.json"
