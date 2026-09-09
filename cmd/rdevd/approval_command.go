@@ -19,7 +19,7 @@ func approvalCreateCommand(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("approval-create", flag.ContinueOnError)
 	socket := flags.String("socket", os.Getenv("RDEV_BROKER_SOCKET"), "broker socket")
 	requestFile := flags.String("request-file", "", "0600 JSON ApprovalSpec containing the reviewed request")
-	if err := flags.Parse(args); err != nil {
+	if err := parseSingleFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *socket == "" || *requestFile == "" {

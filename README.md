@@ -1,667 +1,255 @@
 # rdev — 远程开发环境代理工具
 
-给本地 Claude Code 用的远程执行代理。用 MCP 结构化工具替代手写 SSH 命令。
-
-## 为什么做这个
-
-在一次真实的远程调试会话里（SWE-bench 链路排查，约 40 轮 SSH 交互），失败的原因几乎全部来自 SSH 交互本身，而不是远程环境：
-
-| 类别 | 实际报错 | 根因 |
-|---|---|---|
-| 引号地狱 | `tr: extra operand '"'`<br>`cut: '"': No such file or directory`<br>`no such column: $.score`<br>中文变成 `?????` | 命令穿过 `ssh` → `bash -lc` → `sqlite3` 三层解析，每层都要转义 |
-| PATH 不一致 | `uv: command not found` | 非登录 shell 不加载 `~/.bashrc`，而 uv 在 `~/.local/bin` |
-| 长任务 | 工具 120s 超时 → `nohup` + 轮询；中途 kill 丢了整个结果库 | 没有作业模型 |
-| 进程管理 | `pkill` 模式没匹配上主进程；`pgrep` 把自己也列出来 | 靠字符串匹配找进程 |
-| 传文件 | 反复 heredoc 写 `/tmp/q.sql`、`/tmp/chk.py` | 没有文件原语 |
-| 无状态 | 每次都要 `cd ~/myproject` | 连接不持久 |
-| 输出爆炸 | 每条命令手动接 `tail`/`grep` | 没有输出预算 |
-| 凭据泄露 | token 明文进了对话记录 | 无脱敏 |
-
-**根本矛盾：把结构化意图压成一个 shell 字符串，再让远端重新解析它。**
-只要还在拼字符串，包装得再漂亮也会继续踩。
+给本地 AI Agent 和开发者使用的远程执行工具。CLI 与 MCP 提供结构化命令、文件、同步和后台 job；共享模式由 `rdevd` 管理连接、权限、审批、配额和审计。
 
 ## 快速开始
 
+构建使用 `go.mod` 固定的 Go 1.26.8 工具链；Go 语言版本基线为 1.25。需要本地 OpenSSH；standalone 同步和共享 rsync preview 路径还需要本地、远端的 rsync。
+
 ```bash
-make all                                       # 需要 Go 1.25+
+make GO="$(command -v go)" all daemon
+export PATH="$PWD/bin:$PATH"
+claude mcp add rdev --scope user -- "$PWD/bin/rdev" serve
 
-# 注册进 Claude Code（工具本身全局可用）
-claude mcp add rdev --scope user -- $PWD/bin/rdev serve
-
-# 在你的项目目录下注册开发机（默认 project scope）
-cd ~/works/myproject
-~/works/rdev/bin/rdev hosts add dev user@1.2.3.4 -port 36000 -cwd '~/myproject' -save
-
-# 新进程首次加载 project 配置前，核对文件及摘要并批准精确内容
-~/works/rdev/bin/rdev hosts trust
-~/works/rdev/bin/rdev hosts approve-project <上一步显示的 sha256>
-
-# 首次连接自动上传 agent，无需在远端做任何准备
-~/works/rdev/bin/rdev ping dev
+# standalone：在项目目录注册主机，保存的是连接配置
+rdev hosts add dev user@1.2.3.4 -port 36000 -cwd '~/myproject' -save
+rdev hosts trust
+rdev hosts approve-project <上一步显示的sha256>
+rdev ping dev
+rdev exec dev -- printf '%s\n' '中文 "quoted" $(not-run)'
 ```
+
+首次连接自动选择并上传 agent，无需远端安装 Go。远端 bootstrap 使用 POSIX shell、`uname`、`dd`、`chmod`、`mv` 及 SHA-256 工具。SSH host key 和认证由用户管理。
+
+多人或多个 AI 客户端共享主机时，按 [rdevd 运维说明](docs/rdevd-operations.md) 配置 daemon、principal 凭证和默认拒绝的 policy。客户端设置 `RDEV_BROKER_SOCKET`、`RDEV_CLIENT_ID`、`RDEV_PROJECT_ID`、`RDEV_PRINCIPAL_TOKEN` 后，同一 CLI 或 `rdev serve` 使用共享模式。身份令牌只证明身份，不自动授予业务权限；管理员签名密钥不能交给客户端。
 
 ## 两层配置：工具全局，主机按项目
 
-工具是通用的，但开发机往往属于某个具体项目。两者分开：
+standalone 的主机配置分两层：
 
-| | 位置 | 可见范围 |
-|---|---|---|
-| **rdev 工具** | `~/.claude.json`（user scope MCP） | 所有项目 |
-| **project 主机** | `<项目>/.rdev/hosts.json` | 仅在该目录下工作时 |
-| **global 主机** | `~/.rdev/hosts.json` | 所有项目 |
+| 位置 | 可见范围 |
+|---|---|
+| `~/.rdev/hosts.json` | 当前本机用户的各项目 |
+| `<项目>/.rdev/hosts.json` | 以该目录启动的 CLI/MCP 进程 |
 
-加载顺序是 global → project；但 project 配置默认不可信，只有在用户批准其**绝对路径 + 当前 SHA-256** 后才会加载。批准后同名 project host 才覆盖 global。文件内容发生任何变化都会让批准失效，未批准的仓库不能触发 SSH 或 bootstrap。
+加载顺序是 global → project；project 文件只有在用户批准其绝对路径和当前 SHA-256 后才会加载，批准后的同名主机才覆盖 global。内容变化使批准失效。`hosts add` 默认 project scope；跨项目配置加 `-global`。MCP 用 `rdev_session` 查询 `project_trust`，确认后传 `approve_project_digest`。批准记录位于 `~/.rdev/trusted-projects.json`。
 
-首次遇到项目配置时，rdev 会打印路径、摘要和精确批准命令：
+配置持久化使用私有目录、文件权限检查和原子替换；host 地址、用户、端口、state namespace 或 scope 改变会推进 generation，清理旧 sticky state 和该 alias 的 scoped secret，并使旧连接失效。`remote_dir` 必须是规范的 home-relative 路径，允许前缀 `~/`，拒绝绝对路径、遍历和 shell 元字符。
+
+共享模式的 host registry 由管理员加载，业务客户端不能编辑共享 host/session。管理员修改私有 registry 后重启 `rdevd`；客户端逐请求传 `cwd`/`env`。unsupported 路由明确失败，不创建私有 SSH 客户端回退。`rdev support` 和 `rdev_support` 可提前查询这些边界及替代操作。
+
+## MCP 工具
+
+以当前 server 的 `tools/list` 为准：standalone 与 broker 模式有不同工具集和授权要求。
+
+| 工具 | 用途与边界 |
+|---|---|
+| `rdev_exec` | `argv` 数组形式的前台命令 |
+| `rdev_job_start` / `_wait` / `_list` / `_status` / `_logs` / `_stop` / `_rm` | 有界后台任务、观察和清理 |
+| `rdev_read` / `rdev_write` / `rdev_list` | 文件读写和目录列表 |
+| `rdev_sync` | push/pull；broker 使用预览、保留计划及审批执行 |
+| `rdev_secrets` | standalone 内存凭据；broker principal-owned 凭据 |
+| `rdev_session` | 仅 standalone 的 host/session 查询和编辑 |
+| `rdev_support` | 静态支持矩阵、前端边界及可选 runtime 探测 |
+| `rdev_compat` | 当前构建的协议、错误、config/state 兼容契约 |
+| `rdev_state` | 整个 host state root 的管理员检查、迁移和修复 |
+| `rdev_storage_status` / `rdev_storage_doctor` / `rdev_storage_gc` | standalone 的受管存储检查和清理；共享 MCP 未注册这些工具 |
+| `rdev_ping` / `rdev_capability` | broker 的连接检查和原始 capability probe |
+| `rdev_broker_status` / `rdev_broker_pool` | broker 的 owner-scoped 使用量和单独授权的全局连接池统计 |
+| `rdev_mutation_status` / `rdev_job_events` | broker 的 mutation outcome 查询及 job 状态历史 |
+
+`rdev_state` 报告可能包含其他 owner 的 root-relative state record 路径，因此共享模式要求独立的 `state_inspect` / `state_migrate` / `state_repair` 管理员授权，推荐 exact-host grant。迁移和修复包括 dry-run 都保留 digest-bound approval。MCP 默认 `dry_run=true`；CLI 用 `-dry-run` 显式预览。
+
+## 命令、参数与超时
+
+命令以 `argv` 数组传入。默认 login shell 用 `exec "$@"` 位置参数 trampoline 加载 profile，再执行原 argv；profile 是受信任的用户代码。`-no-login` 选择直接执行。需要管道时显式传 `["sh", "-c", "a | b"]`，该脚本文本由调用者负责。
+
+CLI 的 `--` 分隔 rdev 参数和命令 argv；之后不再由 rdev 解析。**本地 shell 仍会先处理引号、变量、通配符和命令替换**，所以字面 `$()`、空格、`~` 等必须正确引用。MCP JSON 数组没有本地 shell 这一层。
+
+参数解析保留 `-flag` / `--flag` 和交错位置参数，拒绝未知 flag、缺值、空字符串值、非法数字、溢出、越界、额外 operand 及冲突组合。单值 flag 和布尔开关不能重复；CLI 布尔开关不接受 `=false`。`-exclude` 可重复并保留顺序；exec/job start 和 host 配置的 `-env NAME=VALUE`、host 配置的 `-secret NAME=PATH` 可重复，但同一键不能重复。以 `-` 开头的字符串 flag 值使用 `-key=value`。daemon 的标准 flag 接口也拒绝重复参数，并保留其标准布尔值语法。
+
+所有入口使用同一超时契约：
+
+| 预算 | 缺省或显式 `0` | 正值与上限 | 到期行为 |
+|---|---|---|---|
+| 前台 exec：CLI `-timeout` / MCP `timeout_sec` | 60 秒 | 1–3600 秒 | 终止该命令进程组，报告超时和已保留输出 |
+| job wait：CLI `-timeout` / MCP `timeout_sec` | 300 秒 | 1–3600 秒 | 仅停止本次观察，返回 `timed_out`，不终止 job |
+| 新后台 job：CLI `-wall-timeout` / MCP `resources.wall_timeout_sec` | 3600 秒 | 1–3600 秒 | supervisor 执行 job 运行时限 |
+
+负值、溢出、超上限和显式无限均拒绝；`0` 不表示无限。连接建立和请求 context/deadline 是独立预算，可能更早结束；exec 的运行时限不等于 SSH 建连的总时限。前台取消隔离于其他客户端；后台 job 不因连接断开或一次 wait 到期而结束，但仍受自身运行时限约束。
+
+这是兼容性行为变化：旧调用中缺省/零值的无限 exec 和无限新 job 现在使用上述有限默认值。已有显式合法正值继续有效；升级不会追溯修改已经运行的旧 supervisor。exec/wait 向兼容旧 agent 发送规范化后的显式值，避免旧零值语义重新放开预算。新 job 还要求 agent 协商 `job_resource_envelope` feature；不支持该 feature 的旧 agent 在发送 job start 前明确拒绝，须先升级 agent。已有 job 的 status/wait/stop 和公共 read/ping 不因此停止兼容。
+
+MCP job start 接受 `resources`；结果保留 `requested_resources`、`effective_resources`、`resource_limit`。可请求 FD 和 job 数量限制，但受目标能力和硬限约束。当前 CPU、内存、PID 的整棵进程树预算不支持，不能把探测到 cgroup 当成已经能够执行这些限制。
 
 ```bash
-rdev hosts trust                              # 查看当前待审路径和摘要
-rdev hosts approve-project <sha256>           # 摘要必须与当前文件完全一致
-```
-
-MCP 侧先用无更新参数调用 `rdev_session` 查看 `project_trust`，确认内容后把同一摘要传给 `approve_project_digest`。批准记录保存在 `~/.rdev/trusted-projects.json`，不会写回仓库。
-
-`hosts add` 默认写 project scope（在某个 repo 里注册的机器，基本上就属于那个 repo）；跨项目复用的机器加 `-global`。
-
-MCP server 继承 Claude Code 启动时的项目目录作为 cwd，这就是 project scope 生效的机制，不需要额外配置。
-
-实测隔离效果：
-```
-在 ~/works/myproject  → rdev exec dev -- pwd    ✅ /home/youruser/myproject
-在 ~/works/rdev       → rdev exec dev -- pwd    ❌ unknown host "dev"
-在 ~                  → rdev hosts list         ❌ null
-```
-
-> `.rdev/` 建议加进你的**全局** gitignore（`git config --global core.excludesfile`），
-> 而不是项目的 `.gitignore` —— 里面是你个人的用户名和跳板地址，同事的开发机不一样。
-
-## MCP 工具（14 个）
-
-| 工具 | 用途 |
-|---|---|
-| `rdev_exec` | 前台命令，`argv` 数组 |
-| `rdev_job_start` / `_wait` / `_list` / `_status` / `_logs` / `_stop` | 长任务，断连存活 |
-| `rdev_job_rm` | 回收 job 记录（按 id / `older_than_sec` / `keep_last`） |
-| `rdev_read` / `rdev_write` | 远端文件读写（替代 heredoc） |
-| `rdev_list` | 结构化列目录（替代 `ls` + 解析文本） |
-| `rdev_sync` | rsync push/pull |
-| `rdev_session` | 每 host 的 `cwd`/`env`/`remote_dir`/`secrets` 粘性状态 + 连接状态 |
-| `rdev_secrets` | 凭据注册 + 全局脱敏（也可在 `rdev_session` 里声明路径,自动注册） |
-
-## 核心设计决策
-
-### 1. `argv` 数组是硬约束，不提供 shell 字符串入口
-
-```jsonc
-// ✅ 唯一的入口形态
-{"argv": ["sqlite3", "db", "SELECT json_extract(x,'$.score') FROM runs"], "cwd": "~/myproject"}
-
-// ❌ 故意不提供
-{"command": "cd ~/myproject && sqlite3 db \"SELECT ...\""}
-```
-
-参数是 JSON 数组，agent 直接 `exec`，**没有任何 shell 解析它**。引号、词分割、glob 展开在结构上不可能发生。
-
-不留 shell 逃生口是有意的：一旦有，所有人都会用它，引号问题原地复活。真需要管道时显式写 `["sh","-c","a | b"]`，代价可见。
-
-### 2. 远端常驻 agent，不是纯 SSH 包装
-
-```
-Claude Code (本地)
-      ↕ MCP over stdio
-  rdev (本地 MCP server / CLI，共享 internal/client)
-      ↕ ssh -o ControlMaster=auto   每台机一条复用连接
-  rdev-agent (自动 bootstrap 到 ~/.cache/rdev/)
-      ↕ JSON-RPC over stdin/stdout (NDJSON)
-   远端 OS
-```
-
-Go 静态编译 → 远端**零运行时依赖**（实测目标机 tmux/screen/jq 全无、无 Go）。
-四个平台的 agent 二进制 `go:embed` 进 rdev，按远端 `uname` 自动选择，SHA-256 比对决定是否重传。
-支持的组合见[平台支持](#平台支持)。
-
-### 3. 作业用 supervisor 模式托管
-
-这是最关键的一处设计。detached 进程不能依赖 agent 记录退出码——agent 随 SSH 断开就死，reaper goroutine 根本轮不到运行。
-
-所以 `job_start` 把 agent 自己作为中间父进程拉起：
-
-```
-rdev-agent -supervise <jobdir> -- <argv...>
-```
-
-supervisor 在 detached session 内，比 SSH 连接活得久，负责 `wait()` 并写 `status.json`。**退出码因此能跨越断连、agent 重启、host 重启。**
-
-`job_stop` 按记录的 pgid 发信号（不是 grep 进程名），所以能连子进程一起清掉。
-
-### 4. 完成通知用 job_wait，不靠轮询
-
-长任务反复查 `job_status` 既费 context 又不及时。`job_wait` 一次调用阻塞到结束：
-
-```jsonc
-{"host":"dev", "id":"<job>", "timeout_sec":600, "tail_on_exit":20}
-→ {"job":{"state":"exited","exit_code":3}, "waited_ms":12009, "logs":"..."}
-```
-
-三个约束：
-- **有界**。默认 300s，上限 3600s。超时返回 `timed_out=true`，**job 不受影响**，再调一次即可。无界等待会让请求永远悬着。
-- **不阻塞其他命令**。请求带 ID、两侧都并发（见决策 7），所以 wait 走**共享连接**即可，不再需要专用连接池。
-- **退避轮询**。agent 侧 200ms → 3s 退避，跑一小时的 job 每分钟几次 stat，而不是每秒十次。
-
-`tail_on_exit` 顺带回传尾部日志，省一次 `job_logs` 往返。
-
-批量场景传 `ids` 而不是 `id`，N 个 job 共享一个 deadline，省掉 N 次串行等待。加 `wait_any` 则任一结束就返回——批量跑最想知道的往往是**第一个失败**，等全部结束才发现就浪费了。
-
-### 5. login shell 用位置参数 trampoline
-
-要解决 `uv: command not found` 就得加载 profile，但又不能把 argv 塞进 shell 脚本文本（会被二次解析）：
-
-```
-bash -lc 'exec "$@"' rdev <argv...>
-```
-
-profile 被 source，然后 `exec "$@"` 用**位置参数**替换进程。argv 作为真实参数传入，shell 不会重新解析它。默认开启。
-
-### 6. 凭据在边界统一脱敏
-
-注册过的值在**所有**返回值里被替换成 `<redacted:name>`（stdout/stderr/日志/错误消息/job argv/rsync 命令行/cwd）。
-可注入 secret 的完整键是 `registry scope + immutable host identity + name`；用 `env: {"TOKEN":"secret:name"}` 只会解析当前 host 身份下的精确同名值，不会回退到其他 host 或 output-only 值。
-
-**两道防线，因为逐字段脱敏被证明会漏。** `SyncResult.Command` 漏过一轮（见 bug 17），
-而它和已脱敏的 `Stdout` 在同一个结构体字面量里——漏掉不会有任何报错，代价是明文凭据进对话记录。
-
-1. **client 请求边界递归脱敏**。identity lease 覆盖请求构造、secret 展开、远端响应、结构化递归脱敏和错误脱敏，完成后才释放；CLI 直接消费这里的结果。
-2. **MCP 边界兜底**（`AddReceivingMiddleware`）。SDK 给出 JSON 时先解码回原始字符串、递归脱敏、再序列化；文本 fallback 同理。这样含引号、反斜杠、换行、Unicode escape 的 secret 不会因 JSON 转义而绕过。
-
-第 2 层是实测出来的，不是推的：`rdev_session` 的 `cwd` **本来就没有**逐字段脱敏，
-关掉中间件后测试立刻在真实 MCP 往返里抓到明文（`TestMiddlewareRedactsUnscrubbedResultField`）。
-只拦 `tools/call`——`tools/list` 不含远端输出，扫它是白付字节。
-
-**远端凭据直接注册**（推荐）：
-```jsonc
-{"action":"set_from_file", "name":"apptoken", "host":"dev", "path":"~/.config/myapp/token"}
-```
-值经 agent 连接读取，直接进 store —— 不落本地磁盘、不进对话记录。
-不带 `host` 的 inline/local-file 注册为兼容保留的 **output-only** 值：参与全局输出脱敏，但永远不能注入任何远端。需要注入时必须显式提供 `host`，因此两台主机的同名 secret 可以安全并存。
-
-**声明式注册**（免去每个会话手动重注册）：store 是内存态的（有意为之，明文不落盘），
-但那意味着每开一个新 MCP 会话都得重新注册一遍——而**忘记注册的凭据就是会原样进对话记录的凭据**。
-所以 hosts.json 里可以只存**路径**：
-
-```jsonc
-{"name":"dev", "addr":"user@h", "secrets":{"apptoken":"~/.config/myapp/token"}}
-```
-
-首次连接进入 `cold → initializing → ready|failed`：连接持有该 alias 的 identity/generation lease，原子加载全部声明 secret 后才进入 pool 并服务并发请求。`rdev_session.connection_security` 会显示状态和固定 reason。
-存的是路径不是值，所以本地磁盘上依然没有任何凭据。已在同一精确 host identity 下显式注册的同名 secret 不会被覆盖（手动调用优先）。任一声明读取失败、二进制、空值、短值或截断都会令初始化 **fail closed**；连接不会伪装成已保护。
-
-所有入口统一拒绝小于 **6 bytes** 的值。远端 secret 最大 64 KiB；恰好边界且 `EOF=true` 可接受，`EOF=false`（包括多一字节）拒绝且 Store 保持不变。
-
-Host 的地址/用户/端口/远端 state namespace/scope 身份变化时，旧 sticky state 和该 alias 的所有 scoped secret 会被清理并推进 generation；不会把旧凭据迁移到新目标。只改变 `force_agent_upload` 会重建连接和重载 secret，但保留非身份性的 sticky 配置。
-
-声明式值带有 `declarative` provenance，安全重连时会原子重读；同一 exact key 的手工值带 `manual` provenance，继续保持显式优先。每次输出同时用“操作开始时的不可变脱敏快照”和返回时的当前 Store 处理，因此轮换/删除不会让在途旧响应失去 redactor，新注册值也会被覆盖，且不会把不同 host 的长操作全局串行化。远端声称 `content_b64=true` 也不是绕过许可：若编码字符串命中已注册值，该片段会 fail closed 地改为普通脱敏文本，而不是返回看似有效但已被篡改的 base64。
-
-按长度降序替换：当一个 secret 是另一个的子串时，先替换短的会让长的漏出片段。
-
-**容忍换行**：值被 config dump / YAML 折行 / `fold` 拆到多行时仍然会被替换(空白字符可插在字符之间)。
-这是格式化事故不是刻意隐藏,所以划在防守范围内。只对 ≥16 字符的值启用——太短的话"字符间夹空白"这个模式
-可能在无关输出里自然出现。实测覆盖:换行、多次换行、空格、tab、CRLF、缩进续行。
-
-代价可控:`Redact` 跑在每条命令的每个字节上,所以先用一次 `ContainsAny` 判断有无空白,
-单行输出直接跳过扫描。实测单行 65KB **707 MB/s**(72 B/3 allocs),带空白的 64KB 输出 239 MB/s。
-
-**已知限制**：匹配仍是全值的。这些**主动变形**后的片段拦不住(实测确认):
-
-| 输出形态 | 是否拦住 |
-|---|---|
-| 原样 / JSON 引号 / URL query / 尾随换行 / 被标点包围 | ✅ |
-| 跨行折断(含 CRLF、缩进续行) | ✅ 本轮新增 |
-| `cut -c1-4`(前 4 字符)、后 8 字符 | ❌ |
-| 长前缀/长后缀(39 字符的值取 30) | ❌ |
-| 重新 base64、取 hash、大小写变换 | ❌ |
-
-它防的是「凭据被原样 echo / dump / 折行 / 引用」这类常见事故,不是防刻意提取。
-
-### 7. 请求按 ID 多路复用，两侧都并发
-
-原先 `Conn.Do` 全程持锁、agent 也串行处理，所以对同一台机器的两个调用是排队的——一个 60s 的命令挡住所有其他请求。Claude 并行发多个 tool call 是常态，这个上限很容易撞到。
-
-现在两侧都改了：
-
-- **host 侧**：单独一个 reader goroutine 按 `resp.ID` 派发到等待者，`Do` 只在注册 pending 时短暂持锁。
-- **agent 侧**：普通请求进入固定 worker/queue，`job_wait` 进入独立的固定 worker/queue；队列满时返回结构化资源错误，不再为每个请求创建 goroutine。相同 job 的 waiter 共享一个底层 watcher，订阅数、watcher 数和 fan-out 都有硬上限，取消会移除订阅并停止最后一个无人使用的 watcher。
-- **控制面**：`cancel` 不排普通队列，按 caller identity + operation ID 精确命中前台进程组。协议两端每条连接各有一个固定 writer loop，使用有界 control/data 队列、总 frame budget 和 control 优先级；不为单次写创建 goroutine。data 在固定 stream window 内尽力发送，队列压力下可丢弃并由最终截断账本说明；底层 pipe 写超时则关闭污染连接并唤醒全部等待者，terminal/cancel 不会无限卡在另一条慢写后面。
-
-writer 不持连接状态锁执行底层 I/O。host 在同一个 `pending` 状态机和连接锁内原子仲裁 terminal commit 与 context cancel：terminal 已 commit 时即使 `select` 选中 `ctx.Done()` 也返回 terminal；cancel 先赢时先标记/移除 pending，再在锁外发送稳定的精确 cancel。取消初始请求、派发回复和 writer teardown 因而不会互相等待锁，也不会把已被 transport 接受的 success 误报为 canceled。
-
-SSH stdin/stdout pipe 不支持可靠的 write deadline，而且 Linux 上从另一 goroutine `close` 同一个 fd 不保证中断已经进入内核的 pipe `read`/`write`。固定 watchdog 先唤醒等待者并触发有界的 attached cancellation/worker drain；预算结束后 serving agent 走明确的进程退出路径，由进程退出最终关闭 SSH channel。detached supervisor 属于独立 session/context，不在该退出路径中被信号终止。
-
-取消一个请求不需要关掉整条连接。agent 对前台命令建立独立进程组；TERM 后即使 leader 先退出，agent 仍保留其未 reap 状态，在 grace 到期后检查并 KILL 原 PGID，避免遗留忽略 TERM 且关闭继承 fd 的子孙进程，也避免 PID/PGID 复用误杀其他请求。协议 deadline、显式 cancel 和附着连接断开只终止 registry 标为 `DisconnectCancel` 的前台目标组，cancel-before-request tombstone 也绑定目标 op，不能毒化复用同 ID 的其他类型；write/job start/stop/rm 等独立 mutation 不会收到伪造的 wire cancel/deadline，已发送后调用方停止等待会返回 `possibly_executed`/`ambiguous_outcome`，而不是谎报 canceled。detached job 使用独立生命周期，不因控制连接断开而被误杀。每个 stream 只允许一个 terminal 事件。
-
-### 8. 远端 job 记录需要回收
-
-job 的 stdout/stderr 是无上界的文件，跑批量任务的机器会一直堆到磁盘满，`job_list` 也因为要遍历每个目录而变慢。`rdev_job_rm` 支持按 id、`older_than_sec`、`keep_last` 三种方式清理。
-
-两个过滤器是**合取**的：`keep_last=5` + `older_than_sec=3600` 意味着保留窗口内的不删、没到期的也不删。这样组合起来是保守的，不会给人惊喜。
-
-**运行中的 job 永不删除**，会出现在 `skipped` 里——删掉记录会让进程继续跑而无法观测和停止，比占磁盘更糟。
-
-**并发删除是幂等的。** job 记录有多个写者：每个 rdev 进程各起一个 agent，共享同一个 `~/.cache/rdev/jobs/`；而单个 agent 的固定 worker 也会并行处理请求（`maxConcurrentRequests`）。原先「读 meta 判断是否 running，再删目录」两步之间没有锁，产生两种错误答案：在删除之后才读到的那个调用会冒出裸的 `meta.json: no such file or directory`；而所有在删除之前读到的调用**都报成功**——`os.RemoveAll` 对已不存在的路径返回 `nil`，于是 6 个并发删除报 6 次删除、6 倍的 `freed_bytes`。后者更糟，因为它看起来是对的。
-
-现在每个 job 由 `<state>/.job-locks/<id>.lock` 上的 `flock` 保护，覆盖 `job_rm`（单个和 sweep）、`job_stop` 的状态写入、以及 supervisor 记录退出码的那一步。锁文件放在 `jobs/` **之外**：放在 job 目录里会被它自己序列化的那次 `RemoveAll` 删掉，而放在 `jobs/` 下又会被 `job_list` 的 `Total` 计数进去。
-
-`keep_last` 与 `job_list` 共用同一个严格顺序：新记录保存 RFC3339 纳秒时间；兼容旧的秒级记录时先按解析后的真实时间排序，同一时刻再按 job ID 降序打破平局。这样多个 agent 即使同时扫描，也会保护同一组记录；旧记录的同秒真实先后已经不可恢复，ID 仅是确定性兼容规则。`freed_bytes` 定义为成功删除的 job 目录内全部非目录项的逻辑字节数。它在 job 锁内、确认 supervisor/child 都已结束后采样；若有任何路径无法完整 `stat`，该 job 不会被删除或计账，避免把临时写入、并发变化或未观察到的文件算成“已释放”。
-
-记录已经不存在的 job 现在回到 `missing` 字段，而不是报错——和 `skipped`（还活着，故意保留）是两种不同的原因，不该混在一个字段里。调用方要的是「这个 job 不存在」这个状态,而它确实已经达成了。
-
-（锁**只**加在 agent 侧。锁的是文件，不是连接，所以 `internal/transport` 里没有任何相关代码。Windows 远端本来就不支持——见下面的平台一节，`GOOS=windows` 下 agent 连编译都过不了——所以这里不需要 `flock` 的回退实现。）
-
-### 9. 协议兼容是区间，不是精确相等
-
-`proto.Version` 现在是 3，`MinVersion` 是 2。握手交换双方的版本区间和 feature 集合，选择最高公共版本并取 feature 交集；未知 feature 被忽略，操作需要的 feature 缺失时 fail closed 或使用该操作显式声明的安全 fallback。
-
-N/N-1 的共同基础仍可用；只有两端都声明时才启用 operation ID 去重、结构化错误、cancel/deadline、streaming/credit 和截断元数据。v2 peer 不会被误认为拥有 v3 安全保证，尤其不会在无法证明 mutation 未重复执行时静默重放。
-
-完全没有公共版本才拒绝连接，错误消息**分方向给结论**，而不是丢一个 `protocol N, want M` 让人猜该动哪边：
-
-```
-remote agent at ... speaks protocol 1 but this rdev needs 2;
-it was installed by an older rdev -- run 'make agents && make build' and reconnect
-```
-
-`MinVersion` 只在真的放弃老格式支持时才抬——抬早了等于把还能用的 peer 挡在门外。
-
-### 10. 协议兼容解决不了**二进制**抖动
-
-上一节保证了「agent 比 host 新」时协议仍然可用，但没管**谁该覆盖谁**。`ensureAgent` 原先只比 hash 相不相等：
-
-```go
-if installedSHA != "" && installedSHA == want {
-    return nil // already current
-}
-// 否则无条件上传
-```
-
-hash 能回答「一样不一样」，回答不了「谁更新」。于是**最后连上的那个永远赢**：共享开发机上两个同事的 rdev 无限互相覆盖对方的 agent；同一个人开着新旧两个窗口也一样。我们真踩过一整轮 —— 15:39 启动的旧 MCP server 把 16:00 构建推上去的新 agent 反复顶回旧版，持续一下午。
-
-现在多一步**构建标识**比对，但只在 hash 已经不同时才做：
-
-| 情况 | 行为 | 代价 |
-|---|---|---|
-| hash 相同 | 直接返回 | **0 次 ssh**（installedSHA 来自 connect 探测） |
-| 首次安装 | 直接上传 | 没有已装 agent 可比 |
-| hash 不同 | 跑一次 `rdev-agent -version` 再决定 | 1 次 round trip，只在首连和 rebuild 后付 |
-| 已装的更新 | **拒绝并报错** | —— |
-
-比对为什么不能放在 `ping`：ping 需要 agent 已经跑起来，而那时候二进制**已经被覆盖了**，要问的那个身份没了。所以直接问磁盘上那个文件，在写任何东西之前。这次调用带 10s 超时 —— 它 exec 的可能是个半截上传、错架构、或者根本不是 agent 的文件，没有 deadline 的话一个启动就挂住的二进制会把整个 connect 拖死。
-
-**所有拿不准的情况都放行上传**：agent 太老没有 stamp、本地是裸 `go build` 没注入、任意一侧是脏树 —— 这些都不构成降级证据，而一个「拒绝修复损坏的远端 agent」的 bootstrap 比它要解决的问题更糟。
-
-拒绝时的措辞刻意**不**断言远端「比你新」是关于分支的事实。commit 时间能排序两个构建，但共享机器上两个人在不同分支上是**分叉**而非先后，日期比对照样会挑出一个赢家。所以消息只陈述比了什么，让读的人自己判断是哪种情况：
-
-```
-refusing to replace the agent on u@h: the installed one was built later than this rdev
-  installed: 0.1.0 bbbbbbb 2026-08-07T16:00:00Z
-  this rdev: 0.1.0 aaaaaaa 2026-08-07T15:39:00Z
-Overwriting it is what makes two rdev processes flip one agent back and forth.
-If this rdev is simply stale, rebuild it:  make all
-If the builds are from different branches, or you mean to roll back, force it:
-  rdev hosts add dev u@h -force-agent-upload -save
-```
-
-逃生口是 per-host 的（`force_agent_upload`，`rdev hosts list` 会显示），因为需要它的场景 —— 一台 agent 总被别的分支盖的共享机 —— 是那台机器的属性，不是某一条命令的属性。
-
-**默认不静默降级**：这个故障发生时是看不见的，事后又很难归因。
-
-## 实测验证
-
-全部在真实远端（Linux x86_64，SSH 跳板 36000 端口）跑过。
-
-**本轮实际失败过的命令，逐条回归：**
-
-| 验证项 | 之前 | 现在 |
-|---|---|---|
-| `sqlite3` + `$.score` JSON path | `no such column: $.score` | ✅ `exit=0` 零转义 |
-| `uv` 定位 | `command not found` | ✅ `/home/youruser/.local/bin/uv` |
-| 中文 + 引号 + `$()` | `?????` / 被求值 | ✅ `中文 "quoted" $(not-run) 'sq'` 原样 |
-| `cwd` 继承 | 每次手写 `cd` | ✅ `/home/youruser/myproject` |
-| 非零退出码 | 混在文本里 | ✅ `exit=1` + stderr 分离 |
-| 写远端脚本 | heredoc 三层转义 | ✅ `rdev_write` 34 bytes |
-| token 出现在输出 | 明文进对话 | ✅ `<redacted:apptoken>` |
-| `secret:` 注入 | — | ✅ 远端拿到 `LEN=32`，本地看不到值 |
-
-**作业模型：**
-
-| 验证项 | 结果 |
-|---|---|
-| job 跨 3 次 SSH 断连 | ✅ 持续产出 |
-| **退出码跨 agent 死亡** | ✅ `state=exited exit_code=42` |
-| **MCP 进程退出后 CLI 查同一 job** | ✅ `state=exited exit_code=5 label=mcp-e2e` |
-| 远端 grep + tail | ✅ `matched=10` 但只回传 2 行 |
-| stop by pgid | ✅ 连子进程 `sleep` 一起清掉 |
-| **supervisor 被 SIGKILL** | ✅ `state=running orphaned=true child_pid=N`，且 `job_stop` 能清掉 |
-| **UTF-8 边界截断** | ✅ `cap=10` 切在「文」中间 → 返回 `中文测`（valid UTF-8，非乱码） |
-| **远端凭据注册** | ✅ `source=dev:~/.config/myapp/...`，明文不落本地 |
-| **job_wait 阻塞** | ✅ 5s 的 job 阻塞 6s 返回 `exited exit_code=3` |
-| **wait 不阻塞其他命令** | ✅ 同 MCP 进程内 wait 阻塞 12s 期间 `exec` 0.2s 返回 |
-| **wait 超时不影响 job** | ✅ `timed_out=true` + `state=running`，可再等 |
-| **多 id `job_wait`** | ✅ `ids` 共享一个 deadline，逐 job 报结果；坏 id 只影响那一条 |
-| **`wait_any`** | ✅ 快的 job 一结束就返回，不等慢的 |
-| **握手接受更新的 agent** | ✅ host v2 连 `[1,3]` 的 agent 通过；agent 比 host 旧则报错并指明该重建哪边 |
-| **首次连接 host key 未信任** | ✅ 附带取 key / 核对指纹的下一步，并明确劝阻 `StrictHostKeyChecking=no` |
-| **自解释的 ssh 错误不加料** | ✅ 域名解析失败 / 连接被拒 / **host key 变更**原样返回 |
-| **secrets 跨断连存活** | ✅ store 是进程级的，重连后脱敏照旧；重载路径幂等（已注册的名字不重取） |
-| **MCP 边界兜底脱敏** | ✅ 真实 MCP 往返：未逐字段脱敏的 `cwd` 在 `structuredContent` 和文本 fallback 里都被替换；关掉中间件立刻抓到明文 |
-| **`tools/list` 不受影响** | ✅ 中间件只拦 `tools/call`，工具名和 schema 原样通过 |
-
-**本轮新增能力（agent 直连管道实测 + 单测）：**
-
-| 验证项 | 结果 |
-|---|---|
-| **agent 侧并发**：3s 的 exec 与 echo 同时发 | ✅ echo **0.63s** 先返回，slow 3.64s 后到（乱序） |
-| **host 侧按 ID 派发** | ✅ 后到的回复仍送达对应调用方 |
-| **取消不再毁连接** | ✅ 迟到回复被丢弃，同连接下一次调用拿到 `fresh` |
-| **并发写不串行化就死锁** | ✅ `TestConcurrentWritesStayFramed` 抓到并已修（写锁与连接锁分离） |
-| **agent 死亡唤醒全部等待者** | ✅ 3 个在途调用都拿到错因，而非挂到 ctx 超时 |
-| **`-state` 生效** | ✅ job 落在自定义目录，`~/.cache/rdev/jobs` 保持为空 |
-| **`job_rm keep_last=1`** | ✅ 4 个 job → 删 3 个、释放 4699 bytes、保留最新 1 个 |
-| **`job_rm` 拒绝无过滤器** | ✅ 报错而非清空整个目录 |
-| **运行中 job 不被删** | ✅ 进 `skipped`，记录保留 |
-| **`list` 结构化** | ✅ `od d na me.txt` 作为**单个** entry；`symlink=true`、`is_dir=true` 正确 |
-| **陈旧 offset 不再 panic** | ✅ clamp 后返回空 + 可用的 `next_offset` |
-| **Latin-1 文件** | ✅ `content_b64=true`（此前会被 JSON 改写成 U+FFFD） |
-| **session 持久化往返** | ✅ `env` / `remote_dir` / `login_shell:false` 跨进程存活 |
-| **`login_shell` 默认真** | ✅ 缺字段不会被读成 false（用指针 + 只写非默认值） |
-| **MCP 工具全注册** | ✅ 14 个工具经真实 MCP 协议 `ListTools` 校验 |
-| **断连后 agent 及时退出** | ✅ 在途 3600s `job_wait` 不再挡住关闭，2.1s 退出（此前 >15s 仍挂着） |
-| **在途回复仍被冲刷** | ✅ 1s 的 exec 在 stdin 关闭后回复照样送出 |
-
-**本轮（并发安全 + 构建标识）实测：**
-
-| 验证项 | 结果 |
-|---|---|
-| **两个独立 rdev 进程并发 `job rm` 同一个 job** | ✅ 一方 `removed` + `freed=213`，另一方 `missing`。此前一方吐裸 errno、或双方都谎报成功 |
-| **`job rm` 幂等** | ✅ 重复删除回 `missing`，不再 `meta.json: no such file or directory` |
-| **运行中 job 并发删不掉** | ✅ 真实 host 上 `skipped`，记录保留；停掉后才 `removed` |
-| **`.job-locks` 不污染列表** | ✅ 远端 `Total=106` 与实际 106 个 job 目录一致，3 个锁文件不计入 |
-| **锁在**同进程**内也生效** | ✅ 变异测试：把 `Flock` 摘掉，`6 racers claimed to remove`、`5 goroutines inside the lock` 立刻失败 |
-| **`rdev version`** | ✅ 自身 stamp + 4 个内嵌 agent 的 SHA-256 前 12 位 |
-| **`make check-agents`** | ✅ 改一行源码不重建 agent → 4 个平台全部 `STALE` 并给出下一步 |
-| **构建可复现** | ✅ 同源两次 `-trimpath` 构建 SHA-256 完全一致（`check-agents` 用内容比对的前提） |
-| **拒绝降级（真实 host）** | ✅ 装入 clean 2027 stamp 的 agent 后，声称 2020 的 rdev 被拒，错误里同时给出两侧 stamp |
-| **拒绝发生在上传之前** | ✅ 单测断言 ssh 调用里没有固定上传脚本的 `exec dd`——不是先覆盖再报错 |
-| **`-force-agent-upload`** | ✅ 同一个被拒的 rdev 装上了，且**不再**发起 `-version` 探测；`hosts list` 显示该标记 |
-| **正常升级不受影响** | ✅ 2020 stamp → 当前 commit 自动上传，无需 force |
-| **不可比时放行** | ✅ 无 stamp / 无时间戳 / 任一侧 dirty，全部继续上传（否则损坏的远端 agent 将无法修复） |
-| **warm 连接仍是 0 次额外 round trip** | ✅ hash 相同时不探版本也不上传（单测断言 ssh 调用为空） |
-| **`secrets set` 说明缺席原因** | ✅ 解释 store 是进程级的，并指向 `set-from-file` / `check` / `list` |
-
-**性能：**冷启动（含 agent 上传）2.26s → 热连接 0.55s。
-
-**单元测试：**`go test ./... -race` 全绿，201 项
-（agent 87、transport 33、mcpsrv 25、client 20、secrets 14、session 14、buildinfo 8）。此前 `transport` 与 `mcpsrv` 两个包零覆盖，现已补上。
-
-开发过程中测试抓到 7 个真 bug：
-1. job ID 用 `nanosecond/100000` 做后缀，同毫秒必碰撞 → 改 `crypto/rand`
-2. macOS 的 openrsync 不认 `--info=stats1` → 只用可移植 flag
-3. **MCP 并发调用导致多个 goroutine 同时 bootstrap，抢同一个 `.tmp` 文件** → 加 per-host dial 锁 + PID 后缀
-4. **supervisor 被 SIGKILL 时子进程变孤儿继续跑，但状态报 `unknown`** → 三级状态判定（status.json → supervisor pid → child pid），`job_stop` 也能清孤儿
-5. **`max_output_bytes` 按字节硬切会切断多字节 UTF-8** → 截断时丢弃不完整 rune
-6. **`rdev_secrets` 只能读本地文件**，远端凭据要 sync pull 绕路 → 加 `host` 参数直读远端
-
-7. **`job_wait` 在 `doJob` 里实现了但 dispatcher 没路由**，报 `unknown op` → dispatcher 改为查 `isJobOp()`，op 列表只有一份
-
-第 4、5、6 三个是用户实测报告发现的；第 7 个是加 `job_wait` 时自己撞上的 —— 起因是 `main.go` 和 `jobs.go` 各维护一份 op 列表，现在只有一份了。
-
-**本轮代码审查又抓到 8 个：**
-
-8. **`job_logs` 的 `since_offset` 超过文件大小 → `makeslice: len out of range` panic**。`info.Size()-p.SinceOffset` 为负。增量轮询遇上日志轮转/截断就会触发，而当时**全项目没有一处 `recover()`**，一个请求能带走整个 agent 进程和该主机所有连接状态 → offset clamp 到 `[0, size]`，serve 循环加 per-request recover
-9. **`isPrintableUTF8` 只检查 NUL，不检查 UTF-8 有效性**。Latin-1 文件（无 NUL）被当文本发出，`encoding/json` 静默改写成 U+FFFD —— 恰好是 `doRead` 注释声称要避免的事 → 改名 `isJSONSafeText` 并加 `utf8.Valid`
-10. **`rdev_session` 的 `persist` 报 `saved=true` 但丢掉 `env` 和 `login_shell`**。`hostEntry` 只有 5 个字段，`State` 有 3 个。用户以为粘性 env 存下来了，重启后静默消失 → 补字段；`login_shell` 用**指针**，否则 `omitempty` 会让显式的 `false` 在往返中变回默认 `true`
-11. **`Host.RemoteDir` 与 agent 硬编码的 `~/.cache/rdev` 分叉**。host 按 `RemoteDir` 装二进制和建 `jobs/`，agent 却总读默认路径，设了自定义值两边就对不上；而且该字段**根本没有设置入口**（只能手编 JSON）→ host 显式传 `-state`，并在 MCP/CLI 暴露；改 `RemoteDir` 时顺带 `Disconnect`，否则旧连接会继续用旧设置
-12. **多路复用的写锁若与连接锁共用即死锁**。管道满时写会阻塞到 agent 读走，但持着连接锁 reader 就无法派发回复，而正是这些回复才能让 agent 继续消费 → 分成 `mu` / `writeMu` 两把
-
-第 8、9 两个是纯读代码时用一次性探针测出来的；第 12 个是 `TestConcurrentWritesStayFramed` 挂住 30s 暴露的——它会在真实的并行 tool call 突发下命中。
-
-**复查自己这轮改动时又抓到 3 个：**
-
-13. **`wg.Wait()` 让 agent 在断连后挂着不退**。为「冲刷在途回复」加的排空是无界的，而 `job_wait` 可以有 3600s 预算，于是每一条掉线的 ssh 都会留下一个空转 agent。Phase 3 将连接生命周期纳入请求状态机：断连立即取消附着的前台进程组和 wait 订阅，固定 worker 会回收；已经 detach 的 job 由独立 supervisor 生命周期继续运行。竞态测试同时断言目标进程消失、其他请求存活且每个操作只有一个 terminal
-14. **`JobOut` 丢掉了 `orphaned` / `child_pid`**。agent 算得出、CLI 直接打印 `proto.JobInfo` 所以能看到，但 MCP 侧结构体没这两个字段——于是**同一个孤儿 job，CLI 说 orphaned、MCP 说健康**，正是 `internal/client` 想防的前端漂移
-15. **`IsConnected` / `Disconnect` 经 `Hosts.Host` 解析会顺手注册主机**。该方法有意会把 ssh 形态的名字自动注册（为一次性机器提供便利），所以一次只读的状态查询就能在 `rdev_session` 列表里留下一个幽灵条目 → 这两处改为直接查连接池
-
-第 13 个是我自己在做多路复用时引入的，只在「断连时恰好有长 `job_wait` 在途」才显现，例行测试跑不到。
-
-另外修了两处不算 bug 但很脆的地方：`readFull` 用 `err.Error() == "EOF"` 做字符串比较（改 `errors.Is(err, io.EOF)`），以及 README 工具数写的是 11。
-
-**本轮抓到 1 个假测试和 1 个真泄露：**
-
-16. **`TestLoadHostSecretsKeepsExplicitValue` 是空的。** 起因是想确认「断连重连后声明式 secrets 还在不在」——如果丢了，脱敏会**静默失效**，输出照样返回，唯一的变化是 token 变成明文。结论是安全的（store 是进程级的、重载路径有 `Get` 幂等检查），但补测试时用变异测试验了一下：**把 `Get` 守卫整个删掉，测试照样通过**。原因是失败路径故意是静默的，于是「跳过了」和「重取失败但旧值还在」从外部完全无法区分。唯一的可观测差别是那条 stderr 警告 → 警告改走可注入的 hook，断言改成「不应该有警告」。删掉守卫时新测试会失败，旧的那个仍然不会（留着，但有牙的是新的那个）。
-    唯一的线索其实是运行时间：3.08s vs 0.45s——因为没有守卫它会真的去 dial。
-
-17. **`SyncResult.Command` 回传未脱敏的 rsync argv。** 就在 `Stdout` / `Stderr` 两行**下面**——同一个结构体字面量，上面两个字段过了 `Redact`，它没过。而 argv 是调用方给的：`--exclude` 模式和路径都可能带凭据。实测确认同一个 secret 在 `Stdout` 里是 `<redacted:tok>`、在 `Command` 里是明文。`ExecResult.Cwd` 是同一类（从请求回显），也一起补了。
-    根因是**脱敏按字段做而不是在边界做**——所以除了修这两处，还加了 MCP 边界兜底（见决策 6）。
-    加完之后又在两个地方发现同一个 bug：`rdev_session` 的 `cwd` 没脱敏（做兜底时撞到的），
-    `JobInfo` 的 `Label` / `Cwd` 也没有（追 `redactJob` 的 0% 覆盖率时撞到的，`Argv` 脱了、这两个漏了）。
-    也就是说我报告「一个泄露」的时候，实际至少有**四个实例**，我只看到了自己碰巧看的那个。
-    这正是「逐字段」的问题：修掉看得见的那个，剩下的仍然静默存在——所以真正的修法是边界兜底 + 用反射遍历字段的测试。
-
-## CLI
-
-MCP 之外还有一套 CLI，共享同一 `internal/client`，给人肉调试和 CI 用：
-
-```bash
-rdev exec dev -- sqlite3 db "SELECT json_extract(x,'\$.score') FROM runs"
-rdev job start dev -label batch -- ./run.sh
+rdev exec dev -timeout 30 -- sqlite3 db "SELECT json_extract(x,'\$.score') FROM runs"
+rdev job start dev -label batch -env MODE=batch -wall-timeout 600 -- ./run.sh
+rdev job wait dev <id> -timeout 60 -tail 20
 rdev job logs dev <id> -grep ERROR -tail 50
-rdev job wait dev <id> -timeout 600 -tail 20              # 阻塞到结束，退出码透传给 shell
 rdev job stop dev <id> -signal TERM -grace 5
-rdev job rm dev -keep-last 5 -older-than 86400            # 回收旧 job 的日志
-rdev read dev ~/app/config.yaml
-rdev ls dev ~/app -limit 50                               # 结构化，不用解析 ls
-echo "content" | rdev write dev /tmp/f.txt
-rdev sync dev push ./src /remote/dst -exclude .git -dry-run
-rdev hosts list                    # 含 scope / remote_dir / env
-rdev hosts trust                   # 项目配置路径、SHA-256 和批准状态
-rdev hosts approve-project <sha256>
-rdev hosts add dev user@h -port 36000 -save          # project scope
-rdev hosts add prod user@h -global -save             # 全局可见
-rdev hosts add dev user@h -env PROXY=http://p:1 -remote-dir '~/.cache/myrdev' -no-login -save
-rdev hosts add dev user@h -secret apptoken='~/.config/myapp/token' -save   # 只存路径,不存值
-
-# secrets 是 MCP 功能（store 在内存里，按进程隔离）。
-# CLI 这三条只用来验证凭据路径解析正确、且脱敏真的覆盖了远端的值：
-rdev secrets set-from-file apptoken ~/.config/myapp/token -host dev   # 只打印长度，不打印值
-rdev secrets check dev apptoken -path ~/.config/myapp/token -- env    # → {"redacted": true}
-rdev secrets list                                                     # 本进程已注册的 scope/host identity/name 描述符
+rdev job rm dev -keep-last 5 -older-than 86400
+rdev read dev '~/app/config.yaml'
+rdev ls dev '~/app' -limit 50
+printf '%s\n' content | rdev write dev /tmp/f.txt
+rdev sync dev push -exclude .git -dry-run -- -leading-local /remote/dst
+rdev sync dev push -- './目录 with spaces' /remote/dst
+rdev state inspect dev
+rdev state migrate dev -dry-run
+rdev support dev -refresh
+rdev env inspect dev
+rdev compat
 ```
 
-**CLI 故意没有 `secrets set <name> <value>`**，尽管 MCP 侧有 `action=set`。理由不是「避免密钥进 shell history」（那是个次要顾虑），而是它**做不到**：CLI 会注册、打印长度、然后进程退出，store 随之消失 —— 看起来提供了 MCP 的能力，实际什么也没做。MCP 侧有意义是因为 `rdev serve` 是长生命周期进程，注册完还会接着用那个值。
+`write` 和共享 `secret set` 读取有大小上限的 stdin；EOF 才代表正常结束。非 EOF 错误，包括“部分数据同时报错”，会失败并丢弃已读内容，在 standalone/broker 两条路径上都不提交部分业务写入。同步的本地路径可在 `--` 后以裸 `-` 开头，支持空格和 Unicode；远端根路径沿用受限的安全字符语法，不能套用本地路径的宽松规则。
 
-所以 `rdev secrets set` 现在返回一条解释这件事的错误,并指向真正能用的三条:
+## 地址与 SSH
 
+配置入口、registry、连接身份及最终 SSH 参数使用同一地址解析器：
+
+| 形式 | 含义 |
+|---|---|
+| `service-deploy` | `hosts add` 的 SSH config alias；直接业务调用的裸单词必须先注册为 rdev alias |
+| `host.example` / `192.0.2.1` / `user@host` | DNS、IPv4 或指定 SSH 用户 |
+| `user@host:2222` | 内嵌端口 |
+| `2001:db8::22` | 整体是裸 IPv6 地址，末段不是端口 |
+| `user@[2001:db8::1]:2222` | 带端口的 IPv6 |
+| `[::1]` 配合独立 `-port 2222` | IPv6 地址与独立端口 |
+
+```bash
+rdev hosts add ipv6 'user@[2001:db8::1]:2222' -save
+rdev hosts add jump-target service-deploy -save
 ```
-$ rdev secrets set -name x -value y
-rdev: rdev has no `secrets set`: this store is in-memory and per-process, so a value
-registered by one CLI command is gone when it exits.
-To check that a credential file resolves and that redaction covers it:
-  rdev secrets set-from-file <name> <path> [-host H]
-  rdev secrets check <host> <name> [-path P] -- <argv...>
-The MCP rdev_secrets tool does offer action=set, because `rdev serve` is a
-long-lived process that goes on to use the value.
+
+内嵌端口与独立非零 `port` 不能同时给出，即使数值相同；CLI 显式端口范围为 1–65535。空主机、畸形括号、非法端口、option-shaped 地址、空白/控制字符均拒绝。规范地址与端口进入 registry 和连接 key，用户/端口不同保持连接身份隔离。SSH 使用无括号 IPv6 destination，rsync 的 `host:path` 使用加括号的 IPv6。
+
+OpenSSH 的 `BatchMode` 禁止交互认证提示。首次连接前按用户的 SSH host-key 策略登记并核对指纹；rdev 不关闭 host-key 检查。SHA-256 用于验证 agent 上传内容，不能替代 SSH 主机身份，也不是发布签名。
+
+## 共享连接、权限与后台状态
+
+MCP 使用官方 SDK 的 JSON-RPC 2.0 over stdio。内部 client↔broker 和 client/broker↔agent 使用各自版本握手及按 ID 关联的 NDJSON 协议，**不是 JSON-RPC**。
+
+```text
+AI / SDK ── MCP JSON-RPC stdio ── rdev
+CLI ────────────────────────────┘
+ standalone: rdev ── SSH + agent NDJSON ── rdev-agent
+ shared:     rdev ── Unix socket + broker NDJSON ── rdevd
+                    rdevd ── SSH + agent NDJSON ── rdev-agent
 ```
 
-`--` 之后的一切都作为字面 argv 传递，本地 shell 也不会二次解析。
+standalone 的连接池属于当前进程；共享模式由一个 `rdevd` 持有基础 agent transport，多个前端复用它，并按需建立独立 bulk lane。standalone 的基础连接保留到显式断开、失效或进程关闭；broker 区分 active host 限额、warm pool、warm idle TTL、最后客户端退出后的 grace 和 bulk idle TTL。清理遵守在途 lease，不会因为一个客户端退出就关闭其他客户端仍使用的 transport。后台 supervisor 独立于这些连接的生命周期。关闭 agent channel 不承诺结束用户或其他进程共用的 OpenSSH master；master 仍遵守其 ControlPersist 策略。
+
+broker 凭证绑定精确 `(client_id, project_id)`，policy 默认拒绝并支持 exact-host grant。任意 exec、写入、job start/stop/rm 和其他 mutation 不能靠客户端 `Risk=false` 绕过审批。审批绑定 owner、目标身份、有效请求摘要和 policy snapshot；audit 使用摘要及最小化 metadata，不记录原始 secret、命令输出或任意请求正文。详见[运维说明](docs/rdevd-operations.md)。这些权限控制不隔离能访问同一 OS 账户私有文件的进程。
+
+相同 job 的等待共享远端观察，每个客户端保留独立观察时限和取消生命周期；订阅到期会释放计费，job 继续运行。job 所属 owner/project 由 broker 管理，普通业务查询不能跨 owner 观察或控制。`pool.health` 和 state 管理等全局/host-wide 管理接口需要单独授权。
+
+新 job 先建立 durable intent 和可恢复身份，再启动 supervisor。已知 outcome 可查询并复用；无法证明是否执行的 mutation 保持 `possibly_executed` / `ambiguous_outcome`，不能自动换 ID 重放。agent 的通用短期去重缓存仍有容量和 TTL，不能把它理解为任意命令的永久 exactly-once 保证。
+
+supervisor 记录退出码，支持跨 SSH 断连和 serving agent 重启查询；主机重启、supervisor 被杀或损坏状态可能使结果变成 unknown/orphaned，不能保证恢复丢失的退出码。job 日志和受管磁盘有上限、截断账本及清理契约；这不限制任意业务程序在受管目录外写入的磁盘。`job rm` 不删除仍运行的任务，按持久进程身份及 job 锁检查，并区分 removed/missing/skipped。
+
+同步遵守排除保护、路径布局、symlink/conflict 策略和资源计费。standalone `--delete` 需要预览检查和显式确认；broker 先 `-prepare` 获取保留计划，再用 `-plan` 与精确审批执行，删除额外要求 `sync.delete` 和 `-confirm-delete`。取消同步会终止该 rsync 的进程组，不关闭其他客户端的共享基础 transport。
+
+## 凭据与脱敏
+
+standalone 的手工/声明式 secret store 是进程内存态；host 配置只保存声明路径。连接初始化先原子读取并验证全部声明 secret，再发布 ready 连接，失败时 fail closed。同一 host identity 的手工值优先，重连刷新声明值。`secret:name` 只解析当前 host 的精确 scoped 值，不回退到别的 host 或 output-only 值。
+
+broker 的 `secret set`、`set_from_file`、`list`、`delete` 是 principal-owned 持久凭据接口，凭据版本保存在 daemon 的私有 `<socket>.secrets` 文件中（0600）。备份、访问和清理该文件应按私有凭据处理。引用还需 `secret.use`；远端文件导入同时需要 `secret.set_from_file` 和 `read_file` 授权及审批。共享模式暂不支持把管理员 registry 的声明式 secret 自动委派给业务 principal，替代方式是显式导入 principal-owned 凭据。
+
+```bash
+# broker 模式：值经 stdin 输入；设置/导入/删除仍需对应授权和审批
+rdev secret set dev apptoken < /private/token
+rdev secret set_from_file dev apptoken '~/.config/myapp/token'
+rdev secret list dev
+rdev secret delete dev apptoken
+
+# standalone：这些命令用于验证本进程的注册及脱敏
+rdev secrets set-from-file apptoken /private/token -host dev
+rdev secrets check dev apptoken -path '~/.config/myapp/token' -- env
+```
+
+返回边界递归脱敏已注册值，standalone MCP 另有结果中间件兜底。轮换/删除时保留在途操作的旧脱敏快照；broker 使用 principal/host 绑定的 credential archive。secret 最少 6 bytes，远端导入最多 64 KiB，空值、二进制、截断和读取失败不会发布部分注册。
+
+脱敏用于降低意外 echo/dump 的泄漏风险：支持原值和一定条件下的空白折行；不承诺拦截部分值、重新编码、hash、大小写变换或主动窃取。未注册凭据不会自动识别，远端日志文件也不会因客户端脱敏而被清洗。exec/read/sync 的二进制返回在脱敏边界解码后处理，输出截断报告明确记录保留和丢弃的字节，不构成丢弃数据的归档。
 
 ## 平台支持
 
-本地和远端是**两套独立要求**，agent 只被交叉编译成四个 POSIX 组合。交叉编译成功不等于真实环境认证；`rdev support` 输出带 schema 版本的机器可读矩阵，避免把 build-only 平台误报为 Tier 1。
+`rdev support` / `rdev_support` 使用 `internal/support` 同一数据源，区分静态 supported/experimental/unsupported、build-only、历史基线和真实运行验证。带 host 的探测只说明当前目标能力，不能升级整个平台的认证等级。
 
-| 组合 | 本地（跑 rdev） | 远端（跑 rdev-agent） |
+| 组合 | 本地 rdev/rdevd | 远端 agent |
 |---|---|---|
-| macOS arm64 | **Tier 1 开发/测试基线** | build-only |
-| macOS amd64 | build-only | build-only |
-| Linux amd64 | build-only | **Tier 1 真实 SSH 手工基线** |
+| Linux amd64 | standalone/shared 真实运行验证 | Ubuntu 真实 SSH、同步、取消、job 验证 |
 | Linux arm64 | build-only | build-only |
-| Windows | 不支持 | 不支持 |
+| macOS arm64 | 历史开发基线；本次 shared runtime 未验证 | build-only |
+| macOS amd64 | build-only | build-only |
+| 原生 Windows | unsupported | unsupported |
 
-当前认证过的主路径是 macOS arm64 本地连接 Linux amd64 远端。其他 POSIX 组合保持构建兼容，但在隔离的真实 OpenSSH/ProxyJump/rsync harness 完成前不作为默认运行时承诺。OpenSSH 必须提供 `BatchMode`、`ControlMaster`、`ControlPath` 和 `ControlPersist`；最低版本尚未认证，不在文档中猜测一个数字。
+**macOS runtime 尚未验证，已由用户明确延期；交叉编译不算实测。** Darwin 配置的 fd-native ACL 检查依赖 cgo，无该能力时 fail closed。OpenSSH 需要 `BatchMode`、`ControlMaster`、`ControlPath`、`ControlPersist`；最低版本尚未完成正式认证。复杂 ProxyCommand 是实验能力；PTY/TUI、通用端口转发、完整 ACL/xattr/owner 保真和 remote-to-remote sync 不在当前支持范围。
 
-### Windows 远端：三层障碍，不是一层
+shared `support HOST` 返回当前 principal 的权限快照；`permission_denied` 与平台 unsupported 分开。`scope=broker` 表示无 host 的本地 broker 接口；`secret.use`、`sync.delete` 的 `callable=false` 表示附加权限，不是独立路由。没有 `capability_probe` 授权时不触发 SSH，也不返回其他 owner 的状态、registry 或 execution profile。权限许可不替代 runtime 能力、资源准入或 mutation approval。
 
-最初这里只写了「job 模型依赖 POSIX 进程组」。那个说法不完整——真正要动的是三层，而且难度递增：
+## 兼容与发布检查
 
-**① bootstrap 用的全是 POSIX 工具。** 「零远端准备、首次连接自动上传 agent」这个卖点是这么实现的：
+`rdev compat` / `rdev_compat` 从实际版本常量、错误注册表、配置结构和校验逻辑生成机器可读契约，覆盖 client/agent、client/broker、错误 code、host/broker config、project trust 和持久 state。
 
-| 步骤 | 实际命令 | Windows 上 |
-|---|---|---|
-| 探测 | `sh -c` 跑 `uname -s`、`uname -m`、`$HOME`、`sha256sum`\|`shasum` | 全都没有 |
-| 上传 | 固定 `sh -c` 脚本执行 `dd`，路径通过位置参数、内容走 stdin | 没有 `dd` |
-| 安装 | 固定 `sh -c` 脚本执行 `chmod`/`mv`，路径只走位置参数 | 没有 `chmod`/`mv` |
+standalone client/agent 当前协商 2–3，client/broker 协商 1，broker/agent 要求协议 3 保留 principal 身份。协议 2 只保留公共 unary 操作；依赖 v3 feature 的操作明确拒绝，不能获得 v3 取消、streaming 或去重保证。不相交或非法版本区间在业务请求前失败。N/N-1 指声明的协议/schema 范围，不代表任意前一发行版或任意配置字段都兼容；旧 broker 上没有的新路由会失败，不回退为 standalone。
 
-Windows OpenSSH 默认 shell 是 `cmd.exe`，**第一个 `uname` 就失败**——连「这是台什么机器」都问不出来，而要先知道是 Windows 才能换命令，鸡生蛋。PowerShell 侧有对应物（`Get-FileHash`、`$env:USERPROFILE`），但 9MB 二进制经 stdin 灌进 PowerShell 是出名的难搞（编码改写）。
+host/broker config 当前仍是无版本 JSON shape，两者对未知字段的处理不同，以 `compat` 为准。state 迁移只按声明的 legacy→current 方向进行；未来 schema、损坏记录和不支持组合不会被静默当作当前版本。错误 code 和 retry/execution-state 含义属于契约，未知 code 不应被猜成可重试。
 
-**② job 模型建在 POSIX 进程语义上。** `Setsid` 把 job detach 出去（决策 3）、`syscall.Kill(-pgid)` 按进程组停子进程、`Kill(pid, 0)` 探活——`GOOS=windows` 下这些直接不编译（`-gcflags=-e` 数出 12 处，分布在 `jobs_run.go` / `jobs.go` / `main.go` / `supervise.go`；不加 `-e` 只会显示 10 条然后 `too many errors`）。都有对应物（Job Object、`OpenProcess`），是体力活。
-
-**③ 信号语义无法等价，这层是永久降级。** Windows 上唯一保证生效的是 `TerminateProcess`，即 SIGKILL 等价物，**没有优雅版本**。`CTRL_BREAK_EVENT` 只能送到同组的控制台进程，且**可以被忽略**。于是 `job_stop` 的 `-signal TERM -grace 5` 会静默退化成「尽力发个 break，然后硬杀」——同一个 API，更弱的保证，而且恰好落在这个项目最核心的卖点上。
-
-所以 `mapPlatform` 只认 `uname -s` 的 `linux` / `darwin`，其他值直接报 `unsupported remote OS`。**明确报错优于给一个看起来能用、实际保证更弱的实现。**
-
-**已知可行但未实现的路（Tier 1）**：放弃「零远端准备」，成本立刻掉一个数量级——用户手动装一次 `rdev-agent.exe`，配置里声明 `platform: windows`，rdev 跳过探测和上传直接启动它。`exec` / 文件操作 / `list` 基本原样可用，而 `job_*` 显式返回 `unsupported on windows hosts`。**降级是显式的**，不违反上面那条原则。估一两天，等第一个真实用户出现就做。
-
-（附带一个推测,没有 Windows 机器可验:login shell trampoline 大概可以直接跳过——Windows 的 PATH 来自注册表、由所有进程继承,决策 5 要解决的 `uv: command not found` 在那儿本来就不存在。真做的时候要先确认。）
-
-### 本地 Windows：未验证
-
-`rdev` 自身能 `GOOS=windows` 编过，但它调用外部 `ssh` 并依赖 `ControlMaster` 做连接复用——OpenSSH for Windows 至今不支持连接复用，而复用正是热连接 0.55s 的来源。`rdev_sync` 还依赖 `rsync`，Windows 不随系统提供。原生适配大概要引入 Go SSH 库自己管连接池，那是把「调用系统 ssh、复用它的 config 和 ProxyJump」这个简化假设整个推翻。没跑过，所以不宣称支持。
-
-`make` 的任何目标都不产出 Windows 二进制（`PLATFORMS` 只有四个 POSIX 组合），所以没人会**意外**拿到一个跑不起来的版本。
-
-> WSL2 里两侧都能当 Linux 用，零改动。但这**不是上面两个问题的答案**——想直接拿 Windows 当开发机的人，恰恰就是没装 WSL2 的那批人。列在这儿只是因为「如果你恰好有」。
-
-## 首次连接：host key 必须先信任
-
-`BatchMode=yes` 是必须的（交互式提示会挂死 MCP server），代价是**新主机的 host key 必须在首次连接前就被信任**，否则 ssh 直接失败。
-
-这曾经只抛出一句 `Host key verification failed`。现在会附带下一步——怎么取 key、去哪核对指纹、以及**为什么不要用 `StrictHostKeyChecking=no`**（它会永久关掉这个检查，而 rdev 所有凭据脱敏的前提是「你连的是你以为的那台机器」）。
-
-自解释的错误保持原样：域名解析失败、连接被拒，以及**host key 变更**——那条 OpenSSH 自己的警告比任何补充都更响亮、更具体，压在下面反而是帮倒忙。
-
-## v1 明确不做
-
-- ❌ **通用 shell 逃生口** — 见决策 1。这不是权衡，是整个项目的支点。
-- ❌ **交互式 PTY / TUI 转发** — Claude 用不上；人肉需求直接用 `ssh`。
-- ❌ **端口转发** — `ssh -L` 够用，而且它和 rdev 复用同一条 ControlMaster，用户已经有了。
-
-## 还没做的（按优先级）
-
-已完成的项留在这里作为记录：**首次连接的 host key 提示**、**secrets 跨断连存活**（结论是本来就安全，但补了测试）、**脱敏加 MCP 边界兜底**（见决策 6；bug 17 暴露了逐字段写法会漏，现在新字段自动覆盖）。那几轮还抓到一个假测试和一个真泄露，见 bug 台账 16、17。
-
-本轮完成：**job 记录并发安全**（决策 8，flock；实测过的两种错误答案里，「全员谎报删除成功」比裸 errno 更危险）、**拒绝静默降级 agent**（决策 10；hash 比不出新旧，所以最后连上的永远赢）、**构建标识 + `make check-agents`**（`rdev version` 现在能回答「我这个二进制带的什么 agent」）、**`secrets` CLI 面对齐**（`set` 不是漏了而是做不到，写下来了）。
-
-安全演进 Batch A（Phase 0–1 当前批次）已在 `c9a796cc8ea57aee2afbca13671d27b360baaee5` 完成独立审查与验收：项目配置摘要审批、canonical host generation 与 per-alias operation lease、带明确 commit point 的事务式批准、集中 SSH destination/`RemoteDir` 校验、显式四态且 fd/inode 绑定的安全 bootstrap、配置 no-follow/owner/mode/fd-native ACL/原子写，以及 rsync `--`/路径验证均已落地。Phase 2 已继续落地 host-scoped secret、初始化 lease、递归输出脱敏、截断/短值拒绝和 Host 重定义清理。Phase 3 已完成请求分类与安全重试、稳定 operation ID、agent 端有界去重、结构化错误、协议 cancel/deadline、双向 frame 硬限额、固定 stderr ring、统一资源上限、共享 wait watcher、流状态机/credit 和 CLI/MCP 截断投影；独立复核后的最终收口还补齐了 leader 早退时的组级 KILL、两端单一有界 writer、rsync 双路有界捕获、业务错误统一映射、v3 terminal 严格校验、host 端 cancel/final 原子仲裁，以及真实慢读 SSH channel 下的 agent 进程级退出。完整完成记录见[演进规划](docs/rdev-evolution-security-plan.md)。
-
-**Phase 3 — 请求结果不再靠猜。** 所有操作来自唯一注册表并分为 read-only、idempotent、mutating；未知操作 fail closed。client 为一次逻辑调用生成稳定 operation ID，重连仍绑定同一 caller、operation、请求摘要和 Phase 2 identity/generation lease。agent 的 accepted/final 去重记录有容量、总字节预算和 TTL 上限；同 ID 不同操作或摘要会明确冲突。mutation 只有在同一 agent 的记录能证明安全时才返回已缓存 terminal，重连启动新 agent、agent 重启或安全记录已淘汰时返回 `ambiguous_outcome`，绝不静默再执行。
-
-前台 `exec` 在线协议上先发 `accepted`/`progress`，命令仍在运行时直接发出有界 `data`，结束时只发一个 `final`；每个 data stream 受 credit/window 和总输出预算约束。当前 CLI/MCP API 仍在调用结束时投影最终聚合结果：标准 MCP 增量通知需要客户端提供 progress token，因此没有 token 时不会伪造实时 UI。长任务持续观察仍使用 detached job + `job_logs`/`job_wait`。
-
-协议 request/response frame 统一硬限制为 8 MiB，无换行超长帧在 `limit+1` 字节内失败并关闭污染连接；stderr 保留固定 64 KiB 尾部，bootstrap 辅助 stdout 也有固定上限。read/output/line/wait/watcher/queue/stream window 都有绝对硬上限，调用方只能在硬上限内选择，负数和溢出会拒绝。rsync stdout/stderr 持续 drain、每路默认只保留 256 KiB（绝对上限 512 KiB），Unicode、NUL 和非 UTF-8 数据以 base64 保真；exec/read/rsync 的 base64 字段都先解码原始 bytes、脱敏后再保真编码，不能借编码绕过 secret boundary。CLI/MCP 同时显示每路 retained/original/dropped bytes 和截断提示。协议结果还投影 operation ID、唯一 terminal 与非空 execution state。
-
-**残余边界：** 去重是单个 agent 进程内的短期安全缓存，不是 Phase 4 的磁盘事务日志。v2 peer 可继续使用明确协商的一元协议，但不具备 v3 cancel、streaming、去重或结构化截断保证；对 mutation 的 transport failure 仍按不确定结果处理。writer 超时保证等待者返回，并在 agent 侧以有界清理后的进程退出关闭污染 channel；它不承诺把 terminal/cancel 交付给已经停止读取的对端，本机 `ssh` 也可能继续阻塞于尚未被调用方 drain 的本地 stdout pipe，即使远端 agent 已退出。多机连接池、idle TTL、detached job 磁盘预算和 durable dedupe 保持在后续阶段。
-
-**P3 — Windows 远端 Tier 1。** 见上。等第一个真实用户。
-
-**不做 — `internal/client` 的传输层接缝。** 该包覆盖率 20.6%，明显低于其他包（54%–89%）。原因是 16 个 0% 的函数几乎都是同一个形状：拼请求 → `do()` → 脱敏 → 返回。要覆盖它们得把 `transport.Conn` 抽成接口再注入假实现。
-
-**评估后认为不值得**：这些包装器里没有分支逻辑，测试会退化成「断言字段被复制进了结构体」——同义反复，改坏了照样通过。真正有内容的部分（`buildExecParams` 的分层、脱敏、参数校验）已经覆盖了，而这轮 `redactJob` 的漏洞是**直接测那个函数**抓到的，不需要接缝。
-
-覆盖率数字会一直难看。**接受这一点，而不是用没有牙的测试把它刷上去**——后者更糟，因为它让下一个人以为这些路径有保护。真要做接缝，触发条件应该是「出现了带分支的包装器」，而不是「覆盖率低」。
-
-**P4 — 多机并行扇出。** 原先列在「明确不做 — 等真需求」，但需求形态变了：Claude Code 现在会并行发 tool call，而 `job_wait` 的 `ids`/`wait_any` 已经是「一次调用管多个 job」的单机雏形。缺的是跨主机版本。仍然没人要，所以还在队尾——但它不再是「不做」。
-
-
-## 开发
+agent 上传比较 SHA-256；可比较的 clean build commit 时间阻止旧构建覆盖较新 agent，`-force-agent-upload` 是显式 per-host 例外。无 stamp、dirty tree 或不可比较的构建不能提供可靠的新旧顺序。这一保护不代替完整升级/回滚兼容认证。
 
 ```bash
-GO=~/sdk/go1.25.0/bin/go     # 本机 Go 装在这里，未改全局 PATH
-
-make all           # = agents + build，日常就用这个
-make agents        # 交叉编译 4 个平台的 agent
-make build         # 编译 rdev（含 embed）
-make check-agents  # 校验 embed 的 agent 确实由当前源码构出
-make check         # = vet + test + check-agents
-make remote-smoke  # 在 SSH 配置的 service-deploy 上验证 Linux rdevd readiness/权限/关闭
-make remote-phase5-runtime  # 真实 daemon 凭证/崩溃恢复测试和 systemd 用户服务安装验证
-make remote-session-benchmark  # 20 个独立进程通过真 SSH 共享一个远端 agent 会话
-make test
-make vet
+make GO="$(command -v go)" release-gate
+make GO="$(command -v go)" verify-release
+# 可用 RDEV_RELEASE_OUT 指定私有输出目录，默认 bin/release
 ```
 
-改了 `cmd/rdev-agent/` 之后必须 `make agents`，否则 `bin/rdev` 里 embed 的还是旧 agent —— 远端跑的是那个副本，改动不会生效。
+release gate 固定 `govulncheck v1.8.0` 和 `go.mod` 的 Go 工具链，联网查询依赖更新、验证 module checksum，对支持的构建平台和实际二进制执行漏洞检查。当前依赖包含 MCP SDK v1.7.0 和 `golang.org/x/sys v0.44.0`。可用更新需要评审，不自动全部升级。
 
-**用 `make all`，不要用 `go build ./cmd/rdev`。** 后者不重建 `cmd/rdev/agents/`，于是可以构出一个「内嵌 agent 比自身源码还旧」的 `bin/rdev`，而且从外面完全看不出来。我们真踩过：08-06 20:01 构建的 `bin/rdev` 里装着 20:18 的 agent。
+产物包含实际二进制、`manifest.json`、CycloneDX `sbom.cdx.json`、未签名 `provenance.intoto.json`、源码快照和审计报告；验证器核对产物摘要、构建信息、模块依赖及 metadata 对应关系。它是可执行的本地 gate，没有宣称托管 CI 已运行或 provenance 已由可信签名者认证。联网失败或 skipped 不是通过，实际执行证据以验收记录为准。
 
-两个工具让这件事可查、可拦:
+完整签名发布、第三方许可/NOTICE 汇总、发布渠道、自动升级/回滚组合和生产规模认证仍属于 Phase8。上述命令不发布 release、不部署，也不修改仓库权限。
 
-```
-$ rdev version
-rdev 0.1.0 60503d1 2026-08-07T10:22:31Z
-embedded agents:
-  rdev-agent-darwin-amd64      3ef3e8588d1a  2548080 bytes
-  rdev-agent-darwin-arm64      20407da522ed  2448658 bytes
-  rdev-agent-linux-amd64       4e97ea14dabd  2580664 bytes
-  rdev-agent-linux-arm64       9e55d8c503e9  2556088 bytes
+## 开发与验证
 
-$ make check-agents
-STALE    rdev-agent-linux-amd64 embedded=66e69a9ea17b current=1b597da9bd83
-...
-The embedded agents were not built from this source tree.
-Run `make all` (not `go build`) so bin/rdev and its agents agree.
+```bash
+make GO="$(command -v go)" all daemon
+make GO="$(command -v go)" check       # vet、全仓单测、当前源码与嵌入agent一致性
+"$(command -v go)" test -race ./...
+rdev version                         # 构建stamp及嵌入agent摘要
 ```
 
-版本标识由 `-ldflags -X` 注入 `internal/buildinfo`（git describe + **commit 时间**），`rdev-agent -version` 也会打印同一个 stamp,`ping` 结果里带 `build` 字段。
+修改 agent 后必须重建嵌入副本；直接 `go build ./cmd/rdev` 不会重建 `cmd/rdev/agents/`。`make check-agents` 通过同工具链、同 stamp 的内容重建比较检查一致性。构建 stamp 使用 commit 时间，dirty tree 标记为不可排序。
 
-注意时间戳取的是 **commit 时间而非构建时间**：构建时间会让每次重编都改变 agent 的字节，那就废掉了「按 content hash 判断远端 agent 要不要换」这个快路径 —— 每次重连都要重传 9MB。commit 时间对排序这个用途一样够用，而且保持了构建可复现（实测两次 `-trimpath` 构建 SHA-256 完全一致，`check-agents` 正是靠这个性质才能用内容比对而不是比 mtime —— git 不保留 mtime，比时间戳会在新克隆和 CI 缓存上频繁误报）。
-
-工作区脏时 `Commit` 带 `-dirty` 后缀，`buildinfo` 把它当作**不可排序**而不是「相等」：脏树继承父 commit 的时间，那个时间说明不了它的内容。
+真实 SSH、daemon 生命周期、独立进程与官方 MCP SDK、取消、同步、owner 隔离、共享等待及混合负载的命令和最终证据集中维护在验收与 runtime 文档，不在 README 复制历史测试数量或旧结果。性能门槛须避开并行重型构建/压测。独立本地 IPv6 harness 可用 `RDEV_RUN_IPV6=1 go test ./internal/client -run '^TestLocalIPv6SSHAndSync$'`，只在隔离的 `::1` sshd 使用临时新建密钥。
 
 ## 布局
 
-```
-cmd/rdev/            本地 CLI + MCP server 入口，embed agent 二进制
-cmd/rdev-agent/      远端 agent：main / jobs / supervise
-internal/proto/      线协议（唯一契约）
-internal/transport/  ssh ControlMaster + agent bootstrap + NDJSON 框架
-internal/client/     连接池 + 会话应用 + 脱敏（CLI 与 MCP 共享）
-internal/mcpsrv/     MCP 工具定义
-internal/secrets/    凭据脱敏
-internal/session/    host 注册表 + 粘性状态
-internal/observe/    稳定安全事件 + 低基数 metrics seam
-internal/support/    带 schema 的支持矩阵与 non-goals
+```text
+cmd/rdev/            CLI 与 MCP 入口，嵌入agent
+cmd/rdevd/           共享daemon及服务生命周期
+cmd/rdev-agent/      远端执行、job supervisor和state维护
+internal/proto/      agent/broker版本与错误、操作契约
+internal/transport/  SSH参数、连接和安全bootstrap
+internal/client/     连接池、会话应用、同步和脱敏
+internal/broker/     principal、policy、approval、audit、资源和owner状态
+internal/mcpsrv/     MCP工具与结果投影
+internal/session/   host配置、信任、身份generation
+internal/secrets/   scoped凭据和脱敏
+internal/support/   支持矩阵及runtime发现
+internal/compat/    机器可读兼容契约
+internal/release/   发布检查、SBOM和provenance校验
 ```
 
 ## 许可
 
-MIT，见 [LICENSE](LICENSE)。
+项目代码使用 MIT，见 [LICENSE](LICENSE)。依赖各有自己的许可证，以固定版本附带的 LICENSE/NOTICE 为准。MCP SDK 含 Apache-2.0/MIT 许可代码；其他模块的许可不能由本项目 MIT 自动替代。
 
-依赖的许可证都与 MIT 兼容（都是宽松型，无 copyleft）：
-
-| 依赖 | 许可 |
-|---|---|
-| `modelcontextprotocol/go-sdk` | Apache-2.0 / MIT 混合（见下） |
-| `google/jsonschema-go`、`segmentio/asm`、`segmentio/encoding` | MIT |
-| `yosida95/uritemplate` | BSD-3-Clause |
-| `golang.org/x/{oauth2,sync,sys,time}` | BSD-3-Clause（Go Authors） |
-
-唯一的直接依赖 MCP SDK **不是纯 MIT**：该项目正在从 MIT 迁移到 Apache-2.0，新代码是
-Apache-2.0，尚未取得转授权同意的原贡献仍是 MIT。两者都允许在 MIT 项目里使用。
-只是如果将来要分发**含 SDK 代码**的产物（本项目不这么做——`go.mod` 引用而非 vendor），
-Apache-2.0 的第 4 条要求保留其 NOTICE 和变更声明。
-
+Go 二进制会链接使用到的依赖代码，包括 MCP SDK；`go.mod` 引用且未 vendor 不代表分发的二进制不含这些代码。分发源码或二进制时须遵守相应许可、版权及适用 NOTICE 义务。本阶段 SBOM 提供依赖基础，尚未宣称完整的分发许可/NOTICE 包已收齐；该发布收口保留在 Phase8。
 
 ## 项目文档
 
-- [rdevd 运维说明](docs/rdevd-operations.md)：凭证、权限、服务安装、配置和故障恢复。
-- [Phase5 验收记录](docs/phase5-acceptance.md)：当前状态与剩余任务。
-- [运行验证索引](docs/phase5-runtime-evidence.md)：提交、复现命令和正式测试证据。
-- [架构与分阶段计划](docs/rdev-evolution-security-plan.md)：设计、原始要求及后续阶段。
+- [rdevd 运维说明](docs/rdevd-operations.md)：凭证、权限、审批、服务安装和故障恢复。
+- [Phase6 验收记录](docs/phase6-acceptance.md)：入口、兼容、供应链及最终验证。
+- [Phase5 验收记录](docs/phase5-acceptance.md)及[运行验证索引](docs/phase5-runtime-evidence.md)：生产代码基线、独立评审和实际证据。
+- [架构与分阶段计划](docs/rdev-evolution-security-plan.md)：原始验收要求、当前阶段和延期边界。
 - [安全说明](SECURITY.md)与[Phase0–1 独立审查](docs/security/phase0-1-codex-security-review.md)。

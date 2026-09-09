@@ -71,7 +71,7 @@ type SecretRegistry struct {
 }
 
 func NewSecretRegistry(redactor *secrets.Store) *SecretRegistry {
-	return &SecretRegistry{redactor: redactor, state: secretState{Schema: 1, Records: []secretRecord{}}, persist: saveSecretState}
+	return &SecretRegistry{redactor: redactor, state: secretState{Schema: SecretSchemaVersion, Records: []secretRecord{}}, persist: saveSecretState}
 }
 func validSecretName(s string) bool {
 	if len(s) == 0 || len(s) > 128 {
@@ -117,7 +117,7 @@ func validateSecretParams(op string, p *SecretParams) error {
 	return nil
 }
 func validateSecretState(st secretState) error {
-	if st.Schema != 1 || !validDigest(st.DigestKey) || st.Records == nil || len(st.Records) > maxSecretVersions {
+	if st.Schema != SecretSchemaVersion || !validDigest(st.DigestKey) || st.Records == nil || len(st.Records) > maxSecretVersions {
 		return errSecretStorage
 	}
 	versions := map[string]bool{}
@@ -164,7 +164,7 @@ func (r *SecretRegistry) ConfigurePersistence(path string) error {
 	defer r.updateMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	st := secretState{Schema: 1, Records: []secretRecord{}}
+	st := secretState{Schema: SecretSchemaVersion, Records: []secretRecord{}}
 	data, err := ReadPrivateFile(path, maxSecretState)
 	if err != nil && !os.IsNotExist(err) {
 		return errSecretStorage

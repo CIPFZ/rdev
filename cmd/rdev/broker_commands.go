@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,12 +12,14 @@ import (
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
-	"github.com/CIPFZ/rdev/internal/support"
 )
 
 // Shared mode is an exclusive execution path. Unsupported commands must never
 // instantiate a private Client and bypass daemon policy, ownership or audit.
 func runBrokerCommand(ctx context.Context, args []string) error {
+	if err := validateCLI(args); err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("broker command required")
 	}
@@ -35,6 +38,10 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		return brokerList(ctx, args[1:])
 	case "write":
 		return brokerWrite(ctx, args[1:])
+	case "state":
+		return cmdBrokerState(ctx, args[1:])
+	case "env":
+		return brokerCapability(ctx, args[2:])
 	case "capability":
 		return brokerCapability(ctx, args[1:])
 	case "job":
@@ -42,20 +49,20 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 	case "mutation":
 		return brokerMutation(ctx, args[1:])
 	case "serve":
-		if len(args) != 1 {
-			return errors.New("usage: rdev serve")
-		}
 		return brokerServe(ctx)
 	case "broker":
-		if len(args) == 3 && args[1] == "status" && args[2] == "--pool" {
+		fs, err := parseFlags(args[2:], "broker.status")
+		if err != nil {
+			return err
+		}
+		if fs.bools["pool"] {
 			return brokerPoolStatus(ctx)
 		}
-		if len(args) != 2 || args[1] != "status" {
-			return errors.New("usage: rdev broker status [--pool]")
-		}
 		return brokerStatus(ctx)
+	case "compat":
+		return cmdCompat()
 	case "support":
-		return json.NewEncoder(os.Stdout).Encode(support.Snapshot())
+		return cmdBrokerSupport(ctx, args[1:])
 	case "version", "-version", "--version":
 		printVersion()
 		return nil
@@ -63,7 +70,7 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		usage()
 		return nil
 	default:
-		return errors.New("command is not available in shared broker mode")
+		return fmt.Errorf("%w: command is not available in shared broker mode; see rdev support for alternatives", proto.NewError(proto.CodeUnsupportedFeature, "", proto.StateNotSent))
 	}
 }
 
@@ -145,7 +152,7 @@ func brokerStatus(ctx context.Context) error {
 }
 
 func brokerList(ctx context.Context, args []string) error {
-	fs, err := parseFlags(args, nil, nil)
+	fs, err := parseFlags(args, "ls")
 	if err != nil {
 		return err
 	}
@@ -171,6 +178,11 @@ func brokerSecret(ctx context.Context, args []string) error {
 	if len(args) < 2 {
 		return errors.New("usage: rdev secret list HOST | set HOST NAME < value | delete HOST NAME")
 	}
+	fs, err := parseFlags(args[1:], "secret."+args[0])
+	if err != nil {
+		return err
+	}
+	args = append([]string{args[0]}, fs.pos...)
 	req := broker.Request{Operation: "secret." + args[0], Host: args[1], Secret: &broker.SecretParams{}}
 	switch args[0] {
 	case "list":

@@ -240,7 +240,7 @@ func (h *JobHistory) Query(owner, host, job string, cursor JobEventCursor, limit
 }
 
 func saveJobEvents(path string, events []ownedJobEvent) error {
-	data, err := json.Marshal(jobEventSnapshot{Schema: 1, Events: events})
+	data, err := json.Marshal(jobEventSnapshot{Schema: JobEventSchemaVersion, Events: events})
 	if err != nil {
 		return err
 	}
@@ -300,7 +300,7 @@ func (h *JobHistory) ConfigurePersistence(path string) error {
 		if err := dec.Decode(&snapshot); err != nil {
 			return err
 		}
-		if snapshot.Schema != 1 || snapshot.Events == nil || len(snapshot.Events) > maxJobEvents {
+		if snapshot.Schema != JobEventSchemaVersion || snapshot.Events == nil || len(snapshot.Events) > maxJobEvents {
 			return errors.New("invalid job history schema or size")
 		}
 		owners := make(map[string]int)

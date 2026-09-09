@@ -59,7 +59,7 @@ func runDaemon(args []string) error {
 	keyFile := flags.String("principal-key-file", "", "0600 administrator signing key; reloaded on SIGHUP")
 	hostsFile := flags.String("hosts-file", "", "private administrator host registry (replaces default global/project discovery)")
 	unauthenticated := flags.Bool("allow-unauthenticated", false, "explicit single-user compatibility mode; declared owners are not authenticated")
-	if err := flags.Parse(args); err != nil {
+	if err := parseSingleFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
@@ -68,6 +68,9 @@ func runDaemon(args []string) error {
 	implicitConfig := *configPath == ""
 	if implicitConfig {
 		*configPath = *socket + ".json"
+	}
+	if *unauthenticated && (*keyFile != "" || os.Getenv("RDEV_PRINCIPAL_SECRET") != "") {
+		return fmt.Errorf("cannot combine credentials and unauthenticated mode")
 	}
 	ln, err := broker.Listen(*socket)
 	if err != nil {

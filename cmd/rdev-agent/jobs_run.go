@@ -34,8 +34,8 @@ const (
 	waitPollMax = 3 * time.Second
 	// maxWaitSec caps a single wait. Beyond this the agent returns TimedOut so
 	// the request cannot be stranded by a job that never finishes.
-	maxWaitSec     = 3600
-	defaultWaitSec = 300
+	maxWaitSec     = proto.MaxTimeoutSeconds
+	defaultWaitSec = proto.DefaultJobWaitSeconds
 )
 
 const supervisorParentEnv = "RDEV_SUPERVISOR_PARENT_PID"

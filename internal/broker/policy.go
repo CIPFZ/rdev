@@ -358,5 +358,10 @@ func (s *Service) DecideBrokerRequest(req Request) Decision {
 	if err := req.Owner.Validate(); err != nil {
 		return Decision{Reason: "invalid owner"}
 	}
+	if req.Operation == "support" {
+		s.policy.mu.RLock()
+		defer s.policy.mu.RUnlock()
+		return s.policy.decision(true, "support", req.Host)
+	}
 	return s.policy.decideWireRequest(req.Owner.Key(), req.Operation, req.Host, wireUsesSecrets(req.Wire), isSyncOperation(req.Operation) && req.Sync != nil && req.Sync.Delete)
 }

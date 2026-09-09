@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -29,7 +30,6 @@ import (
 	"github.com/CIPFZ/rdev/internal/mcpsrv"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
-	"github.com/CIPFZ/rdev/internal/support"
 	"github.com/CIPFZ/rdev/internal/transport"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -88,8 +88,14 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if err := validateCLI(os.Args[1:]); err != nil {
+		printCLIError(err)
+		os.Exit(2)
+	}
 	if os.Getenv("RDEV_BROKER_SOCKET") != "" {
-		if err := runBrokerCommand(context.Background(), os.Args[1:]); err != nil {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runBrokerCommand(ctx, os.Args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -137,8 +143,10 @@ func main() {
 		err = cmdEnv(ctx, c, os.Args[2:])
 	case "version", "-version", "--version":
 		printVersion()
+	case "compat":
+		err = cmdCompat()
 	case "support":
-		err = printJSON(c, support.Snapshot())
+		err = cmdSupport(ctx, c, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -159,6 +167,13 @@ func main() {
 }
 
 func brokerMutation(ctx context.Context, args []string) error {
+	if len(args) > 0 && args[0] == "status" {
+		fs, err := parseFlags(args[1:], "mutation.status")
+		if err != nil {
+			return err
+		}
+		args = append([]string{"status"}, fs.pos...)
+	}
 	if len(args) != 2 || args[0] != "status" || proto.ValidateOperationID(args[1]) != nil {
 		return errors.New("usage: rdev mutation status <operation-id>")
 	}
@@ -182,6 +197,11 @@ func brokerMutation(ctx context.Context, args []string) error {
 }
 
 func brokerPing(ctx context.Context, args []string) error {
+	fs, err := parseFlags(args, "ping")
+	if err != nil {
+		return err
+	}
+	args = fs.pos
 	if len(args) < 1 {
 		return errors.New("usage: rdev ping <host>")
 	}
@@ -221,7 +241,7 @@ func brokerExec(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fs, err := parseFlags(flagArgs, map[string]bool{"no-login": true}, nil)
+	fs, err := parseFlags(flagArgs, "exec")
 	if err != nil {
 		return err
 	}
@@ -240,7 +260,7 @@ func brokerExec(ctx context.Context, args []string) error {
 	login := !fs.bools["no-login"]
 	res, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "exec", Host: fs.pos[0], Wire: &proto.Request{
 		Op: proto.OpExec, ClientID: owner.ClientID, ProjectID: owner.ProjectID,
-		Exec: &proto.ExecParams{Argv: argv, Cwd: fs.str("cwd"), TimeoutSec: fs.num("timeout"), LoginShell: login},
+		Exec: &proto.ExecParams{Argv: argv, Cwd: fs.str("cwd"), Env: fs.env(), TimeoutSec: fs.num("timeout"), LoginShell: login},
 	}})
 	if err != nil {
 		return err
@@ -271,7 +291,7 @@ func brokerExec(ctx context.Context, args []string) error {
 		fmt.Fprint(os.Stderr, execTruncationNotice(&client.ExecResult{ExecResult: execRes}))
 	}
 	if execRes.TimedOut {
-		return fmt.Errorf("timed out after %ds", fs.num("timeout"))
+		return fmt.Errorf("foreground command timed out")
 	}
 	if execRes.ExitCode != 0 {
 		os.Exit(execRes.ExitCode)
@@ -280,7 +300,7 @@ func brokerExec(ctx context.Context, args []string) error {
 }
 
 func brokerRead(ctx context.Context, args []string) error {
-	fs, err := parseFlags(args, nil, nil)
+	fs, err := parseFlags(args, "read")
 	if err != nil {
 		return err
 	}
@@ -305,14 +325,18 @@ func brokerRead(ctx context.Context, args []string) error {
 }
 
 func brokerWrite(ctx context.Context, args []string) error {
-	fs, err := parseFlags(args, map[string]bool{"append": true}, nil)
+	return brokerWriteInput(ctx, args, os.Stdin)
+}
+
+func brokerWriteInput(ctx context.Context, args []string, input io.Reader) error {
+	fs, err := parseFlags(args, "write")
 	if err != nil {
 		return err
 	}
 	if len(fs.pos) < 2 {
 		return errors.New("usage: rdev write <host> <path> [-mode 644] < content")
 	}
-	body, err := readAllStdin()
+	body, err := readAllInput(input)
 	if err != nil {
 		return err
 	}
@@ -338,11 +362,11 @@ func brokerCapability(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return errors.New("usage: rdev capability <host> [-refresh]")
 	}
-	fs, err := parseFlags(args[1:], map[string]bool{"refresh": true}, nil)
+	fs, err := parseFlags(args, "capability")
 	if err != nil {
 		return err
 	}
-	resp, err := brokerWire(ctx, "capability_probe", args[0], &proto.Request{Op: proto.OpCapabilityProbe, Capability: &proto.CapabilityParams{Refresh: fs.bools["refresh"]}})
+	resp, err := brokerWire(ctx, "capability_probe", fs.pos[0], &proto.Request{Op: proto.OpCapabilityProbe, Capability: &proto.CapabilityParams{Refresh: fs.bools["refresh"]}})
 	if err != nil {
 		return err
 	}
@@ -358,7 +382,7 @@ func brokerJob(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "events":
-		fs, err := parseFlags(args[1:], nil, nil)
+		fs, err := parseFlags(args[1:], "job.events")
 		if err != nil {
 			return err
 		}
@@ -401,7 +425,7 @@ func brokerJob(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		fs, err := parseFlags(flagArgs, map[string]bool{"no-login": true}, nil)
+		fs, err := parseFlags(flagArgs, "job.start")
 		if err != nil {
 			return err
 		}
@@ -418,7 +442,11 @@ func brokerJob(ctx context.Context, args []string) error {
 		}
 		defer c.Close()
 		login := !fs.bools["no-login"]
-		wire := &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: argv, Cwd: fs.str("cwd"), LoginShell: login}, Label: fs.str("label")}}
+		wire := &proto.Request{Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: argv, Cwd: fs.str("cwd"), Env: fs.env(), LoginShell: login}, Label: fs.str("label")}}
+		resources := &proto.ResourceEnvelope{FDs: fs.num("fds"), WallTimeoutSec: fs.num("wall-timeout"), JobCount: fs.num("job-count")}
+		if resources.FDs != 0 || resources.WallTimeoutSec != 0 || resources.JobCount != 0 {
+			wire.Job.Resources = resources
+		}
 		resp, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "job_start", Host: fs.pos[0], Wire: wire})
 		if err != nil {
 			return err
@@ -431,7 +459,7 @@ func brokerJob(ctx context.Context, args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(resp.Wire.Job.Info)
 	case "list":
-		fs, err := parseFlags(args[1:], nil, nil)
+		fs, err := parseFlags(args[1:], "job.list")
 		if err != nil {
 			return err
 		}
@@ -451,6 +479,11 @@ func brokerJob(ctx context.Context, args []string) error {
 			Truncated bool             `json:"Truncated"`
 		}{resp.Job.List, resp.Job.Total, resp.Job.Truncated})
 	case "status":
+		fs, err := parseFlags(args[1:], "job.status")
+		if err != nil {
+			return err
+		}
+		args = append([]string{"status"}, fs.pos...)
 		if len(args) < 3 {
 			return errors.New("usage: rdev job status <host> <job-id>")
 		}
@@ -463,7 +496,7 @@ func brokerJob(ctx context.Context, args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(resp.Job.Info)
 	case "logs":
-		fs, err := parseFlags(args[1:], nil, nil)
+		fs, err := parseFlags(args[1:], "job.logs")
 		if err != nil {
 			return err
 		}
@@ -483,7 +516,7 @@ func brokerJob(ctx context.Context, args []string) error {
 		}
 		return nil
 	case "stop":
-		fs, err := parseFlags(args[1:], nil, nil)
+		fs, err := parseFlags(args[1:], "job.stop")
 		if err != nil {
 			return err
 		}
@@ -499,7 +532,7 @@ func brokerJob(ctx context.Context, args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(resp.Job.Info)
 	case "wait":
-		fs, err := parseFlags(args[1:], map[string]bool{"any": true}, nil)
+		fs, err := parseFlags(args[1:], "job.wait")
 		if err != nil {
 			return err
 		}
@@ -522,9 +555,26 @@ func brokerJob(ctx context.Context, args []string) error {
 		if resp.Job.Logs != "" {
 			fmt.Fprintln(os.Stderr, resp.Job.Logs)
 		}
-		return json.NewEncoder(os.Stdout).Encode(resp.Job)
+		if err := json.NewEncoder(os.Stdout).Encode(resp.Job); err != nil {
+			return err
+		}
+		if resp.Job.TimedOut {
+			return fmt.Errorf("still running after %dms; wait again", resp.Job.WaitedMS)
+		}
+		if resp.Job.Info != nil && resp.Job.Info.ExitCode != 0 {
+			os.Exit(resp.Job.Info.ExitCode)
+		}
+		for _, item := range resp.Job.Waited {
+			if item.Err != "" {
+				return errors.New(item.Err)
+			}
+			if item.Info != nil && item.Info.ExitCode != 0 {
+				os.Exit(item.Info.ExitCode)
+			}
+		}
+		return nil
 	case "rm":
-		fs, err := parseFlags(args[1:], nil, nil)
+		fs, err := parseFlags(args[1:], "job.rm")
 		if err != nil {
 			return err
 		}
@@ -572,11 +622,24 @@ func brokerWire(ctx context.Context, operation, host string, wire *proto.Request
 }
 
 func cliErrorLine(c *client.Client, envelope *proto.ErrorEnvelope) string {
+	message := envelope.Message
+	if c != nil {
+		message = c.Secrets.Redact(message)
+	}
 	return fmt.Sprintf(
 		"rdev: code=%s category=%s retry=%s retryable=%t execution_state=%s operation_id=%s terminal=%t message=%s",
 		envelope.Code, envelope.Category, envelope.Retry, envelope.Retryable, envelope.ExecutionState,
-		envelope.OperationID, envelope.Terminal, c.Secrets.Redact(envelope.Message),
+		envelope.OperationID, envelope.Terminal, message,
 	)
+}
+
+func printCLIError(err error) {
+	var envelope *proto.ErrorEnvelope
+	if errors.As(err, &envelope) {
+		fmt.Fprintln(os.Stderr, cliErrorLine(nil, envelope))
+	} else {
+		fmt.Fprintln(os.Stderr, err)
+	}
 }
 
 func usage() {
@@ -588,8 +651,8 @@ USAGE
   rdev ping    <host>
   rdev capability <host> [-refresh]
   rdev env inspect <host> [-refresh]
-  rdev exec    <host> [-cwd DIR] [-timeout N] -- <argv...>
-  rdev job     start  <host> [-cwd DIR] [-label L] -- <argv...>
+  rdev exec    <host> [-cwd DIR] [-env K=V]... [-timeout N] -- <argv...>
+  rdev job     start  <host> [-cwd DIR] [-env K=V]... [-label L] [-wall-timeout N] [-fds N] [-job-count N] -- <argv...>
   rdev job     list   <host> [-limit N]
   rdev job     status <host> <job-id>
   rdev job     logs   <host> <job-id> [-stream stdout|stderr] [-tail N] [-grep S]
@@ -609,20 +672,31 @@ USAGE
   rdev secrets check <host> <name> [-path P] -- <argv...>
   rdev secrets list
   rdev version                            build id + every embedded agent's SHA-256
-  rdev support                            machine-readable support tiers and non-goals
+  rdev support [host] [-refresh]           static support, current capabilities and own grants
+  rdev compat                             machine-readable version and migration contracts
 
 HOST
-  A registered alias, or an ssh destination like user@1.2.3.4:2222.
-  Aliases are read from ./.rdev/hosts.json (this directory only) and then
-  ~/.rdev/hosts.json (everywhere); the project file wins on name collisions.
+  A registered alias, DNS/IP destination or user@host, including user@[::1]:2222.
+  Bare IPv6 is always an address; use [IPv6]:port to specify a port.
+  Global ~/.rdev/hosts.json loads first, then approved ./.rdev/hosts.json;
+  only the approved project file can override matching global aliases.
   "hosts add" defaults to project scope; pass -global for cross-project use.
 
 NOTES
   With RDEV_BROKER_SOCKET set, commands use the authenticated broker. Commands
   not yet available in shared mode fail before opening a direct connection.
 
-  Everything after -- is passed as a literal argv array; no shell parses it,
-  so quotes, $(...), and spaces are safe without escaping.
+  Single-value flags cannot repeat; -exclude repeats; -env/-secret repeat with
+  distinct keys. Unknown, missing, invalid or conflicting values fail.
+  exec/job start pass everything after -- unchanged as argv. Other commands
+  accept leading-dash operands after --. Your local shell still needs quoting.
+  Stdin read errors fail writes without submitting partial input.
+
+  Timeout seconds: omitted/0 => exec 60, job wait 300, new job wall 3600.
+  Positive values are 1..3600; negative/infinite timeouts are rejected.
+  Wait expiry ends observation only; job runtime has its own wall budget.
+  Shared state operations require host-wide administrator grants and approval
+  for migrate/repair (including -dry-run). See support for shared boundaries.
 
   "secrets" has no "set": the store is in-memory and per-process, so a value
   registered by a CLI command is gone when it exits. The MCP rdev_secrets tool
@@ -634,11 +708,12 @@ func cmdState(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) < 2 {
 		return errors.New("usage: rdev state inspect|migrate|repair <host> [-dry-run]")
 	}
-	sub, host := args[0], args[1]
-	fs, err := parseFlags(args[2:], map[string]bool{"dry-run": true}, nil)
+	sub := args[0]
+	fs, err := parseFlags(args[1:], "state."+sub)
 	if err != nil {
 		return err
 	}
+	host := fs.pos[0]
 	dry := fs.bools["dry-run"]
 	var out any
 	switch sub {
@@ -670,53 +745,6 @@ func splitArgv(args []string) (flags []string, argv []string, err error) {
 	return args, nil, errors.New("missing -- separator before the command")
 }
 
-// flagSet is a tiny flag parser for "-key value" and "-bool" forms.
-//
-// Hand-rolled rather than using package flag because each subcommand mixes
-// positionals and flags in an order flag.Parse rejects.
-type flagSet struct {
-	vals   map[string]string
-	bools  map[string]bool
-	repeat map[string][]string
-	pos    []string
-}
-
-func parseFlags(args []string, boolFlags map[string]bool, repeatFlags map[string]bool) (*flagSet, error) {
-	fs := &flagSet{
-		vals:   map[string]string{},
-		bools:  map[string]bool{},
-		repeat: map[string][]string{},
-	}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if !strings.HasPrefix(a, "-") {
-			fs.pos = append(fs.pos, a)
-			continue
-		}
-		key := strings.TrimLeft(a, "-")
-		if boolFlags[key] {
-			fs.bools[key] = true
-			continue
-		}
-		if i+1 >= len(args) {
-			return nil, fmt.Errorf("flag -%s needs a value", key)
-		}
-		i++
-		if repeatFlags[key] {
-			fs.repeat[key] = append(fs.repeat[key], args[i])
-		} else {
-			fs.vals[key] = args[i]
-		}
-	}
-	return fs, nil
-}
-
-func (f *flagSet) str(k string) string { return f.vals[k] }
-func (f *flagSet) num(k string) int {
-	n, _ := strconv.Atoi(f.vals[k])
-	return n
-}
-
 // ---------- serve ----------
 
 func cmdServe(ctx context.Context, c *client.Client) error {
@@ -733,7 +761,7 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	fs, err := parseFlags(flagArgs, map[string]bool{"no-login": true}, nil)
+	fs, err := parseFlags(flagArgs, "exec")
 	if err != nil {
 		return err
 	}
@@ -748,7 +776,7 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 		Host:       fs.pos[0],
 		Argv:       argv,
 		Cwd:        fs.str("cwd"),
-		TimeoutSec: fs.num("timeout"),
+		TimeoutSec: fs.num("timeout"), Env: fs.env(),
 	}
 	if fs.bools["no-login"] {
 		no := false
@@ -780,7 +808,7 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Fprint(os.Stderr, execTruncationNotice(res))
 	}
 	if res.TimedOut {
-		return fmt.Errorf("timed out after %ds", opts.TimeoutSec)
+		return fmt.Errorf("foreground command timed out")
 	}
 	if res.ExitCode != 0 {
 		os.Exit(res.ExitCode) // propagate so shell && / || behave as expected
@@ -813,7 +841,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		fs, err := parseFlags(flagArgs, map[string]bool{"no-login": true}, nil)
+		fs, err := parseFlags(flagArgs, "job.start")
 		if err != nil {
 			return err
 		}
@@ -821,7 +849,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 			return errors.New("usage: rdev job start <host> [-cwd DIR] [-label L] -- <argv...>")
 		}
 		opts := client.JobStartOptions{
-			Host: fs.pos[0], Argv: argv, Cwd: fs.str("cwd"), Label: fs.str("label"),
+			Host: fs.pos[0], Argv: argv, Cwd: fs.str("cwd"), Label: fs.str("label"), Env: fs.env(),
 		}
 		resources := &proto.ResourceEnvelope{FDs: fs.num("fds"), WallTimeoutSec: fs.num("wall-timeout"), JobCount: fs.num("job-count")}
 		if resources.FDs != 0 || resources.WallTimeoutSec != 0 || resources.JobCount != 0 {
@@ -838,7 +866,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(c, info)
 
 	case "list":
-		fs, err := parseFlags(rest, nil, nil)
+		fs, err := parseFlags(rest, "job.list")
 		if err != nil {
 			return err
 		}
@@ -852,6 +880,11 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(c, res)
 
 	case "status":
+		fs, err := parseFlags(rest, "job.status")
+		if err != nil {
+			return err
+		}
+		rest = fs.pos
 		if len(rest) < 2 {
 			return errors.New("usage: rdev job status <host> <job-id>")
 		}
@@ -862,7 +895,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(c, info)
 
 	case "logs":
-		fs, err := parseFlags(rest, nil, nil)
+		fs, err := parseFlags(rest, "job.logs")
 		if err != nil {
 			return err
 		}
@@ -886,7 +919,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 
 	case "stop":
-		fs, err := parseFlags(rest, nil, nil)
+		fs, err := parseFlags(rest, "job.stop")
 		if err != nil {
 			return err
 		}
@@ -900,7 +933,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(c, info)
 
 	case "wait":
-		fs, err := parseFlags(rest, map[string]bool{"any": true}, nil)
+		fs, err := parseFlags(rest, "job.wait")
 		if err != nil {
 			return err
 		}
@@ -967,7 +1000,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 
 	case "rm":
-		fs, err := parseFlags(rest, nil, nil)
+		fs, err := parseFlags(rest, "job.rm")
 		if err != nil {
 			return err
 		}
@@ -994,7 +1027,7 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 // ---------- files ----------
 
 func cmdList(ctx context.Context, c *client.Client, args []string) error {
-	fs, err := parseFlags(args, nil, nil)
+	fs, err := parseFlags(args, "ls")
 	if err != nil {
 		return err
 	}
@@ -1013,7 +1046,7 @@ func cmdList(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func cmdRead(ctx context.Context, c *client.Client, args []string) error {
-	fs, err := parseFlags(args, nil, nil)
+	fs, err := parseFlags(args, "read")
 	if err != nil {
 		return err
 	}
@@ -1038,7 +1071,11 @@ func cmdRead(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func cmdWrite(ctx context.Context, c *client.Client, args []string) error {
-	fs, err := parseFlags(args, map[string]bool{"append": true}, nil)
+	return cmdWriteInput(ctx, c, args, os.Stdin)
+}
+
+func cmdWriteInput(ctx context.Context, c *client.Client, args []string, input io.Reader) error {
+	fs, err := parseFlags(args, "write")
 	if err != nil {
 		return err
 	}
@@ -1046,7 +1083,7 @@ func cmdWrite(ctx context.Context, c *client.Client, args []string) error {
 		return errors.New("usage: rdev write <host> <path> [-mode 644] < content")
 	}
 	// Content comes from stdin so the shell never has to quote a file body.
-	body, err := readAllStdin()
+	body, err := readAllInput(input)
 	if err != nil {
 		return err
 	}
@@ -1067,20 +1104,22 @@ func cmdWrite(ctx context.Context, c *client.Client, args []string) error {
 	return printJSON(c, res)
 }
 
-func readAllStdin() (string, error) {
+func readAllStdin() (string, error) { return readAllInput(os.Stdin) }
+
+func readAllInput(input io.Reader) (string, error) {
 	var sb strings.Builder
 	buf := make([]byte, 32<<10)
 	for {
-		n, err := os.Stdin.Read(buf)
+		n, err := input.Read(buf)
 		if int64(sb.Len())+int64(n) > proto.AbsoluteRequestFrameBytes {
 			return "", proto.NewError(proto.CodeLimitExceeded, "", proto.StateNotSent)
 		}
 		sb.Write(buf[:n])
 		if err != nil {
-			if err.Error() == "EOF" || n == 0 {
+			if errors.Is(err, io.EOF) {
 				return sb.String(), nil
 			}
-			return sb.String(), nil
+			return "", fmt.Errorf("read stdin: %w", err)
 		}
 	}
 }
@@ -1088,9 +1127,7 @@ func readAllStdin() (string, error) {
 // ---------- sync ----------
 
 func parseSyncOptions(args []string) (client.SyncOptions, error) {
-	fs, err := parseFlags(args,
-		map[string]bool{"dry-run": true, "delete": true, "confirm-delete": true, "prepare": true},
-		map[string]bool{"exclude": true})
+	fs, err := parseFlags(args, "sync")
 	if err != nil {
 		return client.SyncOptions{}, err
 	}
@@ -1171,6 +1208,11 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(c, c.Hosts.ProjectTrustStatus())
 	}
 	if len(args) > 0 && args[0] == "approve-project" {
+		fs, err := parseFlags(args[1:], "hosts.approve-project")
+		if err != nil {
+			return err
+		}
+		args = append([]string{"approve-project"}, fs.pos...)
 		if len(args) != 2 {
 			return errors.New("usage: rdev hosts approve-project <sha256>")
 		}
@@ -1213,9 +1255,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 	}
 
 	if args[0] == "add" {
-		fs, err := parseFlags(args[1:],
-			map[string]bool{"save": true, "global": true, "no-login": true, "force-agent-upload": true},
-			map[string]bool{"env": true, "secret": true})
+		fs, err := parseFlags(args[1:], "hosts.add")
 		if err != nil {
 			return err
 		}
@@ -1314,6 +1354,11 @@ func projectApprovalOutput(trust session.ProjectTrust, err error) (approvalOutpu
 }
 
 func cmdPing(ctx context.Context, c *client.Client, args []string) error {
+	fs, err := parseFlags(args, "ping")
+	if err != nil {
+		return err
+	}
+	args = fs.pos
 	if len(args) < 1 {
 		return errors.New("usage: rdev ping <host>")
 	}
@@ -1328,11 +1373,11 @@ func cmdCapability(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) < 1 {
 		return errors.New("usage: rdev capability <host> [-refresh]")
 	}
-	fs, err := parseFlags(args[1:], map[string]bool{"refresh": true}, nil)
+	fs, err := parseFlags(args, "capability")
 	if err != nil {
 		return err
 	}
-	res, err := c.CapabilityProbe(ctx, args[0], fs.bools["refresh"])
+	res, err := c.CapabilityProbe(ctx, fs.pos[0], fs.bools["refresh"])
 	if err != nil {
 		return err
 	}
@@ -1343,11 +1388,11 @@ func cmdEnv(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) == 0 || args[0] != "inspect" || len(args) < 2 {
 		return errors.New("usage: rdev env inspect <host> [-refresh]")
 	}
-	fs, err := parseFlags(args[2:], map[string]bool{"refresh": true}, nil)
+	fs, err := parseFlags(args[1:], "env.inspect")
 	if err != nil {
 		return err
 	}
-	res, err := c.CapabilityProbe(ctx, args[1], fs.bools["refresh"])
+	res, err := c.CapabilityProbe(ctx, fs.pos[0], fs.bools["refresh"])
 	if err != nil {
 		return err
 	}
@@ -1375,7 +1420,7 @@ func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
 
 	switch args[0] {
 	case "set-from-file":
-		fs, err := parseFlags(args[1:], nil, nil)
+		fs, err := parseFlags(args[1:], "secrets.set-from-file")
 		if err != nil {
 			return err
 		}
@@ -1411,7 +1456,7 @@ func cmdSecrets(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
-		fs, err := parseFlags(flagArgs, nil, nil)
+		fs, err := parseFlags(flagArgs, "secrets.check")
 		if err != nil {
 			return err
 		}

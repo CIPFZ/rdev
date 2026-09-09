@@ -3,6 +3,7 @@ package broker
 import (
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/support"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type Request struct {
 	Since           time.Time           `json:"since,omitempty"`
 }
 type Response struct {
+	Support         *support.Discovery `json:"support,omitempty"`
 	Sync            *client.SyncResult `json:"sync,omitempty"`
 	Secrets         []SecretDescriptor `json:"secrets,omitempty"`
 	RequestRef      string             `json:"request_ref,omitempty"`

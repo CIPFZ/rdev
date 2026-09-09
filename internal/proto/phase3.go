@@ -72,7 +72,7 @@ var operationRegistry = map[string]OperationDescriptor{
 	OpExec:            operation(OpExec, ClassMutating, RetryDeduplicated, ExecutionForeground, DisconnectCancel, FeatureOperationID, FeatureDeduplication, FeatureCancel, FeatureDeadline),
 	OpReadFile:        operation(OpReadFile, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
 	OpWriteFile:       operation(OpWriteFile, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
-	OpJobStart:        jobOperation(OpJobStart, ClassMutating, RetryDeduplicated, ExecutionDetached, DisconnectContinue, FeatureOperationID, FeatureDeduplication),
+	OpJobStart:        jobOperation(OpJobStart, ClassMutating, RetryDeduplicated, ExecutionDetached, DisconnectContinue, FeatureOperationID, FeatureDeduplication, FeatureJobResourceEnvelope),
 	OpJobList:         jobOperation(OpJobList, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
 	OpJobStatus:       jobOperation(OpJobStatus, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
 	OpJobLogs:         jobOperation(OpJobLogs, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID, FeatureTruncation),
@@ -137,20 +137,22 @@ func RequireOperation(name string) (OperationDescriptor, error) {
 type Feature string
 
 const (
-	FeatureSyncPlan        Feature = "sync_plan_v1"
-	FeatureJobFilterIDs    Feature = "job_filter_ids"
-	FeatureDurableJobStart Feature = "durable_job_start"
-	FeatureOperationID     Feature = "operation_id"
-	FeatureDeduplication   Feature = "deduplication"
-	FeatureErrorEnvelope   Feature = "error_envelope"
-	FeatureCancel          Feature = "cancel"
-	FeatureDeadline        Feature = "deadline"
-	FeatureStreaming       Feature = "streaming"
-	FeatureStreamCredit    Feature = "stream_credit"
-	FeatureTruncation      Feature = "truncation_metadata"
+	FeatureJobResourceEnvelope Feature = "job_resource_envelope"
+	FeatureSyncPlan            Feature = "sync_plan_v1"
+	FeatureJobFilterIDs        Feature = "job_filter_ids"
+	FeatureDurableJobStart     Feature = "durable_job_start"
+	FeatureOperationID         Feature = "operation_id"
+	FeatureDeduplication       Feature = "deduplication"
+	FeatureErrorEnvelope       Feature = "error_envelope"
+	FeatureCancel              Feature = "cancel"
+	FeatureDeadline            Feature = "deadline"
+	FeatureStreaming           Feature = "streaming"
+	FeatureStreamCredit        Feature = "stream_credit"
+	FeatureTruncation          Feature = "truncation_metadata"
 )
 
 var supportedFeatures = [...]Feature{
+	FeatureJobResourceEnvelope,
 	FeatureSyncPlan,
 	FeatureJobFilterIDs,
 	FeatureDurableJobStart,
@@ -336,12 +338,12 @@ const (
 )
 
 type ErrorDescriptor struct {
-	Code      ErrorCode
-	Category  ErrorCategory
-	Message   string
-	Retry     RetryDisposition
-	Retryable bool
-	Terminal  bool
+	Code      ErrorCode        `json:"code"`
+	Category  ErrorCategory    `json:"category"`
+	Message   string           `json:"message"`
+	Retry     RetryDisposition `json:"retry"`
+	Retryable bool             `json:"retryable"`
+	Terminal  bool             `json:"terminal"`
 }
 
 var errorRegistry = map[ErrorCode]ErrorDescriptor{

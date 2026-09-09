@@ -61,7 +61,7 @@ func TestEffectiveEnvelopeBoundsWallAndFD(t *testing.T) {
 	if _, err := effectiveEnvelope(&proto.ResourceEnvelope{WallTimeoutSec: hardExecTimeoutSec + 1}); err == nil {
 		t.Fatal("wall limit above hard cap accepted")
 	}
-	if got, err := effectiveEnvelope(&proto.ResourceEnvelope{}); err != nil || got != (proto.ResourceEnvelope{}) {
+	if got, err := effectiveEnvelope(&proto.ResourceEnvelope{}); err != nil || got != (proto.ResourceEnvelope{WallTimeoutSec: proto.DefaultJobWallTimeoutSeconds}) {
 		t.Fatalf("zero envelope: %+v %v", got, err)
 	}
 }

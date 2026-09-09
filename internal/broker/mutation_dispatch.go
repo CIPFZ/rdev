@@ -41,7 +41,13 @@ func IsWireMutation(req Request) bool {
 // boundary before remote I/O. A repeated identity returns its recorded status;
 // it never silently executes again, even when the old remote result is unknown.
 func (s *Service) DispatchMutation(ctx context.Context, req Request, plan ApprovalPlan) (*proto.Response, *MutationIntent, error) {
-	wire := *req.Wire
+	normalized, err := proto.NormalizeTimeouts(req.Wire)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Approval binds the original frontend request; durable execution and its
+	// recovery digest bind this one effective private wire snapshot.
+	wire := *normalized
 	if wire.OperationID == "" {
 		id, err := proto.NewOperationID()
 		if err != nil {

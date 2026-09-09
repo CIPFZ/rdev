@@ -187,7 +187,7 @@ func (r *JobRegistry) OwnedIDs(host, owner string) []string {
 	return ids
 }
 func saveJobs(path string, jobs []JobRef) error {
-	data, err := json.Marshal(jobSnapshot{Schema: 1, Jobs: jobs})
+	data, err := json.Marshal(jobSnapshot{Schema: JobRegistrySchemaVersion, Jobs: jobs})
 	if err != nil {
 		return err
 	}
@@ -315,7 +315,7 @@ func parseJobs(data []byte) (map[jobKey]JobRef, error) {
 			switch name {
 			case "schema":
 				var schema int
-				if err := dec.Decode(&schema); err != nil || schema != 1 {
+				if err := dec.Decode(&schema); err != nil || schema != JobRegistrySchemaVersion {
 					return nil, fmt.Errorf("unsupported job registry schema")
 				}
 			case "jobs":

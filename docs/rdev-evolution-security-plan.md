@@ -1080,6 +1080,11 @@ Phase5 已按用户确认的范围完成。逐项验收和可复现证据统一�
 
 ### Phase 6：CLI、兼容性、文档和发布收口
 
+实现已集成；最终源码验证与独立评审收口见 [Phase6 验收表](phase6-acceptance.md)。
+入口契约采用现有 parser 严格化，exec/wait/new-job wall 的 0 分别选择
+60/300/3600 秒有界默认；新 job 通过 feature 协商拒绝不能强制运行时限的旧 agent。
+共享 host/session 编辑与声明式 secret 委派保留明确边界，state 管理补齐现有管理员路由。
+
 覆盖：ENG-012、ENG-013、ENG-014、ENG-016、ENG-023、ENG-036。
 
 | Task | 内容 | 依赖 | 验收条件 |

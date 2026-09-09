@@ -14,7 +14,7 @@ import (
 
 const maxJobWaitIDs = 64
 const maxJobWaitTail = 1000 // remote agent's existing hard line limit
-const defaultJobWaitSeconds = 300
+const defaultJobWaitSeconds = proto.DefaultJobWaitSeconds
 
 type jobObservationKey struct{ owner, host, id string }
 type jobObservation struct {

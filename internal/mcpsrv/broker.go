@@ -19,6 +19,10 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, err
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "rdev", Title: "Remote dev environment proxy", Version: Version}, nil)
+	s.AddReceivingMiddleware(projectResults(nil, nil))
+	registerCompat(s)
+	registerBrokerSupport(s, socket, owner)
+	registerBrokerState(s, socket, owner)
 	registerBrokerSecrets(s, socket, owner)
 	registerBrokerSync(s, socket, owner)
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_pool", Description: "Read global shared connection capacity, active leases and eviction reasons. Requires a separate pool.health grant."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.PoolHealth, error) {
@@ -124,7 +128,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		if in.LoginShell != nil {
 			login = *in.LoginShell
 		}
-		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "job_start", Host: in.Host, Wire: &proto.Request{OperationID: in.OperationID, Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Label: in.Label, Spec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login}}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "job_start", Host: in.Host, Wire: &proto.Request{OperationID: in.OperationID, Op: proto.OpJobStart, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Job: &proto.JobParams{Label: in.Label, Resources: in.Resources, Spec: &proto.ExecParams{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, LoginShell: login}}}})
 		if err != nil {
 			return nil, JobOut{}, err
 		}
@@ -248,6 +252,12 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 // callBroker enforces both local and remote failure envelopes before a handler
 // projects typed output. Secrets and session state are resolved only by rdevd.
 func callBroker(ctx context.Context, socket string, owner broker.Owner, req broker.Request) (broker.Response, error) {
+	if req.Wire != nil {
+		_, err := proto.NormalizeTimeouts(req.Wire)
+		if err != nil {
+			return broker.Response{}, err
+		}
+	}
 	if req.Wire != nil {
 		req.Wire.ClientID = owner.ClientID
 		req.Wire.ProjectID = owner.ProjectID

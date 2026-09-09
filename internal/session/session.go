@@ -12,10 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -561,7 +561,8 @@ func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, erro
 			return nil, fmt.Errorf("parse %s: every host requires non-empty name and addr", path)
 		}
 		h := transport.Host{Name: e.Name, Addr: e.Addr, Port: e.Port, RemoteDir: e.RemoteDir, ForceAgentUpload: e.ForceAgentUpload}
-		if err := transport.ValidateHost(h); err != nil {
+		normalized, err := transport.NormalizeHost(h)
+		if err != nil {
 			reason := observe.ReasonRemoteDir
 			if transport.ValidateDestination(h.Addr, h.Port) != nil {
 				reason = observe.ReasonDestination
@@ -573,7 +574,8 @@ func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, erro
 			r.reject(observe.ReasonConfigInvalid, path)
 			return nil, fmt.Errorf("parse %s host %q: %w", path, e.Name, err)
 		}
-		candidates = append(candidates, hostCandidate{host: h, entry: e})
+		e.Addr, e.Port = normalized.Addr, normalized.Port
+		candidates = append(candidates, hostCandidate{host: normalized, entry: e})
 	}
 	return candidates, nil
 }
@@ -857,10 +859,11 @@ func (r *Registry) ApplyHostUpdate(update HostUpdate) (HostUpdateResult, error) 
 		if h.Name != update.Name {
 			return HostUpdateResult{}, fmt.Errorf("host update name %q does not match transport name %q", update.Name, h.Name)
 		}
-		if err := transport.ValidateHost(h); err != nil {
+		normalized, err := transport.NormalizeHost(h)
+		if err != nil {
 			return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
 		}
-		replacement = &h
+		replacement = &normalized
 	} else if update.RemoteDir != nil {
 		if _, err := transport.ValidateRemoteDir(*update.RemoteDir); err != nil {
 			return HostUpdateResult{}, fmt.Errorf("invalid host: %w", err)
@@ -1174,7 +1177,8 @@ func (r *Registry) Add(h transport.Host) error {
 	if err := r.fatalError(); err != nil {
 		return err
 	}
-	if err := transport.ValidateHost(h); err != nil {
+	normalized, err := transport.NormalizeHost(h)
+	if err != nil {
 		reason := observe.ReasonConfigInvalid
 		if destErr := transport.ValidateDestination(h.Addr, h.Port); destErr != nil {
 			reason = observe.ReasonDestination
@@ -1184,6 +1188,7 @@ func (r *Registry) Add(h transport.Host) error {
 		r.reject(reason, h.Name)
 		return err
 	}
+	h = normalized
 	if h.Name == "" {
 		h.Name = h.Addr
 	}
@@ -1321,29 +1326,19 @@ func (r *Registry) AcquireIdentityWrite(name string, generation uint64, fingerpr
 	return lease.Unlock, true
 }
 
-// parseDestination interprets "user@host", "user@host:port", or "host:port".
+// parseDestination preserves the unknown bare-alias guard. Registered aliases
+// resolve earlier; IP literals, dotted DNS names, user@host and host:port may
+// be used directly without registration.
 func parseDestination(s string) (transport.Host, error) {
-	if s == "" {
-		return transport.Host{}, errors.New("empty destination")
-	}
-	addr, portStr, hasPort := strings.Cut(s, ":")
-	h := transport.Host{Name: s, Addr: addr}
-	if hasPort {
-		port, err := strconv.Atoi(portStr)
-		if err != nil || port < 1 || port > 65535 {
-			return transport.Host{}, fmt.Errorf("invalid port %q", portStr)
-		}
-		h.Port = port
-	}
-	// Require an "@" or an explicit port, so a bare typo is reported as an
-	// unknown host rather than silently treated as a hostname.
-	if !strings.Contains(addr, "@") && !hasPort {
-		return transport.Host{}, fmt.Errorf("%q is not a host alias or ssh destination", s)
-	}
-	if err := transport.ValidateDestination(h.Addr, h.Port); err != nil {
+	addr, port, err := transport.ParseDestination(s, 0)
+	if err != nil {
 		return transport.Host{}, err
 	}
-	return h, nil
+	_, ipErr := netip.ParseAddr(addr)
+	if !strings.ContainsAny(s, "@:.") && ipErr != nil {
+		return transport.Host{}, fmt.Errorf("%q is not a host alias or ssh destination", s)
+	}
+	return transport.Host{Name: s, Addr: addr, Port: port}, nil
 }
 
 // Names lists registered host names, sorted.

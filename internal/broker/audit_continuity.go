@@ -47,7 +47,7 @@ type auditContinuity struct {
 func readAuditContinuity(path string) (auditContinuity, bool, error) {
 	data, err := ReadPrivateFile(path, 1024)
 	if os.IsNotExist(err) {
-		return auditContinuity{Schema: 1}, false, nil
+		return auditContinuity{Schema: AuditContinuitySchemaVersion}, false, nil
 	}
 	if err != nil {
 		return auditContinuity{}, false, err
@@ -63,7 +63,7 @@ func readAuditContinuity(path string) (auditContinuity, bool, error) {
 	var state auditContinuity
 	dec = json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&state) != nil || state.Schema != 1 || state.UncleanRecoveries > 1<<63-1 {
+	if dec.Decode(&state) != nil || state.Schema != AuditContinuitySchemaVersion || state.UncleanRecoveries > 1<<63-1 {
 		return auditContinuity{}, false, invalid
 	}
 	var fields map[string]json.RawMessage

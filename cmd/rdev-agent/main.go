@@ -46,7 +46,7 @@ const (
 	defaultReadLimit   = 1 << 20 // 1 MiB
 	defaultMaxOutput   = 256 << 10
 	maxRequestLineLen  = int(proto.AbsoluteRequestFrameBytes)
-	hardExecTimeoutSec = 3600
+	hardExecTimeoutSec = proto.MaxTimeoutSeconds
 )
 
 func main() {
@@ -476,8 +476,9 @@ func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, s
 	if limit == 0 {
 		limit = defaultMaxOutput
 	}
-	if p.TimeoutSec < 0 || p.TimeoutSec > hardExecTimeoutSec {
-		return nil, limitExceededError("timeout_sec is outside the hard limit")
+	timeout, err := proto.ResolveTimeout(p.TimeoutSec, proto.DefaultExecTimeoutSeconds)
+	if err != nil {
+		return nil, err
 	}
 	if int64(len(p.Stdin)) > proto.AbsoluteRequestFrameBytes {
 		return nil, limitExceededError("stdin exceeds the hard limit")
@@ -510,8 +511,8 @@ func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, s
 	var timedOut bool
 	var canceled bool
 	var timer <-chan time.Time
-	if p.TimeoutSec > 0 {
-		timer = time.After(time.Duration(p.TimeoutSec) * time.Second)
+	if timeout > 0 {
+		timer = time.After(time.Duration(timeout) * time.Second)
 	}
 	select {
 	case <-exited:

@@ -6,10 +6,11 @@ package support
 const SchemaVersion = 1
 
 type Platform struct {
-	OS     string `json:"os"`
-	Arch   string `json:"arch"`
-	Tier   string `json:"tier"`
-	Status string `json:"status"`
+	OS         string `json:"os"`
+	Arch       string `json:"arch"`
+	Tier       string `json:"tier"`
+	Status     string `json:"status"`
+	Validation string `json:"validation"`
 }
 
 type Matrix struct {
@@ -19,25 +20,36 @@ type Matrix struct {
 	RequiredSSHFeatures []string   `json:"required_ssh_features"`
 	RequiredLocalTools  []string   `json:"required_local_tools"`
 	NonGoals            []string   `json:"non_goals"`
+	Capabilities        []Boundary `json:"capabilities"`
 }
 
 func Snapshot() Matrix {
 	return Matrix{
 		SchemaVersion: SchemaVersion,
 		Local: []Platform{
-			{OS: "darwin", Arch: "arm64", Tier: "tier1", Status: "development/test baseline; fd-native config ACL checks require cgo, otherwise fail closed"},
-			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "cross-build only"},
-			{OS: "linux", Arch: "amd64", Tier: "build", Status: "cross-build only"},
-			{OS: "linux", Arch: "arm64", Tier: "build", Status: "cross-build only"},
+			{OS: "darwin", Arch: "arm64", Tier: "tier1", Status: "historical development baseline; shared runtime unverified and deferred; fd-native config ACL checks require cgo", Validation: "historical_only"},
+			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "cross-build only", Validation: "build_only"},
+			{OS: "linux", Arch: "amd64", Tier: "tier1", Status: "Linux standalone and shared broker real-SSH runtime verified", Validation: "runtime_verified"},
+			{OS: "linux", Arch: "arm64", Tier: "build", Status: "cross-build only", Validation: "build_only"},
 		},
 		Remote: []Platform{
-			{OS: "linux", Arch: "amd64", Tier: "tier1", Status: "Ubuntu real-SSH bootstrap, exec, file, and rsync baseline"},
-			{OS: "linux", Arch: "arm64", Tier: "build", Status: "agent cross-build only"},
-			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "agent cross-build only"},
-			{OS: "darwin", Arch: "arm64", Tier: "build", Status: "agent cross-build only"},
+			{OS: "linux", Arch: "amd64", Tier: "tier1", Status: "Ubuntu standalone and shared bootstrap, exec, file, sync, cancellation and jobs runtime verified", Validation: "runtime_verified"},
+			{OS: "linux", Arch: "arm64", Tier: "build", Status: "agent cross-build only", Validation: "build_only"},
+			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "agent cross-build only", Validation: "build_only"},
+			{OS: "darwin", Arch: "arm64", Tier: "build", Status: "agent cross-build only", Validation: "build_only"},
 		},
 		RequiredSSHFeatures: []string{"BatchMode", "ControlMaster", "ControlPath", "ControlPersist"},
 		RequiredLocalTools:  []string{"ssh", "rsync for sync operations"},
+		Capabilities: []Boundary{
+			{Name: "ssh_alias_ipv4_ipv6_proxyjump", Status: "supported"},
+			{Name: "complex_proxycommand", Status: "experimental", Scope: "uses user OpenSSH configuration; no complete runtime certification"},
+			{Name: "regular_files_and_symlink_policy", Status: "supported"},
+			{Name: "file_mode_mtime", Status: "best_effort", Scope: "subject to target filesystem and user permissions"},
+			{Name: "interactive_pty", Status: "unsupported"},
+			{Name: "native_windows", Status: "unsupported"},
+			{Name: "complete_acl_xattr_owner_fidelity", Status: "unsupported"},
+			{Name: "remote_to_remote_sync", Status: "unsupported", Alternative: "stage through a local directory"},
+		},
 		NonGoals: []string{
 			"native Windows runtime", "interactive PTY or TUI forwarding", "port forwarding",
 			"native Windows config owner, mode, ACL, or POSIX no-follow guarantees",

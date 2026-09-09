@@ -3,15 +3,19 @@
 ## System and Scope
 
 rdev is a local CLI and stdio MCP server that connects to user-selected remote
-machines through the system OpenSSH client. It bootstraps a remote `rdev-agent`,
-exchanges ID-correlated NDJSON requests, persists remote job state, and invokes
-local `rsync` for file synchronization.
+machines through the system OpenSSH client. Shared mode uses an authenticated
+local `rdevd` broker for connection ownership, policy, approvals, audit and quotas.
+MCP uses the official SDK's JSON-RPC 2.0 over stdio. The internal client/broker
+and client-or-broker/agent protocols have separate version negotiation and
+ID-correlated NDJSON framing; neither internal protocol is JSON-RPC. rdev persists
+remote job state and uses rsync or the broker's prepared sync path for transfers.
 
 This policy covers the Go source, local configuration and trust state, SSH and
 rsync process construction, bootstrap scripts, the wire protocol, secret
-handling, and rdev-managed local and remote state. A caller that selects a host
-is intentionally authorized to exercise the command and file authority of that
-host's SSH account; rdev does not sandbox commands within that account.
+handling, dependency/release-check metadata, and rdev-managed local and remote
+state. Standalone exercises the selected SSH account's authority. Broker clients
+additionally require the exact principal/project/host policy and any applicable
+approval. Neither mode sandboxes arbitrary commands within the remote account.
 
 ## Threat Model and Trust Boundaries
 
@@ -29,7 +33,7 @@ host's SSH account; rdev does not sandbox commands within that account.
 - Other processes using the same remote account can race with agent bootstrap
   and rdev-managed state. Atomic replacement and ownership checks must preserve
   integrity under those races.
-- Multiple local AI agents or future broker clients are distinct principals.
+- Multiple local AI agents and broker clients are distinct principals.
   Shared connections or state must not silently grant one principal another's
   hosts, secrets, jobs, or approvals.
 
@@ -40,7 +44,11 @@ host's SSH account; rdev does not sandbox commands within that account.
   the exact canonical project path and SHA-256 content digest.
 - Every SSH process creation validates its destination and port at the final
   shared boundary. Destinations that are empty, option-shaped, contain whitespace
-  or control characters, or use an invalid port fail closed.
+  or control characters, malformed IPv6 brackets, or invalid ports fail closed.
+  Bare IPv6 is always an address; its port requires `[IPv6]:port`. An embedded
+  port conflicts with a separately supplied nonzero port. Normalized user,
+  address and port participate in connection identity; rsync uses the bracketed
+  IPv6 spelling required by its own host:path grammar.
 - `remote_dir` is a canonical, home-relative path made only of safe components.
   Dynamic bootstrap values are passed as positional parameters or standard input
   and never concatenated into shell program text.
@@ -73,11 +81,18 @@ host's SSH account; rdev does not sandbox commands within that account.
   preserves evidence on ambiguous rollback, and reports post-commit cleanup as
   a committed warning. First publication is no-replace and never deletes a
   concurrently occupied target.
-- Project config remains data after approval. Invalid destinations, paths, ports,
-  and unsupported schema fail before any entry is merged into live state.
-- Registered secret values do not persist to config, cross host/principal scope,
-  or enter tool results, structured logs, metric labels, traces, diagnostics, or
-  errors. Paths and identifiers are minimized or hashed at observability sinks.
+- Project config remains data after approval. Invalid declared destinations,
+  paths and ports fail before any entry is merged into live state. Host config
+  is currently unversioned: standalone ignores unknown JSON fields, while the
+  administrator hosts-file reader rejects them. Versioned trust/state artifacts
+  follow their own explicit schema validators, exposed by `rdev compat`.
+- Host configuration stores secret declarations as paths, not secret values.
+  Standalone values stay in process memory; broker principal-owned credentials
+  and historical redaction versions persist in a private 0600 archive. Matching
+  registered values are scrubbed at result boundaries. Authorization and lookup
+  cannot cross host/principal scope; observability sinks omit secret values and
+  raw output and minimize or hash paths and identifiers. Redaction limitations
+  are described below.
 - Remote frames, outputs, waits, concurrency, logs, and rdev-managed storage must
   have system-enforced hard bounds. Project config cannot raise those hard caps.
 - Each protocol direction has one fixed writer loop with bounded priority queues
@@ -95,6 +110,29 @@ host's SSH account; rdev does not sandbox commands within that account.
   the replay is safe. Unknown execution outcomes remain explicitly ambiguous.
 - Job control validates durable process identity and state ownership before
   signaling or deletion. Rdev never deletes unknown or user-owned paths.
+
+- Broker tokens authenticate the exact `(client_id, project_id)` and expire;
+  the administrator signing key is never a client credential. Policy defaults
+  to deny, supports exact-host grants, and classifies capabilities server-side.
+  Explicit unauthenticated compatibility mode is not a principal-authentication
+  boundary. Same-OS-user file access is outside this isolation guarantee.
+- Mutation approval binds owner, target identity, effective request digest and
+  policy snapshot. A client risk hint cannot bypass approval. Mutation intents
+  and job identities survive broker restart; restart does not re-execute an
+  unproven mutation. Ambiguous outcomes require reconciliation.
+- Broker jobs, secrets, observations and ordinary status are owner/project
+  scoped. Shared waits retain independent subscriber budgets and cancellation;
+  peer cancellation does not close the shared base transport. Warm/bulk eviction
+  respects active leases and resource accounting. Pool health and whole-host
+  state administration require separate grants.
+- Support discovery returns only the caller's policy decisions. Without a
+  capability-probe grant it performs no SSH or host-registry lookup. Static
+  support, current runtime capability and permission denial are distinct.
+- CLI unknown, missing, duplicate, conflicting and out-of-range arguments fail
+  before business I/O. A non-EOF stdin failure, including partial data plus an
+  error, cannot submit that partial data to standalone or broker writes. Input
+  remains size-bounded. `--` stops rdev option parsing but does not stop the
+  invoking shell from evaluating unquoted text.
 
 ## Reportable Findings and Severity Context
 
@@ -129,59 +167,78 @@ not evidence that a finding is safe.
 
 ## Known Limitations and Compensating Controls
 
-The current release is a single-process client rather than the planned shared
-`rdevd`; callers therefore have no broker-enforced capability model yet. Project
-config approval, strict process-argument validation, SSH host-key verification,
-in-memory secret storage, and narrow file permissions are the present controls.
+Shared mode never falls back to private SSH for an unsupported frontend.
+Host/session editing and automatic delegation of administrator declarative
+secrets are unavailable to shared business clients. Administrators update the
+private host registry and restart; clients supply request cwd/env and explicitly
+import principal-owned secrets. The state frontend is whole-host administration:
+its report can include other owners' root-relative record paths. Grant it only
+to administrators; migration and repair, including previews, require approval.
 
-Protocol-3 mutation deduplication is deliberately process-local, bounded by both
-capacity and TTL, and keyed by caller identity, operation ID, operation type, and
-request digest. It prevents duplicate execution while the accepting agent retains
-the record, but it is not a durable transaction log. After agent restart, cache
-eviction, or reconnect through a newly started SSH agent, an unprovable mutation
-outcome is returned as `ambiguous_outcome`; callers must reconcile state rather
-than retry with a new operation ID. Protocol-2 peers remain compatible for common
-unary operations but do not acquire protocol-3 cancel, streaming, deduplication,
-or structured truncation guarantees.
+Protocol-3 generic mutation deduplication is bounded and process-local. Durable
+broker mutation records and job-start identities provide additional recovery,
+not permanent exactly-once execution for arbitrary commands. After restart or
+record retirement, an unprovable outcome remains ambiguous and must not be
+retried under a fresh operation ID. The machine-readable `rdev compat` contract
+states actual protocol/schema ranges and migrations. Protocol-2 common unary
+operations do not acquire v3 cancellation, streaming or deduplication guarantees;
+unsupported features and disjoint versions fail closed. New job start requires
+the negotiated `job_resource_envelope` feature so an older agent cannot silently
+ignore the requested wall budget. Existing job inspection, wait and stop remain
+available within their own negotiated contracts.
 
-Protocol cancellation and disconnect cleanup apply to attached foreground
-operations and target only their dedicated process groups. Detached jobs have an
-independent supervisor lifetime and intentionally survive the control connection;
-immediate/detached mutations never receive an inferred protocol cancel or
-deadline. If their request was sent but the caller stops waiting, the client
-reports `possibly_executed`/`ambiguous_outcome` instead of falsely claiming
-`canceled`; a cancel racing a successful mutating handler is normalized the same
-way. Only a foreground operation whose registry contract is `DisconnectCancel`
-may receive a wire cancel/deadline, and cancel-before-request state is bound to
-that target operation type. Host-side terminal commit and context cancellation
-use one pending state machine under the connection mutex: an already-committed
-terminal wins even if Go's select chooses `ctx.Done`, while a winning cancel
-marks/removes the pending call before its cancel frame is queued outside the
-lock. A success arriving after that cancel boundary is a protocol violation,
-never silently rewritten as canceled. Their durable storage budgets and
-cross-process ownership model remain Phase 4/5
-work. TERM-to-KILL escalation retains the original leader as an unreaped child
-until the group-level grace and KILL decision complete, so an early-exiting leader
-cannot cancel escalation or allow its PID/PGID to be reused for an unrelated
-request. The current hard memory, frame, watcher, queue, and output limits do not
-cap the size of detached job log files on disk.
+Across standalone/broker CLI/MCP, omitted or zero exec runtime means 60 seconds,
+job-wait observation means 300 seconds, and new-job wall runtime means 3600
+seconds. Positive values are capped at 3600 seconds; negatives and infinity are
+rejected. Connection/request deadlines are separate and may end earlier. This
+changes legacy unbounded defaults; already-running old supervisors are not
+retroactively modified. A wait timeout does not kill its job, while the job's
+own supervisor enforces its runtime limit. CPU, memory and PID tree budgets are
+currently unsupported even when cgroup is detected; unsupported resource
+requests are rejected instead of claiming enforcement.
 
-Foreground exec, file reads, protocol frames, agent diagnostics, auxiliary SSH
-probes, and local rsync stdout/stderr all retain bounded data while continuing to
-drain their producers. Rsync reports exact original/retained/dropped byte counts
-per stream and uses base64 for retained binary data. The default retention is
-256 KiB per stream and callers may select a value only within the 512 KiB absolute
-per-stream cap. Binary exec/read/rsync fields are decoded before the client
-redaction boundary and losslessly re-encoded afterward, so base64 cannot hide a
-registered secret. A truncation report describes what rdev retained; it is not a
-durable archive of the discarded bytes.
+Protocol cancellation targets attached foreground operations by caller and
+operation identity, using dedicated process groups. TERM-to-KILL escalation
+retains the original leader through the group-level decision to avoid PID reuse
+or surviving descendants. Immediate/detached mutations do not receive an
+inferred wire cancel/deadline: a caller that stops waiting after send can receive
+`possibly_executed`/`ambiguous_outcome`. A committed terminal wins its atomic
+race with cancellation. Detached jobs survive control-connection teardown, but
+not necessarily host reboot; killed supervisors may leave an observable,
+stoppable orphan without a recoverable exit code.
 
-Agent business failures cross one typed mapping boundary. Invalid requests,
-resource limits, missing objects, process-start failures, and invalid process
-states use registry-backed code/category/retry/execution-state values; unknown
-failures alone become `internal.failure`. Public messages are fixed registry text
-and intentionally omit paths, argv, and raw operating-system errors.
+Foreground output, protocol frames, auxiliary probes, job logs and managed
+storage have bounded retention. Rsync drains stdout/stderr while retaining
+256 KiB per stream by default, with a 512 KiB absolute per-stream cap and byte
+ledgers. Job logs use bounded storage policy and report dropped bytes. These
+controls do not bound arbitrary command writes outside rdev-managed storage or
+restore discarded output. Binary exec/read/sync fields pass through decoded
+byte redaction before re-encoding; registered values cannot bypass that boundary
+merely by selecting the protocol's base64 representation.
 
-Tier and capability claims are maintained in the README and the machine-readable
-support snapshot. Build-only platforms are not promoted to supported runtime
-tiers without isolated real-SSH and rsync certification.
+Redaction reduces accidental disclosure of registered whole values and selected
+whitespace-folded forms. It is not a secret detector or an exfiltration sandbox:
+unregistered values, fragments, independently re-encoded/hash/transformed values
+and malicious extraction are outside its matching guarantee. Client redaction
+does not rewrite raw remote log files or encrypt the broker credential archive.
+
+Agent failures use the stable code/category/retry/execution-state registry;
+unknown codes and invalid envelopes are not treated as safe-to-retry results.
+Broker authentication, routing and local CLI diagnostics may also return textual
+errors. Neither textual error wording nor an output truncation marker proves
+that a mutation was not executed.
+
+The support snapshot identifies Linux amd64 runtime evidence separately from
+build-only combinations and macOS's historical development baseline. **macOS
+runtime remains unverified and explicitly deferred**; cross-compilation is not
+a runtime pass. Complex ProxyCommand is experimental. A successful runtime
+probe does not certify an entire OS/architecture combination.
+
+The executable release gate pins Go 1.26.8 through `go.mod` and govulncheck
+v1.8.0, audits online dependencies and source/binaries, and verifies module
+checksums and artifact-bound manifest/SBOM/provenance metadata. `verify-release`
+rechecks the local output. Local unsigned provenance does not authenticate a
+publisher; configured or skipped CI is not an executed gate. Complete signing,
+distribution licensing/NOTICE packaging, release channels, automated rollback
+combinations and production certification remain Phase8 work. Go binaries link
+dependency code, including the MCP SDK, regardless of whether it is vendored.

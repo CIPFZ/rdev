@@ -258,6 +258,13 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			endRequest()
 			continue
 		}
+		if req.Operation == "support" {
+			info := service.Support(req.Owner, req.Host)
+			recordResult("completed")
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Support: &info})
+			endRequest()
+			continue
+		}
 		if req.Host != "" && (req.Wire != nil || req.Secret != nil || req.Sync != nil) {
 			if err := service.BindAuditTarget(&auditBase, req.Host); err != nil {
 				recordResult("request_rejected")

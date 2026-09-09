@@ -478,12 +478,17 @@ Setting `RDEV_BROKER_SOCKET` selects the authenticated broker path for the whole
 CLI invocation. `ping`, `exec`, `read`, `ls`, `write`, `capability`, supported `job`
 commands, `secret`, `sync`, mutation queries and `serve` use daemon-owned state
 and transports. Unsupported shared commands fail before constructing a standalone
-client. Shared host/session editing, declarative secret delegation and state frontends
-remain unsupported. Hosts come from the administrator's private registry at
+client. Shared host/session editing and declarative secret delegation remain unsupported.
+`state inspect|migrate|repair` and MCP `rdev_state` use the existing administrative
+routes. State reports cover the entire host state root, including other owners'
+record paths: grant these operations only to administrators. Migration and repair,
+including previews, require exact-request approval. Hosts come from the administrator's private registry at
 daemon startup; change that registry and restart to update hosts. Supply cwd/env
-explicitly per request. Frontend compatibility and any online host administration
-are Phase6 scope decisions, separate from Phase5's shared transport contract.
-Local help, version and static support metadata remain available.
+explicitly per request. CLI `exec` and `job start` accept repeated `-env K=V` with distinct keys; MCP
+accepts an `env` object. Use principal-owned `secret set` or `set_from_file` plus
+`secret:NAME` and a `secret.use` grant instead of declarative delegation.
+`rdev support` and MCP `rdev_support` list these boundaries and alternatives.
+Local help, version, `compat` and static support remain available without a socket.
 
 With a `status` grant, `rdev broker status` and MCP `rdev_broker_status` return the
 principal's ingress usage, detached observation bytes, scheduler quotas and lane
@@ -524,7 +529,7 @@ Every authorized request must match an implemented local handler or a registered
 remote operation with a matching `wire.op` and nonempty host. Policy denial runs
 first; absent handlers and malformed envelopes then fail before approval use,
 state mutation or transport admission. Granting an unimplemented operation does
-not make it available. Session administration remains open; shared sync and secret file import are
+not make it available. Online session administration remains unsupported; shared sync and secret file import are
 documented below.
 
 Local `status`, `pool.health`, `audit.health` and `audit_query` require an empty
@@ -767,3 +772,80 @@ CLI/MCP, real SSH execution, cancellation and pre-acknowledgment crash paths are
 covered by `make remote-sync-execution`; `make remote-mixed-qos` covers concurrent
 exec/wait/status/transfers. macOS runtime remains unverified and was deferred by
 the user; see [Phase5 acceptance](phase5-acceptance.md).
+
+
+## Entry contracts and compatibility
+
+All CLI commands reject unknown flags, missing values, invalid/overflowing
+numbers, duplicate single-value flags, extra operands and conflicting modes
+before business I/O. Both `-key value` and `--key=value` work. `-exclude` repeats;
+`-env`/`-secret` repeat only with distinct keys. Use `-key=-value` for a flag value
+beginning with `-`. `--` ends flag parsing: `sync HOST push -- -leading-local REMOTE`
+works in both modes. For `exec`/`job start`, everything after the required `--`
+is the unchanged command argv. The invoking local shell still requires quoting.
+A stdin read error fails the entire write, even if the reader also returned data;
+the request is not submitted. The existing input cap remains enforced.
+
+Timeouts are seconds and have the same meaning in both CLI and both MCP modes:
+
+| Budget | Omitted or 0 | Positive | Expiry |
+|---|---|---|---|
+| Foreground `exec -timeout` / `timeout_sec` | 60 | 1–3600 | Terminates only that foreground process group; returns captured output and `timed_out` |
+| `job wait -timeout` / `timeout_sec` | 300 | 1–3600 | Ends this observation; the job and other subscribers survive |
+| New `job start -wall-timeout` / `resources.wall_timeout_sec` | 3600 | 1–3600 | Supervisor terminates the job group and records `resource_limit=wall_timeout` |
+
+Negative, overflowing, above-limit and explicit infinite values fail. CLI exec
+and job wait return nonzero on expiry; MCP returns structured timeout data.
+Connection establishment budgets and request context deadlines are separate;
+a shorter caller deadline can end an observation or cancel an attached exec,
+but never extends a runtime budget or terminates a detached job. Mutation
+cancellation retains the existing possibly-executed outcome and never auto-replays.
+CLI/MCP job results include requested/effective resources and the limit reason.
+
+This changes old defaults: standalone CLI/client and broker exec used to allow
+unbounded runtime, while standalone MCP used 60 seconds. New jobs previously
+had no wall timer when it was omitted. Existing positive values keep their meaning;
+existing running supervisors keep their recorded envelope. A new job requires
+negotiated `job_resource_envelope`; an old agent lacking it is rejected before
+launch. Update the embedded agent using `make all` and reconnect. This does not
+remove access to existing jobs' status/wait/stop operations.
+
+`rdev support [HOST] [-refresh]` / `rdev_support` use one support matrix.
+No-host calls are static. With HOST, broker discovery returns only the authenticated
+principal's operation decisions; a denied capability probe opens no SSH connection
+and does not look up host inventory. `allowed` is authorization, `callable` excludes
+supplementary rights such as `secret.use`, and runtime support is separate. A
+positive grant still requires resource admission and approval. Probe results omit
+profile/environment/path data; a probe is not platform runtime certification.
+macOS shared runtime remains unverified and explicitly deferred.
+
+`rdev compat` / `rdev_compat` expose ranges, features, error registry, actual config
+fields and persisted schemas from the same constants used by validators. Standalone
+client/agent supports protocol 2–3 common operations; broker/agent requires protocol
+3 and owner-preserving features; client/broker currently supports only protocol 1.
+N/N-1 means these explicit ranges, not arbitrary release combinations. Unknown
+error envelopes fail closed rather than becoming retryable. Host config is
+unversioned: standalone tolerates unknown JSON fields, administrative registry
+loading rejects them. Broker config rejects unknown fields. Legacy agent records
+without a schema can migrate forward with backup; unsupported/future schemas
+never silently downgrade. Query existing durable outcomes rather than replaying
+old mutation IDs with changed runtime semantics. Complete automated upgrade and
+rollback matrices remain Phase8.
+
+## Local release gate
+
+`make GO=/path/to/go release-gate` is an executable local check; it publishes
+nothing. It selects the `go.mod` toolchain (Go 1.26.8) and pinned govulncheck
+v1.8.0 from `scripts/release-tools.env`, downloads and verifies modules, queries
+the module proxy for updates/retractions, audits all four source platforms and
+six actual binaries, then generates manifest, CycloneDX SBOM and unsigned SLSA
+provenance. A finding, unavailable network, invalid audit report or changing source
+fails the gate. Default output is `bin/release`; set `RDEV_RELEASE_OUT` to an
+external directory. The default requires a clean tree; development dirty builds
+must be explicitly labeled with `RDEV_RELEASE_ALLOW_DIRTY=1`.
+
+`make GO=/path/to/go verify-release` rechecks artifact hashes, embedded agents,
+Go build information, audit evidence and metadata binding. This is local evidence,
+not a hosted CI run or signed release. Formal signing, distribution notices,
+release channels, upgrade/rollback automation and production certification remain
+Phase8. The [Phase6 acceptance](phase6-acceptance.md) records actual executions.

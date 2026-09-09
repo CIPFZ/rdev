@@ -10,6 +10,11 @@ import (
 // changes or transport acquisition. A grant cannot create an absent handler or
 // turn a host-limited administration grant into global authority.
 func ValidateRoute(req Request) error {
+	if req.Wire != nil && (req.Wire.Exec != nil || req.Wire.Job != nil) {
+		if _, err := proto.NormalizeTimeouts(req.Wire); err != nil {
+			return err
+		}
+	}
 	if req.Wire != nil && req.Wire.Sync != nil {
 		return errors.New("internal sync parameters cannot be submitted as wire operations")
 	}
@@ -26,6 +31,11 @@ func ValidateRoute(req Request) error {
 		return errors.New("unexpected secret parameters")
 	}
 	switch req.Operation {
+	case "support":
+		if req.Wire != nil || req.Risk || req.ApprovalSpec != nil || len(req.Host) > 512 {
+			return errors.New("support requires a read-only local request with an optional host")
+		}
+		return nil
 	case "secret.set", "secret.delete", "secret.list", "secret.set_from_file":
 		if req.Wire != nil || req.Host == "" {
 			return errors.New("secret operation requires an exact host without wire parameters")

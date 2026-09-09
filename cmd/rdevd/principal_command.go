@@ -21,7 +21,7 @@ func principalTokenCommand(args []string, output io.Writer) error {
 	project := flags.String("project-id", "", "project receiving the credential")
 	ttl := flags.Duration("ttl", time.Hour, "credential lifetime (maximum 24h)")
 	keyFile := flags.String("key-file", "", "0600 administrator signing key file")
-	if err := flags.Parse(args); err != nil {
+	if err := parseSingleFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *ttl <= 0 || *ttl > broker.MaxPrincipalTokenTTL {
@@ -54,7 +54,7 @@ func principalSecret(path string) (string, error) {
 func principalKeygenCommand(args []string) error {
 	flags := flag.NewFlagSet("principal-keygen", flag.ContinueOnError)
 	path := flags.String("out", "", "new 0600 key file (must not exist)")
-	if err := flags.Parse(args); err != nil {
+	if err := parseSingleFlags(flags, args); err != nil {
 		return err
 	}
 	if *path == "" || flags.NArg() != 0 {

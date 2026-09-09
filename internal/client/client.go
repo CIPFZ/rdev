@@ -133,6 +133,11 @@ func (c *Client) DoProtocolBulk(ctx context.Context, host string, req *proto.Req
 	return c.doProtocolLane(ctx, host, req, target, true)
 }
 func (c *Client) doProtocolLane(ctx context.Context, host string, req *proto.Request, target string, bulk bool) (*proto.Response, error) {
+	normalized, normErr := proto.NormalizeTimeouts(req)
+	if normErr != nil {
+		return nil, normErr
+	}
+	req = normalized
 	if req == nil || req.ClientID == "" || req.ProjectID == "" {
 		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
@@ -763,6 +768,15 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			}
 		}
 
+		// Older peers can ignore unknown resource fields. Never launch a new job
+		// unless negotiation proves the bounded runtime envelope is enforced.
+		if built.Request.Op == proto.OpJobStart {
+			negotiated, ok := pooled.conn.(negotiatedConnection)
+			if !ok || negotiated.NegotiatedVersion() < proto.TypedProtocolVersion || !negotiated.SupportsFeature(proto.FeatureJobResourceEnvelope) {
+				release()
+				return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+			}
+		}
 		if built.Request.Op == proto.OpJobList && built.Request.Job != nil && built.Request.Job.FilterIDs {
 			negotiated, ok := pooled.conn.(negotiatedConnection)
 			if !ok || negotiated.NegotiatedVersion() < 3 || !negotiated.SupportsFeature(proto.FeatureJobFilterIDs) {
@@ -826,6 +840,18 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 				safeResp.Terminal = true
 				if safeResp.Execution == "" {
 					safeResp.Execution = proto.StateCompleted
+				}
+			}
+			if safeResp.Capability != nil {
+				// Availability comes from the handshake on this exact leased
+				// connection, never from unverified capability payload claims.
+				safeResp.Capability.Features = nil
+				if negotiated, ok := pooled.conn.(negotiatedConnection); ok && negotiated.NegotiatedVersion() >= proto.TypedProtocolVersion {
+					for _, feature := range proto.SupportedFeatures() {
+						if negotiated.SupportsFeature(feature) {
+							safeResp.Capability.Features = append(safeResp.Capability.Features, feature)
+						}
+					}
 				}
 			}
 			stampResponseMetadata(safeResp)
@@ -952,7 +978,7 @@ func connectionUsesLegacyUnary(conn remoteConnection) bool {
 	// Typed terminal semantics are a protocol-3 baseline. FeatureStreaming gates
 	// optional data/progress delivery, not permission to mimic protocol 2's
 	// shape or discard operation identity.
-	return negotiated.NegotiatedVersion() < 3
+	return negotiated.NegotiatedVersion() < proto.TypedProtocolVersion
 }
 
 func (c *Client) redactResponse(resp *proto.Response) *proto.Response {
@@ -1025,6 +1051,11 @@ type ExecResult struct {
 
 // Exec runs a command and waits for it.
 func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error) {
+	timeout, err := proto.ResolveTimeout(opts.TimeoutSec, proto.DefaultExecTimeoutSeconds)
+	if err != nil {
+		return nil, err
+	}
+	opts.TimeoutSec = timeout
 	if len(opts.Argv) == 0 {
 		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
@@ -1114,6 +1145,16 @@ type JobStartOptions struct {
 
 // JobStart launches a job that outlives the connection.
 func (c *Client) JobStart(ctx context.Context, opts JobStartOptions) (*proto.JobInfo, error) {
+	r := proto.ResourceEnvelope{}
+	if opts.Resources != nil {
+		r = *opts.Resources
+	}
+	timeout, err := proto.ResolveTimeout(r.WallTimeoutSec, proto.DefaultJobWallTimeoutSeconds)
+	if err != nil {
+		return nil, err
+	}
+	r.WallTimeoutSec = timeout
+	opts.Resources = &r
 	if len(opts.Argv) == 0 {
 		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
@@ -1251,7 +1292,7 @@ type JobWaitOptions struct {
 	IDs []string
 	// WaitAny returns as soon as one of IDs finishes rather than all of them.
 	WaitAny bool
-	// TimeoutSec bounds the wait. The agent clamps it to one hour.
+	// TimeoutSec bounds observation only: zero defaults to 300, maximum 3600.
 	TimeoutSec int
 	// TailOnExit returns this many trailing stdout lines with the final status.
 	TailOnExit int
@@ -1289,6 +1330,11 @@ type JobWaitResult struct {
 // With several ids, one call covers the batch under a shared deadline rather than
 // costing one blocking round trip per job.
 func (c *Client) JobWait(ctx context.Context, opts JobWaitOptions) (*JobWaitResult, error) {
+	timeout, err := proto.ResolveTimeout(opts.TimeoutSec, proto.DefaultJobWaitSeconds)
+	if err != nil {
+		return nil, err
+	}
+	opts.TimeoutSec = timeout
 	if opts.ID == "" && len(opts.IDs) == 0 {
 		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
@@ -2017,7 +2063,7 @@ func buildSyncArgsWith(host transport.Host, sshArgs []string, opts SyncOptions, 
 		args = append(args, "--exclude", ex)
 	}
 
-	remoteSpec := host.Addr + ":" + opts.Remote
+	remoteSpec := transport.RsyncDestination(host.Addr) + ":" + opts.Remote
 	switch opts.Direction {
 	case "push", "":
 		args = append(args, "--", opts.Local, remoteSpec)
@@ -2145,6 +2191,7 @@ func cloneCapability(in *proto.CapabilityResult) *proto.CapabilityResult {
 		return nil
 	}
 	out := *in
+	out.Features = append([]proto.Feature(nil), in.Features...)
 	if in.Profile != nil {
 		p := *in.Profile
 		out.Profile = &p

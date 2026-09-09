@@ -13,7 +13,7 @@ import (
 // Resource admission is deliberately conservative: a non-zero budget is
 // accepted only when this build can enforce it for the complete process tree.
 func effectiveEnvelope(requested *proto.ResourceEnvelope) (proto.ResourceEnvelope, error) {
-	var out proto.ResourceEnvelope
+	out := proto.ResourceEnvelope{WallTimeoutSec: proto.DefaultJobWallTimeoutSeconds}
 	if requested == nil {
 		return out, nil
 	}
@@ -30,10 +30,11 @@ func effectiveEnvelope(requested *proto.ResourceEnvelope) (proto.ResourceEnvelop
 		}
 		out.FDs = requested.FDs
 	}
-	if requested.WallTimeoutSec < 0 || requested.WallTimeoutSec > hardExecTimeoutSec {
-		return out, fmt.Errorf("wall timeout is outside the hard limit")
+	wall, err := proto.ResolveTimeout(requested.WallTimeoutSec, proto.DefaultJobWallTimeoutSeconds)
+	if err != nil {
+		return out, err
 	}
-	out.WallTimeoutSec = requested.WallTimeoutSec
+	out.WallTimeoutSec = wall
 	if requested.JobCount < 0 || requested.JobCount > 0 {
 		if requested.JobCount <= 0 {
 			return out, fmt.Errorf("job count must be positive")

@@ -55,6 +55,9 @@ func newServer(c *client.Client, approveProject func(string) (session.ProjectTru
 	// using internal/client directly (the CLI does) never passes through here.
 	s.AddReceivingMiddleware(redactResults(c))
 
+	registerCompat(s)
+	registerSupport(s, c)
+	registerState(s, c)
 	registerExec(s, c)
 	registerJobs(s, c)
 	registerFiles(s, c)
@@ -73,46 +76,35 @@ func newServer(c *client.Client, approveProject func(string) (session.ProjectTru
 // Only tools/call is touched. Other methods carry no remote output, and running the
 // scan over list responses would cost bytes for nothing.
 func redactResults(c *client.Client) mcp.Middleware {
+	return projectResults(func(r *mcp.CallToolResult) { redactCallToolResult(c, r) }, c.Secrets.Redact)
+}
+
+// Broker results were already redacted by the owning daemon. Both MCP modes
+// still project the same stable error envelope without creating a private client.
+func projectResults(scrub func(*mcp.CallToolResult), scrubError func(string) string) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			res, err := next(ctx, method, req)
 			if method != "tools/call" {
 				return res, err
 			}
-			// Stable rdev errors are tool results, not opaque MCP protocol errors.
-			// This preserves code/retry/execution/operation/terminal fields so an
-			// Agent can make the same decision as the CLI.
-			if err != nil {
-				var envelope *proto.ErrorEnvelope
-				if errors.As(err, &envelope) {
-					copy := *envelope
-					ctr := &mcp.CallToolResult{
-						IsError: true, StructuredContent: &copy,
-						Content: []mcp.Content{&mcp.TextContent{Text: copy.Message}},
-					}
-					redactCallToolResult(c, ctr)
-					return ctr, nil
-				}
-				err = errors.New(c.Secrets.Redact(err.Error()))
+			ctr, _ := res.(*mcp.CallToolResult)
+			underlying := err
+			if underlying == nil && ctr != nil {
+				underlying = ctr.GetError()
 			}
-			ctr, ok := res.(*mcp.CallToolResult)
-			if !ok || ctr == nil {
-				return res, err
+			var envelope *proto.ErrorEnvelope
+			if errors.As(underlying, &envelope) {
+				copy := *envelope
+				ctr = &mcp.CallToolResult{IsError: true, StructuredContent: &copy, Content: []mcp.Content{&mcp.TextContent{Text: copy.Message}}}
+				res, err = ctr, nil
+			} else if err != nil && scrubError != nil {
+				err = errors.New(scrubError(err.Error()))
 			}
-			// AddTool converts ordinary handler errors into CallToolResult before
-			// receiving middleware runs. GetError retains the original typed error
-			// specifically for middleware, so recover the stable envelope here.
-			if underlying := ctr.GetError(); underlying != nil {
-				var envelope *proto.ErrorEnvelope
-				if errors.As(underlying, &envelope) {
-					copy := *envelope
-					ctr.IsError = true
-					ctr.StructuredContent = &copy
-					ctr.Content = []mcp.Content{&mcp.TextContent{Text: copy.Message}}
-				}
+			if ctr != nil && scrub != nil {
+				scrub(ctr)
 			}
-			redactCallToolResult(c, ctr)
-			return ctr, err
+			return res, err
 		}
 	}
 }
@@ -185,7 +177,7 @@ type ExecIn struct {
 	Env            map[string]string `json:"env,omitempty" jsonschema:"Extra environment variables. Use the value 'secret:NAME' to inject a registered secret without exposing it."`
 	LoginShell     *bool             `json:"login_shell,omitempty" jsonschema:"Source the login profile first so tools in ~/.local/bin (uv, pipx, cargo) resolve. Defaults to true."`
 	Stdin          string            `json:"stdin,omitempty" jsonschema:"Data written to the command's stdin."`
-	TimeoutSec     int               `json:"timeout_sec,omitempty" jsonschema:"Kill the command after this many seconds. Default 60. Use rdev_job_start for anything longer."`
+	TimeoutSec     int               `json:"timeout_sec,omitempty" jsonschema:"Foreground runtime seconds: omitted or 0 means 60; 1..3600 allowed. Negative and infinite timeouts are rejected. Use jobs for detached work."`
 	MaxOutputBytes int               `json:"max_output_bytes,omitempty" jsonschema:"Cap stdout and stderr each at this many bytes. Default 16000."`
 }
 
@@ -209,7 +201,7 @@ type ExecOut struct {
 }
 
 const (
-	defaultExecTimeoutSec = 60
+	defaultExecTimeoutSec = proto.DefaultExecTimeoutSeconds
 	defaultExecMaxOutput  = 16000
 )
 
@@ -266,26 +258,30 @@ func toExecOut(res *client.ExecResult) ExecOut {
 // ---------- jobs ----------
 
 type JobStartIn struct {
-	OperationID   string            `json:"operation_id,omitempty" jsonschema:"Stable mutation identity for recovery in shared broker mode"`
-	ApprovalToken string            `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
-	Host          string            `json:"host"`
-	Argv          []string          `json:"argv" jsonschema:"Command and arguments as separate array elements."`
-	Cwd           string            `json:"cwd,omitempty"`
-	Env           map[string]string `json:"env,omitempty" jsonschema:"Extra environment variables. 'secret:NAME' injects a registered secret."`
-	LoginShell    *bool             `json:"login_shell,omitempty"`
-	Label         string            `json:"label,omitempty" jsonschema:"Short human-readable tag, e.g. 'swe-oracle-20'."`
+	Resources     *proto.ResourceEnvelope `json:"resources,omitempty" jsonschema:"Job runtime envelope: wall_timeout_sec omitted or 0 defaults to 3600; 1..3600 seconds allowed, no infinite runtime. CPU/memory/PID controls currently unsupported; discover support before requesting limits."`
+	OperationID   string                  `json:"operation_id,omitempty" jsonschema:"Stable mutation identity for recovery in shared broker mode"`
+	ApprovalToken string                  `json:"approval_token,omitempty" jsonschema:"Exact request approval issued by the shared broker administrator"`
+	Host          string                  `json:"host"`
+	Argv          []string                `json:"argv" jsonschema:"Command and arguments as separate array elements."`
+	Cwd           string                  `json:"cwd,omitempty"`
+	Env           map[string]string       `json:"env,omitempty" jsonschema:"Extra environment variables. 'secret:NAME' injects a registered secret."`
+	LoginShell    *bool                   `json:"login_shell,omitempty"`
+	Label         string                  `json:"label,omitempty" jsonschema:"Short human-readable tag, e.g. 'swe-oracle-20'."`
 }
 
 type JobOut struct {
-	ID        string   `json:"id"`
-	Label     string   `json:"label,omitempty"`
-	Argv      []string `json:"argv"`
-	Cwd       string   `json:"cwd,omitempty"`
-	PID       int      `json:"pid"`
-	State     string   `json:"state" jsonschema:"running, exited, killed, or unknown"`
-	ExitCode  int      `json:"exit_code,omitempty"`
-	StartedAt string   `json:"started_at"`
-	EndedAt   string   `json:"ended_at,omitempty"`
+	Requested     proto.ResourceEnvelope `json:"requested_resources"`
+	Effective     proto.ResourceEnvelope `json:"effective_resources"`
+	ResourceLimit string                 `json:"resource_limit,omitempty"`
+	ID            string                 `json:"id"`
+	Label         string                 `json:"label,omitempty"`
+	Argv          []string               `json:"argv"`
+	Cwd           string                 `json:"cwd,omitempty"`
+	PID           int                    `json:"pid"`
+	State         string                 `json:"state" jsonschema:"running, exited, killed, or unknown"`
+	ExitCode      int                    `json:"exit_code,omitempty"`
+	StartedAt     string                 `json:"started_at"`
+	EndedAt       string                 `json:"ended_at,omitempty"`
 	// Orphaned and ChildPID surface a job whose supervisor died while the work
 	// kept running. Without them an orphaned job is indistinguishable from a
 	// healthy one here, even though no exit code will ever be recorded for it.
@@ -308,6 +304,7 @@ func toJobOut(j *proto.JobInfo) JobOut {
 		Orphaned: j.Orphaned, ChildPID: j.ChildPID,
 		OperationID: j.OperationID, Terminal: j.Terminal, ExecutionState: j.Execution,
 		StdoutLedger: j.StdoutLedger, StderrLedger: j.StderrLedger,
+		Requested: j.Requested, Effective: j.Effective, ResourceLimit: j.ResourceLimit,
 	}
 }
 
@@ -363,7 +360,7 @@ type JobWaitIn struct {
 	ID         string   `json:"id,omitempty" jsonschema:"Wait on one job. Use ids to wait on several in a single call."`
 	IDs        []string `json:"ids,omitempty" jsonschema:"Wait on several jobs under one shared deadline. Much cheaper than one call per job."`
 	WaitAny    bool     `json:"wait_any,omitempty" jsonschema:"With ids, return as soon as any one job finishes instead of waiting for all. Use this to react to the first failure in a batch."`
-	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"How long to block, in seconds. Default 300, capped at 3600. If the job is still running when this expires you get timed_out=true and can call again."`
+	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"How long to block, in seconds. Omitted or 0 means 300; 1..3600 allowed; negative and infinite waits are rejected. If the job is still running when this expires you get timed_out=true and can call again."`
 	TailOnExit int      `json:"tail_on_exit,omitempty" jsonschema:"Return this many trailing stdout lines with the final status, saving a follow-up rdev_job_logs call."`
 }
 
@@ -432,7 +429,7 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStartIn) (*mcp.CallToolResult, JobOut, error) {
 		info, err := c.JobStart(ctx, client.JobStartOptions{
 			Host: in.Host, Argv: in.Argv, Cwd: in.Cwd, Env: in.Env,
-			LoginShell: in.LoginShell, Label: in.Label,
+			LoginShell: in.LoginShell, Label: in.Label, Resources: in.Resources,
 		})
 		if err != nil {
 			return nil, JobOut{}, err

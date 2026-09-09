@@ -222,7 +222,7 @@ func (r *MutationRegistry) Snapshot() []MutationIntent {
 }
 
 func saveMutations(path string, records []MutationIntent) error {
-	data, err := json.Marshal(mutationSnapshot{Schema: 1, Records: records})
+	data, err := json.Marshal(mutationSnapshot{Schema: MutationSchemaVersion, Records: records})
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func (r *MutationRegistry) ConfigurePersistence(path string) error {
 		if err := dec.Decode(&snapshot); err != nil {
 			return err
 		}
-		if snapshot.Schema != 1 || snapshot.Records == nil || len(snapshot.Records) > maxMutationIntents {
+		if snapshot.Schema != MutationSchemaVersion || snapshot.Records == nil || len(snapshot.Records) > maxMutationIntents {
 			return errors.New("invalid mutation snapshot schema or size")
 		}
 		owners := make(map[string]int)

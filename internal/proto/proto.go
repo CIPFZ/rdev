@@ -292,6 +292,7 @@ type ExecutionProfile struct {
 }
 
 type CapabilityResult struct {
+	Features     []Feature         `json:"features,omitempty"`
 	ProbeVersion string            `json:"probe_version"`
 	ProbedAt     string            `json:"probed_at"`
 	OS           string            `json:"os"`

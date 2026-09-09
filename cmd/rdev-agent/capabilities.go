@@ -80,7 +80,7 @@ func withProfileDigest(p proto.ExecutionProfile) proto.ExecutionProfile {
 func probeCapabilities(refresh bool) *proto.CapabilityResult {
 	_ = refresh // capability probes are cheap and intentionally uncached for now.
 	now := time.Now().UTC()
-	result := &proto.CapabilityResult{ProbeVersion: capabilityProbeVersion, ProbedAt: now.Format(time.RFC3339Nano), OS: runtime.GOOS, Arch: runtime.GOARCH, Rlimit: rlimitAvailable()}
+	result := &proto.CapabilityResult{ProbeVersion: capabilityProbeVersion, Features: proto.SupportedFeatures(), ProbedAt: now.Format(time.RFC3339Nano), OS: runtime.GOOS, Arch: runtime.GOARCH, Rlimit: rlimitAvailable()}
 	// Linux cgroup v2 is the only currently advertised hard-control backend.
 	if runtime.GOOS == "linux" {
 		result.Cgroup = cgroupV2Available()

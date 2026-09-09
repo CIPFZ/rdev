@@ -158,7 +158,7 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// Owner.Key contains NUL as an unambiguous separator. Sanitizing that key
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
-	e.Schema = 1
+	e.Schema = AuditSchemaVersion
 	if e.DigestScope != "broker_instance" && e.DigestScope != "approval" {
 		e.DigestScope = ""
 	}
@@ -258,7 +258,7 @@ func (a *AuditLog) QueryOwner(since time.Time, owner string) []AuditEvent {
 	for _, event := range a.events {
 		// Legacy records used lossy display identities. They remain on disk for
 		// administrator inspection but cannot safely be assigned to a principal.
-		if event.Schema == 1 && event.Owner == identity && event.At.After(since) {
+		if event.Schema == AuditSchemaVersion && event.Owner == identity && event.At.After(since) {
 			out = append(out, event)
 		}
 	}
@@ -271,7 +271,7 @@ func (a *AuditLog) HasLegacyRecords() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for _, event := range a.events {
-		if event.Schema != 1 {
+		if event.Schema != AuditSchemaVersion {
 			return true
 		}
 	}

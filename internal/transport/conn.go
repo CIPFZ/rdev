@@ -28,7 +28,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/framewriter"
@@ -60,21 +59,8 @@ type Host struct {
 // It intentionally permits ssh_config aliases and IPv6 spellings, but rejects
 // anything ssh could reinterpret as an option or split into extra argv words.
 func ValidateDestination(addr string, port int) error {
-	if addr == "" {
-		return errors.New("empty ssh destination")
-	}
-	if strings.HasPrefix(addr, "-") {
-		return fmt.Errorf("ssh destination %q must not start with '-'", addr)
-	}
-	for _, r := range addr {
-		if unicode.IsSpace(r) || unicode.IsControl(r) {
-			return fmt.Errorf("ssh destination %q contains whitespace or a control character", addr)
-		}
-	}
-	if port < 0 || port > 65535 {
-		return fmt.Errorf("ssh port %d must be 0 (default) or within 1..65535", port)
-	}
-	return nil
+	_, _, err := ParseDestination(addr, port)
+	return err
 }
 
 // ValidateRemoteDir returns the canonical, home-relative state directory.
@@ -333,9 +319,11 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		}
 		activity.EndDial(stage, dialErr == nil, time.Since(started))
 	}()
-	if err := ValidateHost(host); err != nil {
+	normalized, err := NormalizeHost(host)
+	if err != nil {
 		return nil, fmt.Errorf("invalid host %q: %w", host.Name, err)
 	}
+	host = normalized
 
 	c := &Conn{
 		host:      host,
@@ -613,10 +601,13 @@ func shellCommand(script string, argv ...string) []string {
 
 // sshArgs is the final shared boundary before every ssh process creation.
 func (c *Conn) sshArgs(remote ...string) ([]string, error) {
-	if err := ValidateHost(c.host); err != nil {
+	host, err := NormalizeHost(c.host)
+	if err != nil {
 		return nil, fmt.Errorf("invalid host %q: %w", c.host.Name, err)
 	}
-	args := append(c.sshBase(), c.host.Addr)
+	// Use a value copy: final validation never mutates a live connection.
+	sink := &Conn{host: host, ctlPath: c.ctlPath}
+	args := append(sink.sshBase(), host.Addr)
 	return append(args, remote...), nil
 }
 
@@ -1904,6 +1895,10 @@ func (c *Conn) Close() error {
 // The name is hashed because ssh rejects control paths longer than a sockaddr_un
 // (~104 bytes), which "user@long.host.name:port" can exceed.
 func controlPath(h Host) (string, error) {
+	h, err := NormalizeHost(h)
+	if err != nil {
+		return "", err
+	}
 	dir := filepath.Join(os.TempDir(), "rdev-ctl")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err

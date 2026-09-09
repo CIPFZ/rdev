@@ -21,6 +21,17 @@ STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
 all: agents build
 
+# Local artifact/vulnerability/SBOM/provenance gate. Does not publish or sign.
+.PHONY: release-gate verify-release daemon
+daemon:
+	$(GO) build -trimpath -ldflags='$(STAMP)' -o bin/rdevd ./cmd/rdevd
+
+release-gate:
+	RDEV_RELEASE_GO='$(GO)' sh scripts/release-gate.sh
+
+verify-release:
+	$(GO) run ./scripts/releasecheck verify '$(if $(RDEV_RELEASE_OUT),$(RDEV_RELEASE_OUT),bin/release)'
+
 # Agent binaries are embedded into the rdev binary, so they must be built first.
 # -s -w strips symbols and DWARF: these are uploaded over ssh on first connect,
 # and the size reduction is worth more than a remote stack trace.
