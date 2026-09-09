@@ -1,0 +1,19 @@
+Source implementation: 9cf6103
+No Phase5 completion claim; independent review and remaining acceptance gates are pending.
+
+Command/scope: Actual go build -race daemon and CLI, plain remote agent, final production changes before commit; TestRemoteBrokerPreparedSync and TestRemoteBrokerSyncPreview
+=== RUN   TestRemoteBrokerPreparedSync
+    remote_sync_execution_test.go:331: actual daemon + CLI/MCP + SSH: retained push/pull, exact delete preserving excludes, source edits after preparation, target-drift rejection before writes, owner/host/options/plan substitution and replay denial, pre-ACK SIGKILL recovery from remote ledger without replay, durable owner-only outcomes, actual CLI SIGKILL releases worker/budget and preserves peer base PID, private approval/outcome audit
+--- PASS: TestRemoteBrokerPreparedSync (18.04s)
+=== RUN   TestRemoteBrokerSyncPreview
+    remote_sync_test.go:328: actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending
+--- PASS: TestRemoteBrokerSyncPreview (16.68s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	34.721s
+
+Command/scope: Same instrumented binaries; final TestRemoteBrokerPreparedSync also checks local pull deletion and excluded-target preservation
+=== RUN   TestRemoteBrokerPreparedSync
+    remote_sync_execution_test.go:345: actual daemon + CLI/MCP + SSH: retained push/pull, exact delete preserving excludes, source edits after preparation, target-drift rejection before writes, owner/host/options/plan substitution and replay denial, pre-ACK SIGKILL recovery from remote ledger without replay, durable owner-only outcomes, actual CLI SIGKILL releases worker/budget and preserves peer base PID, private approval/outcome audit
+--- PASS: TestRemoteBrokerPreparedSync (18.00s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	18.010s

@@ -1,0 +1,48 @@
+Source implementation: 9cf6103
+No Phase5 completion claim; independent review and remaining acceptance gates are pending.
+
+Command/scope: make agents check (production changes before commit; later test-only updates exercised below)
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.006s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	34.296s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	9.180s
+ok  	github.com/CIPFZ/rdev/internal/broker	7.183s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.003s
+ok  	github.com/CIPFZ/rdev/internal/client	0.965s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.040s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.646s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.005s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.007s
+ok  	github.com/CIPFZ/rdev/internal/session	14.114s
+ok  	github.com/CIPFZ/rdev/internal/state	0.102s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.029s
+ok  	github.com/CIPFZ/rdev/internal/support	0.003s
+ok  	github.com/CIPFZ/rdev/internal/synctree	0.713s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.483s
+ok       rdev-agent-linux-amd64 92b8a9518452
+ok       rdev-agent-linux-arm64 2a40ffd8630d
+ok       rdev-agent-darwin-amd64 95c9d733bc1f
+ok       rdev-agent-darwin-arm64 af73ca180bbd
+
+Command/scope: make remote-sync-execution (committed source; configured authorized SSH target)
+9cf6103e4ca676892ea83e83c35dbc27a32378de
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='service-deploy' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerPreparedSync$' -count=1 -timeout=3m -v
+=== RUN   TestRemoteBrokerPreparedSync
+    remote_sync_execution_test.go:345: actual daemon + CLI/MCP + SSH: retained push/pull, exact delete preserving excludes, source edits after preparation, target-drift rejection before writes, owner/host/options/plan substitution and replay denial, pre-ACK SIGKILL recovery from remote ledger without replay, durable owner-only outcomes, actual CLI SIGKILL releases worker/budget and preserves peer base PID, private approval/outcome audit
+--- PASS: TestRemoteBrokerPreparedSync (4.83s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	4.830s
+
+Command/scope: go test ./cmd/rdev ./internal/client -count=1 (final client/test changes)
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.004s
+ok  	github.com/CIPFZ/rdev/internal/client	0.880s

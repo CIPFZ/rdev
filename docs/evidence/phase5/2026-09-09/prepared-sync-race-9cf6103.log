@@ -1,0 +1,13 @@
+Source implementation: 9cf6103
+No Phase5 completion claim; independent review and remaining acceptance gates are pending.
+
+Command/scope: go test -race ./internal/broker ./internal/client ./internal/proto ./internal/synctree ./cmd/rdev-agent -count=1 (committed source)
+ok  	github.com/CIPFZ/rdev/internal/broker	6.535s
+ok  	github.com/CIPFZ/rdev/internal/client	1.961s
+ok  	github.com/CIPFZ/rdev/internal/proto	1.018s
+ok  	github.com/CIPFZ/rdev/internal/synctree	2.509s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	51.949s
+
+Command/scope: go test -race ./internal/client -count=1; then the real rsync descendant cancellation regression -count=25 (before commit)
+ok  	github.com/CIPFZ/rdev/internal/client	1.945s
+ok  	github.com/CIPFZ/rdev/internal/client	1.370s
