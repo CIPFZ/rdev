@@ -15,7 +15,7 @@ func TestOperationRegistryIsCompleteAndConservative(t *testing.T) {
 		OpJobStatus, OpJobLogs, OpJobStop, OpJobWait, OpJobRm, OpList, OpCancel,
 		OpStorageStatus, OpStorageGC, OpStorageDoctor,
 		OpStateInspect, OpStateMigrate, OpStateRepair,
-		OpCapabilityProbe,
+		OpCapabilityProbe, OpSyncInspect, OpSyncStage, OpSyncCommit,
 	}
 	if got := len(Operations()); got != len(want) {
 		t.Fatalf("registry has %d operations, want %d", got, len(want))
@@ -30,8 +30,8 @@ func TestOperationRegistryIsCompleteAndConservative(t *testing.T) {
 			t.Errorf("incomplete descriptor for %q: %+v", name, descriptor)
 		}
 		classes[descriptor.Class]++
-		if descriptor.Class == ClassMutating && descriptor.Retry != RetryDeduplicated {
-			t.Errorf("mutation %q retry=%q, want deduplicated", name, descriptor.Retry)
+		if descriptor.Class == ClassMutating && descriptor.Retry != RetryDeduplicated && descriptor.Retry != RetryNever {
+			t.Errorf("mutation %q retry=%q, want deduplicated or never", name, descriptor.Retry)
 		}
 	}
 	for _, class := range []OperationClass{ClassReadOnly, ClassIdempotent, ClassMutating} {
@@ -330,6 +330,25 @@ func TestCanonicalRequestDigestBindsStateDryRunAndCapabilityRefresh(t *testing.T
 		}
 		if first == second {
 			t.Fatalf("%s semantic controls missing from replay digest", op)
+		}
+	}
+}
+
+func TestSyncCommitRequiresDeadlineAndNeverRetries(t *testing.T) {
+	d, ok := LookupOperation(OpSyncCommit)
+	if !ok || d.Class != ClassMutating || d.Retry != RetryNever || d.Disconnect != DisconnectCancel {
+		t.Fatal(d)
+	}
+	for _, op := range []string{OpSyncInspect, OpSyncStage, OpSyncCommit} {
+		d, _ := LookupOperation(op)
+		found := false
+		for _, f := range d.RequiredFeatures {
+			if f == FeatureDeadline {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s rejects its bounded worker deadline", op)
 		}
 	}
 }

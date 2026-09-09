@@ -40,6 +40,7 @@ type Entry struct {
 }
 
 type Manifest struct {
+	Policy       string `json:"policy"`
 	Entries      []Entry
 	Digest       string
 	ContentBytes int64
@@ -115,6 +116,7 @@ func Scan(ctx context.Context, path, policy string, limits Limits) (Manifest, er
 		return Manifest{}, ErrChanged
 	}
 	s := scanner{ctx: ctx, root: root, policy: policy, limits: limits, buffer: make([]byte, 64<<10)}
+	s.manifest.Policy = policy
 	if err := s.walk(name, relative, nil); err != nil {
 		return Manifest{}, err
 	}

@@ -13,7 +13,7 @@ import (
 func OperationReference(req Request) string {
 	id := req.MutationID
 	if req.Operation != "mutation.status" {
-		if isSecretMutation(req.Operation) {
+		if isSecretMutation(req.Operation) || isSyncOperation(req.Operation) {
 			id = req.OperationID
 		} else if req.Wire == nil {
 			return ""

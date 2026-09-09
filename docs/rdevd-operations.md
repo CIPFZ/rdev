@@ -471,7 +471,7 @@ Setting `RDEV_BROKER_SOCKET` selects the authenticated broker path for the whole
 CLI invocation. `ping`, `exec`, `read`, `ls`, `write`, `capability`, supported `job`
 commands, mutation queries and `serve` use daemon-owned state and transports.
 Unsupported shared commands fail before constructing a standalone client. The
-remaining shared sync execution, declarative secret delegation, host/session administration and state workflows
+remaining declarative secret delegation, host/session administration and state workflows
 are still incomplete; they no longer silently bypass broker policy. Local help,
 version and static support metadata remain available.
 
@@ -514,8 +514,8 @@ Every authorized request must match an implemented local handler or a registered
 remote operation with a matching `wire.op` and nonempty host. Policy denial runs
 first; absent handlers and malformed envelopes then fail before approval use,
 state mutation or transport admission. Granting an unimplemented operation does
-not make it available. Shared sync execution and session administration remain
-open; shared sync previews and secret file import are documented below.
+not make it available. Session administration remains open; shared sync and secret file import are
+documented below.
 
 Local `status`, `pool.health`, `audit.health` and `audit_query` require an empty
 host and no wire envelope, because these queries do not filter their data by
@@ -681,32 +681,63 @@ A failed or canceled probe leaves the registry unchanged. As with inline set,
 `RDEV_OPERATION_ID`/MCP `operation_id` support crash-outcome queries without
 silently repeating an import.
 
-## Shared sync previews
+## Shared sync
 
-`rdev sync HOST push LOCAL REMOTE -dry-run` and the corresponding `pull` command
-run rsync in the broker through its pooled SSH connection. The CLI resolves LOCAL
-in its own working directory; the MCP `rdev_sync` tool requires an absolute local
-path and `dry_run: true`. The principal needs exact-host `sync.push` or
-`sync.pull` authority; `-delete` additionally requires `sync.delete`. A delete
-preview does not delete anything. Source and destination paths belong to the
-broker's OS account and remote SSH account respectively.
+With `RDEV_BROKER_SOCKET` set, `rdev sync HOST push LOCAL REMOTE -prepare`
+retains source content and returns a five-minute `plan_id`, digests and the exact
+path/type/content/metadata changes for review. `-prepare` implies `-dry-run`.
+The CLI resolves LOCAL against its working directory; MCP `rdev_sync` requires
+an absolute local path and uses `prepare: true`. Plain `-dry-run` remains a
+disposable rsync preview and cannot authorize execution.
 
-Previews use bulk admission, a 30-second operation deadline and bounded, redacted
-stdout/stderr. The per-stream default is 256 KiB. The frontend and worker each
-reserve sixteen times the configured per-stream limit while retaining output,
-including worst-case JSON expansion. Push workers also reserve 16 MiB for source
-manifest allocations. Shared scans allow at most 8192 visited entries, 2 MiB of
-metadata and 8 GiB of hashed file content; limits fail explicitly. Standalone
-scans allow 100000 entries and 16 MiB of metadata with the same content cap.
-The scanner reads directory names in bounded batches and hashes every regular
-file in full. Preserved symlinks remain links; `follow` only accepts relative links
-resolving inside the source root and rejects cycles or a symlink root. Special
-files fail instead of blocking the scan. Cancellation terminates the preview's rsync
-and auxiliary SSH process group, preserving the already running shared master.
-Auxiliary SSH may reuse that master but cannot create a persistent replacement.
+The principal needs exact-host `sync.push` or `sync.pull` authority. `-delete`
+additionally requires `sync.delete`, including during preview. An administrator
+issues `approval.create` with `approval_spec.sync` containing the execution
+options and `plan_id`, with `prepare`/`dry_run` false. Mutating deletes also need
+`confirm_delete: true`. The execution keeps the same paths, direction, exclusion,
+symlink and conflict policies:
 
-Shared mutating sync currently fails with
-`shared sync execution requires a prepared manifest`; immutable approved plans
-and durable execution are still being implemented. Preview manifests describe
-observed local content and metadata and are not execution approvals. Rsync traffic is not
-yet charged to the protocol byte counters or global bulk bandwidth budget.
+```sh
+rdev sync HOST push /absolute/source/ /remote/destination/ -prepare
+# Review the returned changes and obtain the matching administrator approval.
+RDEV_APPROVAL_TOKEN=APPROVAL rdev sync HOST push /absolute/source/ /remote/destination/ -plan PLAN_ID
+```
+
+MCP uses `plan_id`, `approval_token` and optional `operation_id`. CLI callers may
+set `RDEV_OPERATION_ID`. Success returns `operation_id`; interrupted callers use
+`rdev mutation status ID` / `rdev_mutation_status`. A lost result can be resolved
+from the recorded remote/local outcome. Neither reconnect nor restart replays a
+commit, and another owner cannot retrieve its plan or outcome. Restart invalidates
+unused plans and approval tokens.
+
+Preparation retains regular file bytes without hard links. Later source edits do
+not alter that retained content. Rsync evaluates exclusions and directory layout
+before approval; execution applies only the fixed change list. Excluded targets
+and unrelated siblings are preserved. The destination snapshot is checked before
+business writes, and competing prepared sync operations are serialized. Files
+publish by atomic rename; directories are removed only when empty. A multi-file
+plan is not one atomic transaction: a later I/O failure can leave partial work.
+External writers should be paused during final application; ordinary filesystem
+rename cannot provide compare-and-swap against an uncooperative writer.
+
+Prepared operations have a two-minute deadline and a 256 MiB content / 8192-entry /
+2 MiB metadata bound for each scanned tree. Capture currently measures the whole
+source before exclusion filtering; scope large sources accordingly. Managed
+staging has a ten-minute TTL, reclaimed on subsequent admission, with at most
+16 stages globally / 4 per owner; memory admission can reduce those counts.
+Retained plans reserve 16 MiB until consumption/expiry, with an additional 8 MiB
+during execution. Output remains bounded: a plan too large to review is rejected,
+and `-max-output-bytes` may raise the default 256 KiB up to 512 KiB. Outcome
+identities are retained separately with fixed caps; automatic safe retirement
+remains follow-up work. State and raw chunks are private and never returned in
+frontend or audit responses.
+
+Prepared transfers use bounded chunks on the existing bulk transport and charge
+its payload/protocol counters. Plain previews use a separate, cancellable rsync
+process with a 30-second deadline; their auxiliary rsync traffic is not included
+in agent-protocol counters. Shared preview scans allow 8192 entries, 2 MiB of
+metadata and 8 GiB of hashed content. `preserve` keeps source links; `follow` is
+confined to the source root, and special files are rejected. The Linux daemon,
+CLI/MCP, real SSH execution, cancellation and pre-acknowledgment crash paths are
+covered by `make remote-sync-execution`; macOS runtime and the mixed-load gate
+remain in [Phase5 acceptance](phase5-acceptance.md).

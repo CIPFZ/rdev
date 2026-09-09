@@ -72,7 +72,7 @@ func (c *Client) DoContext(ctx context.Context, req Request) (result Response, c
 	if req.Approval == "" {
 		req.Approval = os.Getenv("RDEV_APPROVAL_TOKEN")
 	}
-	if isSecretMutation(req.Operation) {
+	if isSecretMutation(req.Operation) || isSyncOperation(req.Operation) && req.Sync != nil && !req.Sync.DryRun {
 		if req.OperationID == "" {
 			req.OperationID = os.Getenv("RDEV_OPERATION_ID")
 		}

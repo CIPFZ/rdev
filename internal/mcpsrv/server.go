@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
@@ -718,6 +719,10 @@ func registerFiles(s *mcp.Server, c *client.Client) {
 // ---------- sync ----------
 
 type SyncIn struct {
+	Prepare        bool     `json:"prepare,omitempty" jsonschema:"Retain source and prepare the exact shared sync plan for approval; implies dry_run."`
+	PlanID         string   `json:"plan_id,omitempty" jsonschema:"Approved prepared plan to execute with the same paths and options."`
+	ApprovalToken  string   `json:"approval_token,omitempty"`
+	OperationID    string   `json:"operation_id,omitempty"`
 	Host           string   `json:"host"`
 	Direction      string   `json:"direction" jsonschema:"push sends local to remote; pull fetches remote to local."`
 	Local          string   `json:"local" jsonschema:"Local path. A trailing slash on a directory copies its contents rather than the directory itself."`
@@ -732,6 +737,10 @@ type SyncIn struct {
 }
 
 type SyncOut struct {
+	OperationID      string           `json:"operation_id,omitempty"`
+	PlanID           string           `json:"plan_id,omitempty"`
+	PlanExpiresAt    time.Time        `json:"plan_expires_at,omitempty"`
+	PlanChanges      int              `json:"plan_changes,omitempty"`
 	Stdout           string           `json:"stdout"`
 	Stderr           string           `json:"stderr,omitempty"`
 	StdoutB64        bool             `json:"stdout_b64,omitempty"`
@@ -754,7 +763,7 @@ func registerSync(s *mcp.Server, c *client.Client) {
 		Description: "Transfer files with rsync over the shared ssh connection. Use dry_run before any sync with delete enabled.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SyncIn) (*mcp.CallToolResult, SyncOut, error) {
 		res, err := c.Sync(ctx, client.SyncOptions{
-			Host: in.Host, Direction: in.Direction, Local: in.Local, Remote: in.Remote,
+			Prepare: in.Prepare, PlanID: in.PlanID, Host: in.Host, Direction: in.Direction, Local: in.Local, Remote: in.Remote,
 			Exclude: in.Exclude, DryRun: in.DryRun, Delete: in.Delete, ConfirmDelete: in.ConfirmDelete,
 			SymlinkPolicy: in.SymlinkPolicy, ConflictPolicy: in.ConflictPolicy, MaxOutputBytes: in.MaxOutputBytes,
 		})

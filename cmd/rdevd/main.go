@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/broker"
+	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
@@ -290,13 +291,13 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				}
 			}
 		}
-		if req.Operation == "secret.set" || req.Operation == "secret.delete" || req.Operation == "secret.set_from_file" {
+		if req.Operation == "secret.set" || req.Operation == "secret.delete" || req.Operation == "secret.set_from_file" || (req.Operation == "sync.push" || req.Operation == "sync.pull") && req.Sync != nil && !req.Sync.DryRun {
 			if req.OperationID == "" {
 				req.OperationID, refErr = proto.NewOperationID()
 			}
 			if refErr != nil || proto.ValidateOperationID(req.OperationID) != nil {
 				recordResult("request_rejected")
-				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "invalid secret mutation operation ID"})
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: "invalid mutation operation ID"})
 				endRequest()
 				continue
 			}
@@ -341,7 +342,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			}
 			broker.ApplyApprovedWire(&req, plan)
 		}
-		if req.Wire != nil {
+		if req.Wire != nil || req.Sync != nil {
 			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
 		}
 		if req.Operation == "sync.push" || req.Operation == "sync.pull" {
@@ -353,13 +354,23 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				continue
 			}
 			expandedBytes += budget
-			result, err := service.PreviewSync(requestCtx, req)
+			var result *client.SyncResult
+			var mutation *broker.MutationIntent
+			var err error
+			switch {
+			case req.Sync.Prepare:
+				result, err = service.PrepareSync(requestCtx, req)
+			case !req.Sync.DryRun:
+				result, mutation, err = service.ExecuteSync(requestCtx, req, approvedPlan)
+			default:
+				result, err = service.PreviewSync(requestCtx, req)
+			}
 			outcome, message := "completed", ""
 			if err != nil {
-				outcome, message = "dispatch_error", err.Error()
+				outcome, message = "dispatch_error", service.Client().Secrets.Redact(err.Error())
 			}
-			recordResult(outcome)
-			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Sync: result})
+			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: outcome})
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Sync: result, Mutation: mutation})
 			endRequest()
 			continue
 		}
@@ -408,6 +419,9 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			m, err := service.Mutations.Get(req.Owner.Key(), req.MutationID)
 			if err == nil && req.Host != "" && m.Host != req.Host {
 				err = errors.New("mutation unknown for principal")
+			}
+			if err == nil && (m.Operation == "sync.push" || m.Operation == "sync.pull") {
+				m, err = service.ResolveSyncMutation(requestCtx, req.Owner, m)
 			}
 			if err != nil {
 				recordResult("request_rejected")

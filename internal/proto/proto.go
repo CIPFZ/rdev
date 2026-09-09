@@ -62,6 +62,7 @@ const (
 
 // Request is one JSON-encoded line sent to the agent's stdin.
 type Request struct {
+	Sync *SyncParams `json:"sync,omitempty"`
 	// ID is a connection-local request identity. It may change on a transport
 	// retry and must never be used as the exactly-once identity of an operation.
 	ID string `json:"id"`
@@ -239,6 +240,7 @@ type StorageParams struct {
 
 // Response is one JSON-encoded line read from the agent's stdout.
 type Response struct {
+	Sync        *SyncResult    `json:"sync,omitempty"`
 	ID          string         `json:"id"`
 	OperationID string         `json:"operation_id,omitempty"`
 	Type        EventKind      `json:"type,omitempty"`

@@ -10,6 +10,12 @@ import (
 // changes or transport acquisition. A grant cannot create an absent handler or
 // turn a host-limited administration grant into global authority.
 func ValidateRoute(req Request) error {
+	if req.Wire != nil && req.Wire.Sync != nil {
+		return errors.New("internal sync parameters cannot be submitted as wire operations")
+	}
+	if req.Operation == proto.OpSyncInspect || req.Operation == proto.OpSyncStage || req.Operation == proto.OpSyncCommit {
+		return errors.New("internal sync operation cannot be submitted directly")
+	}
 	if req.Sync != nil && !isSyncOperation(req.Operation) {
 		return errors.New("unexpected sync parameters")
 	}

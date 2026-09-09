@@ -65,6 +65,9 @@ type OperationDescriptor struct {
 }
 
 var operationRegistry = map[string]OperationDescriptor{
+	OpSyncInspect:     operation(OpSyncInspect, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
+	OpSyncStage:       operation(OpSyncStage, ClassIdempotent, RetrySafe, ExecutionImmediate, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
+	OpSyncCommit:      operation(OpSyncCommit, ClassMutating, RetryNever, ExecutionForeground, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
 	OpPing:            operation(OpPing, ClassReadOnly, RetrySafe, ExecutionControl, DisconnectComplete),
 	OpExec:            operation(OpExec, ClassMutating, RetryDeduplicated, ExecutionForeground, DisconnectCancel, FeatureOperationID, FeatureDeduplication, FeatureCancel, FeatureDeadline),
 	OpReadFile:        operation(OpReadFile, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
@@ -134,6 +137,7 @@ func RequireOperation(name string) (OperationDescriptor, error) {
 type Feature string
 
 const (
+	FeatureSyncPlan        Feature = "sync_plan_v1"
 	FeatureJobFilterIDs    Feature = "job_filter_ids"
 	FeatureDurableJobStart Feature = "durable_job_start"
 	FeatureOperationID     Feature = "operation_id"
@@ -147,6 +151,7 @@ const (
 )
 
 var supportedFeatures = [...]Feature{
+	FeatureSyncPlan,
 	FeatureJobFilterIDs,
 	FeatureDurableJobStart,
 	FeatureOperationID,
@@ -711,6 +716,7 @@ func CanonicalRequestDigest(request *Request) (string, error) {
 		return "", err
 	}
 	canonical := struct {
+		Sync              *SyncParams       `json:"sync,omitempty"`
 		Op                string            `json:"op"`
 		DeadlineUnixMilli int64             `json:"deadline_unix_milli,omitempty"`
 		StreamWindowBytes int64             `json:"stream_window_bytes,omitempty"`
@@ -725,7 +731,7 @@ func CanonicalRequestDigest(request *Request) (string, error) {
 		State             *StateParams      `json:"state,omitempty"`
 		Capability        *CapabilityParams `json:"capability,omitempty"`
 	}{
-		Op: request.Op, DeadlineUnixMilli: request.DeadlineUnixMilli, StreamWindowBytes: request.StreamWindowBytes,
+		Sync: request.Sync, Op: request.Op, DeadlineUnixMilli: request.DeadlineUnixMilli, StreamWindowBytes: request.StreamWindowBytes,
 		Hello: request.Hello, Cancel: request.Cancel, Exec: request.Exec,
 		Read: request.Read, Cat: request.Cat, Job: request.Job, List: request.List, Storage: request.Storage,
 		State: request.State, Capability: request.Capability,

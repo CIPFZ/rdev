@@ -8,18 +8,20 @@ import (
 	"errors"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
 // ApprovalSpec contains the exact remote request reviewed by the administrator.
 // Client hints such as Risk and Target are deliberately absent.
 type ApprovalSpec struct {
-	Secret    *SecretParams  `json:"secret,omitempty"`
-	Owner     Owner          `json:"owner"`
-	Operation string         `json:"operation"`
-	Host      string         `json:"host"`
-	Wire      *proto.Request `json:"wire"`
-	TTL       time.Duration  `json:"ttl,omitempty"`
+	Sync      *client.SyncOptions `json:"sync,omitempty"`
+	Secret    *SecretParams       `json:"secret,omitempty"`
+	Owner     Owner               `json:"owner"`
+	Operation string              `json:"operation"`
+	Host      string              `json:"host"`
+	Wire      *proto.Request      `json:"wire"`
+	TTL       time.Duration       `json:"ttl,omitempty"`
 }
 
 type ApprovalPlan struct {
@@ -46,7 +48,7 @@ func RequiresApproval(req Request) bool {
 		}
 	}
 	switch req.Operation {
-	case "sync.push", "sync.delete", "secret.set", "secret.delete", "secret.set_from_file", "fleet.execute":
+	case "sync.push", "sync.pull", "sync.delete", "secret.set", "secret.delete", "secret.set_from_file", "fleet.execute":
 		return true
 	}
 	return req.Risk
@@ -61,6 +63,19 @@ func (s *Service) PlanApprovalContext(ctx context.Context, spec ApprovalSpec, de
 	}
 	if !decision.Allow {
 		return ApprovalPlan{}, errors.New("approval target is not authorized")
+	}
+	if isSyncOperation(spec.Operation) {
+		req := Request{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, Sync: spec.Sync, Wire: spec.Wire, Secret: spec.Secret}
+		if err := ValidateRoute(req); err != nil {
+			return ApprovalPlan{}, err
+		}
+		if req.Sync.DryRun || req.Sync.Prepare {
+			return ApprovalPlan{}, errors.New("approval requires a prepared execution plan")
+		}
+		return s.SyncApproval(req, decision)
+	}
+	if spec.Sync != nil {
+		return ApprovalPlan{}, errors.New("unexpected sync approval parameters")
 	}
 	if isSecretMutation(spec.Operation) {
 		if spec.Wire != nil || spec.Host == "" {
@@ -146,7 +161,7 @@ func (s *Service) IssueApproval(spec ApprovalSpec) (Approval, error) {
 	return s.IssueApprovalContext(context.Background(), spec)
 }
 func (s *Service) IssueApprovalContext(ctx context.Context, spec ApprovalSpec) (Approval, error) {
-	decision := s.DecideBrokerRequest(Request{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, Wire: spec.Wire})
+	decision := s.DecideBrokerRequest(Request{Owner: spec.Owner, Operation: spec.Operation, Host: spec.Host, Wire: spec.Wire, Sync: spec.Sync})
 	plan, err := s.PlanApprovalContext(ctx, spec, decision)
 	if err != nil {
 		return Approval{}, err
@@ -185,7 +200,7 @@ func (s *Service) AuthorizeApproval(req Request, decision Decision) (ApprovalPla
 	return s.AuthorizeApprovalContext(context.Background(), req, decision)
 }
 func (s *Service) AuthorizeApprovalContext(ctx context.Context, req Request, decision Decision) (ApprovalPlan, error) {
-	plan, err := s.PlanApprovalContext(ctx, ApprovalSpec{Owner: req.Owner, Operation: req.Operation, Host: req.Host, Wire: req.Wire, Secret: req.Secret}, decision)
+	plan, err := s.PlanApprovalContext(ctx, ApprovalSpec{Owner: req.Owner, Operation: req.Operation, Host: req.Host, Wire: req.Wire, Secret: req.Secret, Sync: req.Sync}, decision)
 	if err != nil {
 		return ApprovalPlan{}, err
 	}

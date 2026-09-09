@@ -98,10 +98,20 @@ func TestRealRsyncCancellationStopsSSHDescendants(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("rsync descendant kept the output pipe and operation alive")
 			}
-			for pid := range pids {
-				state, _ := syncProcessState(pid)
-				if state != "" && state != "Z" {
-					t.Fatalf("operation descendant %d survived cancellation", pid)
+			// killpg delivers SIGKILL to every member, but wait on the rsync
+			// leader is not waitpid on its grandchildren. Their /proc state may
+			// briefly remain runnable after descriptors have already closed.
+			stoppedBy := time.Now().Add(time.Second)
+			for pid, identity := range pids {
+				for {
+					state, current := syncProcessState(pid)
+					if current != identity || state == "" || state == "Z" || state == "X" {
+						break
+					}
+					if time.Now().After(stoppedBy) {
+						t.Fatalf("operation descendant %d survived cancellation", pid)
+					}
+					time.Sleep(time.Millisecond)
 				}
 			}
 			if base.closed {

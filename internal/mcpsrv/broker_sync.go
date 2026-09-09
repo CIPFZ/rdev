@@ -10,13 +10,13 @@ import (
 )
 
 func registerBrokerSync(s *mcp.Server, socket string, owner broker.Owner) {
-	mcp.AddTool(s, &mcp.Tool{Name: "rdev_sync", Description: "Preview a push or pull with rsync through the shared broker. Set dry_run=true and use an absolute local path. Delete previews additionally require sync.delete permission. Shared execution is not yet available."}, func(ctx context.Context, _ *mcp.CallToolRequest, in SyncIn) (*mcp.CallToolResult, SyncOut, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_sync", Description: "Prepare a shared push or pull with prepare=true, review its changes, then execute the same options with plan_id and approval_token. Use an absolute local path. Delete additionally requires sync.delete permission and confirm_delete at execution. dry_run alone gives a disposable preview."}, func(ctx context.Context, _ *mcp.CallToolRequest, in SyncIn) (*mcp.CallToolResult, SyncOut, error) {
 		direction := in.Direction
 		if direction == "" {
 			direction = "push"
 		}
-		opts := &client.SyncOptions{Direction: direction, Local: in.Local, Remote: in.Remote, Exclude: in.Exclude, DryRun: in.DryRun, Delete: in.Delete, ConfirmDelete: in.ConfirmDelete, SymlinkPolicy: in.SymlinkPolicy, ConflictPolicy: in.ConflictPolicy, MaxOutputBytes: in.MaxOutputBytes}
-		r, err := callBroker(ctx, socket, owner, broker.Request{Operation: "sync." + direction, Host: in.Host, Sync: opts})
+		opts := &client.SyncOptions{Direction: direction, Local: in.Local, Remote: in.Remote, Exclude: in.Exclude, DryRun: in.DryRun || in.Prepare, Prepare: in.Prepare, PlanID: in.PlanID, Delete: in.Delete, ConfirmDelete: in.ConfirmDelete, SymlinkPolicy: in.SymlinkPolicy, ConflictPolicy: in.ConflictPolicy, MaxOutputBytes: in.MaxOutputBytes}
+		r, err := callBroker(ctx, socket, owner, broker.Request{Operation: "sync." + direction, Host: in.Host, Sync: opts, Approval: in.ApprovalToken, OperationID: in.OperationID})
 		if err != nil {
 			return nil, SyncOut{}, err
 		}

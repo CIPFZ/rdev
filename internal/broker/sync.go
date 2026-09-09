@@ -17,8 +17,11 @@ func validateSyncRoute(req Request) error {
 	if req.Wire != nil || req.Secret != nil || req.Sync == nil || req.Host == "" || req.Sync.Host != "" {
 		return errors.New("sync requires an exact outer host and sync parameters without a wire request")
 	}
-	if !req.Sync.DryRun {
+	if !req.Sync.DryRun && req.Sync.PlanID == "" {
 		return errors.New("shared sync execution requires a prepared manifest; use dry_run to preview")
+	}
+	if req.Sync.DryRun && req.Sync.PlanID != "" {
+		return errors.New("plan_id is only valid for prepared execution")
 	}
 	if req.Sync.Direction != strings.TrimPrefix(req.Operation, "sync.") || !filepath.IsAbs(req.Sync.Local) {
 		return errors.New("sync direction must match the operation and local path must be absolute")

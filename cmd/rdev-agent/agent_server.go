@@ -541,6 +541,8 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 	response := &proto.Response{ID: request.ID, OperationID: request.OperationID}
 	var err error
 	switch request.Op {
+	case proto.OpSyncInspect, proto.OpSyncStage, proto.OpSyncCommit:
+		response.Sync, err = doSync(ctx, request, state)
 	case proto.OpPing:
 		response.Ping = doPing()
 		response.Ping.CallerID = request.ClientID

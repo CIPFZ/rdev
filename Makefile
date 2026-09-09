@@ -138,6 +138,10 @@ remote-qos: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerQoS$$' -count=3 -timeout=4m -v
 
 .PHONY: remote-jobs remote-wait remote-replay-digest remote-mutation remote-events remote-fleet-boundary remote-job-upgrade remote-sync-preview
+.PHONY: remote-sync-execution
+remote-sync-execution: agents
+	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerPreparedSync$$' -count=1 -timeout=3m -v
+
 remote-sync-preview: agents
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerSyncPreview$$' -count=3 -timeout=3m -v
 	RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='$(RDEV_REMOTE_SSH)' RDEV_TEST_SSH_CONFIG='$(RDEV_SSH_CONFIG)' $(GO) test ./cmd/rdevd -run '^TestRemoteBrokerSyncManifest$$' -count=3 -timeout=3m -v

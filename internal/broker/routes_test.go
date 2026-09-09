@@ -19,6 +19,12 @@ func TestRouteEnvelopes(t *testing.T) {
 	for _, d := range proto.Operations() {
 		t.Run(d.Name, func(t *testing.T) {
 			r := Request{Operation: d.Name, Host: "a", Wire: &proto.Request{Op: d.Name}}
+			if d.Name == proto.OpSyncInspect || d.Name == proto.OpSyncStage || d.Name == proto.OpSyncCommit {
+				if ValidateRoute(r) == nil {
+					t.Fatal("internal sync operation exposed through public wire route")
+				}
+				return
+			}
 			if err := ValidateRoute(r); err != nil {
 				t.Fatal(err)
 			}

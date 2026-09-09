@@ -142,6 +142,9 @@ func runDaemon(args []string) error {
 	if err := service.Mutations.ConfigurePersistence(*socket + ".mutations"); err != nil {
 		return fmt.Errorf("mutation registry load failed: %w", err)
 	}
+	if err := service.ConfigureSync(*socket + ".sync"); err != nil {
+		return errors.New("sync state initialization failed")
+	}
 	if err := service.ConfigureSecrets(*socket + ".secrets"); err != nil {
 		return errors.New("secret registry load failed")
 	}

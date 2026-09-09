@@ -11,6 +11,7 @@ import (
 
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
+	"github.com/CIPFZ/rdev/internal/synctree"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
 
@@ -22,6 +23,9 @@ type ProtocolDispatcher interface {
 // clients. Callers must share one Service instead of constructing one Client
 // per frontend process.
 type Service struct {
+	syncMu           sync.Mutex
+	syncPlans        map[string]*preparedSync
+	syncStore        *synctree.Store
 	Secrets          *SecretRegistry
 	client           *client.Client
 	policy           *Policy
@@ -69,6 +73,7 @@ func NewService(lookup client.AgentLookup) *Service {
 	observationCtx, stopObservations := context.WithCancel(context.Background())
 	s := &Service{client: client.New(lookup), policy: NewPolicy(), lease: NewLease(30 * time.Second), Scheduler: NewScheduler(QoSConfig{}, 128), Watches: NewWatchHub(), Audit: NewAuditLog(1024), config: config, approvalByToken: make(map[string]Approval), shared: make(map[sharedKey]*sharedDispatch), Jobs: NewJobRegistry(), observationCtx: observationCtx, stopObservations: stopObservations}
 	s.SetReady(true)
+	s.syncPlans = make(map[string]*preparedSync)
 	s.Secrets = NewSecretRegistry(s.client.Secrets)
 	s.Mutations = NewMutationRegistry()
 	s.Events = NewJobHistory()

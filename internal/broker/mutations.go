@@ -25,6 +25,7 @@ var ErrMutationStorage = errors.New("mutation state durability uncertain; restar
 // MutationIntent contains identity and outcome metadata only. Request payloads,
 // outputs, environment values and approval tokens must never enter this file.
 type MutationIntent struct {
+	SyncDigest    string    `json:"sync_digest,omitempty"`
 	OperationID   string    `json:"operation_id"`
 	Owner         string    `json:"owner"`
 	Host          string    `json:"host"`
@@ -79,11 +80,14 @@ func validateMutation(m MutationIntent) error {
 		return errors.New("invalid mutation principal or identity")
 	}
 	d, ok := proto.LookupOperation(m.Operation)
-	if (!ok || d.Class != proto.ClassMutating) && !isSecretMutation(m.Operation) {
+	if (!ok || d.Class != proto.ClassMutating) && !isSecretMutation(m.Operation) && !isSyncOperation(m.Operation) {
 		return errors.New("invalid mutation operation")
 	}
 	if m.Host == "" || len(m.Host) > 512 || strings.ContainsAny(m.Host, "\x00\r\n") || !validDigest(m.RequestDigest) || !validDigest(m.TargetDigest) || !validDigest(m.PolicyDigest) || !validDigest(m.ApprovalID) || m.Updated.IsZero() {
 		return errors.New("invalid mutation binding")
+	}
+	if isSyncOperation(m.Operation) != (m.SyncDigest != "") || m.SyncDigest != "" && !validDigest(m.SyncDigest) {
+		return errors.New("invalid mutation sync reference")
 	}
 	if m.JobID != "" {
 		if m.Operation != proto.OpJobStart || !validDigest(m.JobDigest) || validateJobRef(JobRef{ID: m.JobID, Host: m.Host, Owner: m.Owner}) != nil {
@@ -108,7 +112,7 @@ func validateMutation(m MutationIntent) error {
 }
 
 func sameMutationBinding(a, b MutationIntent) bool {
-	return a.Owner == b.Owner && a.OperationID == b.OperationID && a.Host == b.Host && a.Operation == b.Operation && a.RequestDigest == b.RequestDigest && a.TargetDigest == b.TargetDigest && a.JobID == b.JobID && a.JobDigest == b.JobDigest
+	return a.Owner == b.Owner && a.OperationID == b.OperationID && a.Host == b.Host && a.Operation == b.Operation && a.RequestDigest == b.RequestDigest && a.TargetDigest == b.TargetDigest && a.JobID == b.JobID && a.JobDigest == b.JobDigest && a.SyncDigest == b.SyncDigest
 }
 func sortedMutations(records map[mutationKey]MutationIntent) []MutationIntent {
 	out := make([]MutationIntent, 0, len(records))

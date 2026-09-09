@@ -633,6 +633,8 @@ type operationIdentity struct {
 }
 
 type builtRequest struct {
+	// Set only by SyncProtocol; raw staged data never enters a public response.
+	rawSync bool
 	Request *proto.Request
 	Echo    map[string]string
 	// Set only by the authenticated broker-facing entrypoint.
@@ -804,9 +806,19 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 		}
 		c.Hosts.RecordRequestEvent(observe.RequestQueued)
 		resp, doErr := pooled.conn.Do(ctx, built.Request)
+		if built.rawSync {
+			observe.RecordBulkPayload(ctx, uint64(len(built.Request.Sync.Data)))
+			if resp != nil && resp.Sync != nil {
+				observe.RecordBulkPayload(ctx, uint64(len(resp.Sync.Data)))
+			}
+		}
 		var safeResp *proto.Response
 		if resp != nil {
-			safeResp = c.redactResponseWith(redactionSnapshot, resp)
+			if built.rawSync {
+				safeResp = resp
+			} else {
+				safeResp = c.redactResponseWith(redactionSnapshot, resp)
+			}
 			if safeResp.OperationID == "" {
 				safeResp.OperationID = operationID
 			}
@@ -950,6 +962,13 @@ func (c *Client) redactResponse(resp *proto.Response) *proto.Response {
 func (c *Client) redactResponseWith(snapshot *secrets.Store, resp *proto.Response) *proto.Response {
 	if resp == nil {
 		return nil
+	}
+	// Raw sync chunks and manifests belong exclusively to SyncProtocol. Drop
+	// unsolicited internal data before any generic frontend serialization.
+	if resp.Sync != nil {
+		copy := *resp
+		copy.Sync = nil
+		resp = &copy
 	}
 	// ContentB64 is untrusted remote metadata, not permission to bypass the
 	// output boundary. A buggy or malicious agent could otherwise label literal
@@ -1650,6 +1669,8 @@ func (c *Client) TransferFile(ctx context.Context, opts TransferFileOptions) (*p
 
 // SyncOptions describes an rsync transfer.
 type SyncOptions struct {
+	Prepare   bool     `json:"prepare,omitempty"`
+	PlanID    string   `json:"plan_id,omitempty"`
 	Host      string   `json:"host,omitempty"`
 	Direction string   `json:"direction"`
 	Local     string   `json:"local"`
@@ -1668,6 +1689,10 @@ type SyncOptions struct {
 
 // SyncResult reports rsync's outcome.
 type SyncResult struct {
+	OperationID      string           `json:"operation_id,omitempty"`
+	PlanID           string           `json:"plan_id,omitempty"`
+	PlanExpiresAt    time.Time        `json:"plan_expires_at,omitempty"`
+	PlanChanges      int              `json:"plan_changes,omitempty"`
 	Stdout           string           `json:"stdout"`
 	Stderr           string           `json:"stderr"`
 	StdoutB64        bool             `json:"stdout_b64,omitempty"`
@@ -1694,6 +1719,9 @@ func NormalizeSyncOptions(opts SyncOptions) (SyncOptions, error) {
 	}
 	if opts.Direction != "" && opts.Direction != "push" && opts.Direction != "pull" {
 		return opts, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	if opts.Prepare && (!opts.DryRun || opts.PlanID != "") {
+		return opts, errors.New("sync preparation requires dry_run without plan_id")
 	}
 	if opts.Delete && !opts.DryRun && !opts.ConfirmDelete {
 		return opts, proto.NewError(proto.CodeInvalidRequest, "sync --delete requires explicit confirmation", proto.StateNotSent)
@@ -1729,6 +1757,9 @@ func NormalizeSyncOptions(opts SyncOptions) (SyncOptions, error) {
 
 // Sync runs local rsync over the pooled connection's ControlMaster.
 func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
+	if opts.Prepare || opts.PlanID != "" {
+		return nil, errors.New("prepared sync requires shared broker mode")
+	}
 	return c.syncForTarget(ctx, opts, "", false)
 }
 

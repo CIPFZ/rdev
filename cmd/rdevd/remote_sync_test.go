@@ -325,5 +325,5 @@ func TestRemoteBrokerSyncPreview(t *testing.T) {
 	if got := call(b, deleteReq); got.OK || got.Error != "denied by default" {
 		t.Fatal("restart broadened sync delete authority")
 	}
-	t.Log("actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending")
+	t.Log("actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; prepared execution is exercised separately")
 }

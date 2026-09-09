@@ -599,7 +599,7 @@ USAGE
   rdev read    <host> <path> [-limit N]
   rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
-  rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete]
+  rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run | -prepare | -plan ID] [-delete]
   rdev state   inspect|migrate|repair <host> [-dry-run]
   rdev hosts   [list|trust|approve-project <sha256>|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
                                        [-env K=V]... [-secret NAME=PATH]...
@@ -1089,13 +1089,13 @@ func readAllStdin() (string, error) {
 
 func parseSyncOptions(args []string) (client.SyncOptions, error) {
 	fs, err := parseFlags(args,
-		map[string]bool{"dry-run": true, "delete": true, "confirm-delete": true},
+		map[string]bool{"dry-run": true, "delete": true, "confirm-delete": true, "prepare": true},
 		map[string]bool{"exclude": true})
 	if err != nil {
 		return client.SyncOptions{}, err
 	}
 	if len(fs.pos) != 4 {
-		return client.SyncOptions{}, errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete] [-confirm-delete] [-symlink-policy preserve|follow|skip] [-conflict-policy overwrite|skip|fail] [-max-output-bytes N]")
+		return client.SyncOptions{}, errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run | -prepare | -plan ID] [-delete] [-confirm-delete] [-symlink-policy preserve|follow|skip] [-conflict-policy overwrite|skip|fail] [-max-output-bytes N]")
 	}
 	var maxOutputBytes int64
 	if raw, ok := fs.vals["max-output-bytes"]; ok {
@@ -1107,7 +1107,7 @@ func parseSyncOptions(args []string) (client.SyncOptions, error) {
 	}
 	return client.SyncOptions{
 		Host: fs.pos[0], Direction: fs.pos[1], Local: fs.pos[2], Remote: fs.pos[3],
-		Exclude: fs.repeat["exclude"], DryRun: fs.bools["dry-run"], Delete: fs.bools["delete"],
+		Prepare: fs.bools["prepare"], PlanID: fs.str("plan"), Exclude: fs.repeat["exclude"], DryRun: fs.bools["dry-run"] || fs.bools["prepare"], Delete: fs.bools["delete"],
 		ConfirmDelete: fs.bools["confirm-delete"], SymlinkPolicy: fs.str("symlink-policy"), ConflictPolicy: fs.str("conflict-policy"),
 		MaxOutputBytes: maxOutputBytes,
 	}, nil
@@ -1126,6 +1126,9 @@ func cmdSync(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func printSyncResult(res *client.SyncResult) error {
+	if res.PlanID != "" {
+		return json.NewEncoder(os.Stdout).Encode(res)
+	}
 	var err error
 	stdout, stderr := []byte(res.Stdout), []byte(res.Stderr)
 	if res.StdoutB64 {
