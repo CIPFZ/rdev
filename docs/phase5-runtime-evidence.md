@@ -1813,3 +1813,28 @@ SHA-256: `2c419d35e254d1cd424b790089ab87e2008bdc7aeb73ddff8a06bc4cdbbc0c90`; rac
 SHA-256: `d5641fb41ba8b452f5f116528a934de575c1cf5ba22bb06ad7e47e006741e41b`.
 The optional frontend-artifact selector was added after all-package race;
 production code was unchanged. These runs precede the implementation commit.
+
+
+## Committed shared sync preview validation (`6d2eeb3`)
+
+[Committed full check and runtime log](evidence/phase5/2026-09-09/committed-shared-sync-6d2eeb3.log)
+records passing `make check remote-sync-preview remote-lifecycle remote-ingress
+stress-broker smoke-rdevd remote-phase5-runtime` on clean main. Three actual
+preview and three ingress scenarios passed; retry/cancellation passed three
+times, and all six real lease lifecycle cycles retained active work and released
+idle connections. The 100 twenty-client stress runs and readiness smoke passed.
+
+Actual Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start
+passed (PID `1495919 -> 1495979`). Remote daemon SHA-256:
+`4aa72f60a7f1e2d87d77d8d7ab042be0a183ab0820703b798027c647bb48d99b`;
+embedded Linux amd64 agent SHA-256:
+`319f2cf771317cd8b95de5ffa7f9caa7d21ec7639cda308a49aa4737b83f6300`.
+All-package race and three actual daemon/CLI race scenarios preceded the commit
+and cover the same production code. The implementation was cherry-picked from
+worktree commit `8c95d55` to main commit `6d2eeb3`; the archived log name identifies
+the source actually built.
+
+Shared immutable sync execution and rsync traffic pacing/accounting remain open,
+along with mixed sustained load, session administration, declarative secret
+delegation, retention/failure/upgrade/platform matrices and independent review.
+Phase5 and the Multi Agent Gate remain In progress.

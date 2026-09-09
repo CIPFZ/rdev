@@ -580,3 +580,11 @@ source/destination plans, exact approval and durable mutation outcomes. Actual
 rsync network bytes are not yet included in protocol traffic or bulk pacing.
 Mixed long exec/job/status/sync, remaining shared routes, macOS and independent
 review still prevent Phase5 and Multi Agent Gate Complete status.
+
+
+Shared preview implementation `6d2eeb3` passed committed-source full check,
+three real preview/cancellation/ingress runs, six lease lifecycle cycles, stress,
+readiness and Linux systemd recovery. All-package race and three actual daemon/
+CLI race runs also passed. Logs and artifact digests are linked in the runtime
+evidence record. This completes preview validation only; immutable execution,
+rsync traffic budgets and all remaining Phase5 requirements stay In progress.
