@@ -50,6 +50,12 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "-recover-upgrades" {
+		os.Exit(recoverUpgradeCommand(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "-install-candidate" {
+		os.Exit(installCandidateCommand(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
 		// The build stamp goes on its own prefixed line, and the host parses it to
 		// decide whether replacing this binary would be a downgrade. Prefixed
@@ -58,6 +64,7 @@ func main() {
 		fmt.Printf("rdev-agent proto=%d-%d %s/%s\n",
 			proto.MinVersion, proto.Version, runtime.GOOS, runtime.GOARCH)
 		fmt.Println(buildinfo.StampLine())
+		fmt.Println("rdev-installer 1")
 		return
 	}
 
@@ -1072,6 +1079,9 @@ func stateDir(dir string) (string, error) {
 			}
 			resolved = filepath.Join(home, resolved)
 		}
+		if err := secureDir(resolved, 0o700); err != nil {
+			return "", err
+		}
 		if err := secureDir(filepath.Join(resolved, "jobs"), 0o700); err != nil {
 			return "", err
 		}
@@ -1083,6 +1093,9 @@ func stateDir(dir string) (string, error) {
 		return "", err
 	}
 	d := filepath.Join(home, ".cache", "rdev")
+	if err := secureDir(d, 0o700); err != nil {
+		return "", err
+	}
 	if err := secureDir(filepath.Join(d, "jobs"), 0o700); err != nil {
 		return "", err
 	}

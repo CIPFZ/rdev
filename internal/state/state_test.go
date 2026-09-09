@@ -9,7 +9,7 @@ import (
 )
 
 func TestInspectAndMigrateVersionedRecords(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "jobs"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestInspectAndMigrateVersionedRecords(t *testing.T) {
 }
 
 func TestFutureSchemaFailsClosed(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	b, _ := json.Marshal(Manifest{SchemaVersion: CurrentSchemaVersion + 1})
 	if err := os.WriteFile(filepath.Join(root, manifestName), b, 0600); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestFutureSchemaFailsClosed(t *testing.T) {
 }
 
 func TestMigrationLockAndRepairQuarantine(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "jobs"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestMigrationLockAndRepairQuarantine(t *testing.T) {
 }
 
 func TestExplicitZeroSchemaIsCorruptAndNotMigrated(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	d := filepath.Join(root, "jobs", "zero")
 	if err := os.MkdirAll(d, 0700); err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestExplicitZeroSchemaIsCorruptAndNotMigrated(t *testing.T) {
 }
 
 func TestStateRejectsRootAndJobsSymlinks(t *testing.T) {
-	parent := t.TempDir()
+	parent := privateTempDir(t)
 	target := filepath.Join(parent, "target")
 	if err := os.MkdirAll(filepath.Join(target, "jobs"), 0700); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestStateRejectsRootAndJobsSymlinks(t *testing.T) {
 }
 
 func TestMigrationRejectsBackupSymlink(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "jobs"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestMigrationRejectsBackupSymlink(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(d, "meta.json"), []byte(`{"id":"legacy"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	outside := filepath.Join(t.TempDir(), "outside")
+	outside := filepath.Join(privateTempDir(t), "outside")
 	if err := os.Mkdir(outside, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -181,4 +181,13 @@ func TestMigrationRejectsBackupSymlink(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("backup symlink target modified: %v", entries)
 	}
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

@@ -160,7 +160,7 @@ func decodeResponses(t *testing.T, buffer *bytes.Buffer) []proto.Response {
 
 func TestCancelBeforeAcceptedProducesOneTerminal(t *testing.T) {
 	var output bytes.Buffer
-	server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+	server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 	t.Cleanup(server.close)
 	target := &proto.Request{
 		OperationID: "op_0000000000000020", ClientID: "client_0123456789abcdef",
@@ -196,7 +196,7 @@ func TestCancelBeforeAcceptedProducesOneTerminal(t *testing.T) {
 
 func TestCancelIdentityIsBoundedBeforeEarlyTombstone(t *testing.T) {
 	var output bytes.Buffer
-	server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+	server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 	t.Cleanup(server.close)
 	server.handleCancel(&proto.Request{
 		ID: "cancel", OperationID: "op_0000000000000022",
@@ -213,7 +213,7 @@ func TestCancelIdentityIsBoundedBeforeEarlyTombstone(t *testing.T) {
 }
 
 func TestAgentBusinessErrorsUseStableEnvelopes(t *testing.T) {
-	secretPath := filepath.Join(t.TempDir(), "sensitive-name")
+	secretPath := filepath.Join(privateTempDir(t), "sensitive-name")
 	tests := []struct {
 		name  string
 		code  proto.ErrorCode
@@ -248,7 +248,7 @@ func TestAgentBusinessErrorsUseStableEnvelopes(t *testing.T) {
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
-			server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+			server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 			t.Cleanup(server.close)
 			tt.req.ID = fmt.Sprintf("request-%d", i)
 			tt.req.OperationID = fmt.Sprintf("op_%016x", i+500)
@@ -286,7 +286,7 @@ func TestAgentBusinessErrorsUseStableEnvelopes(t *testing.T) {
 func TestPanicRecoveryUsesPhaseCoherentTypedTerminal(t *testing.T) {
 	t.Run("before_accepted", func(t *testing.T) {
 		var output bytes.Buffer
-		server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+		server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 		server.cache = nil
 		server.process(&proto.Request{
 			ID: "pre", OperationID: "op_0000000000000600", ClientID: "client_0123456789abcdef",
@@ -301,12 +301,12 @@ func TestPanicRecoveryUsesPhaseCoherentTypedTerminal(t *testing.T) {
 	})
 
 	t.Run("after_progress", func(t *testing.T) {
-		state := t.TempDir()
+		state := privateTempDir(t)
 		dir := jobDir(state, "panic-job")
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		meta, _ := json.Marshal(&jobMeta{ID: "panic-job", PID: 0, StartedAt: "synthetic"})
+		meta, _ := json.Marshal(&jobMeta{SchemaVersion: 1, ID: "panic-job", PID: 0, StartedAt: "synthetic"})
 		if err := os.WriteFile(filepath.Join(dir, "meta.json"), meta, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -329,7 +329,7 @@ func TestPanicRecoveryUsesPhaseCoherentTypedTerminal(t *testing.T) {
 func TestNegotiatedV3WithoutStreamingUsesTypedTerminalWithoutData(t *testing.T) {
 	var output bytes.Buffer
 	writer := testResponseWriter(&output)
-	server := newAgentServer(context.Background(), t.TempDir(), writer)
+	server := newAgentServer(context.Background(), privateTempDir(t), writer)
 	t.Cleanup(server.close)
 	features := make([]proto.Feature, 0)
 	for _, feature := range proto.SupportedFeatures() {
@@ -369,7 +369,7 @@ func TestNegotiatedV3WithoutStreamingUsesTypedTerminalWithoutData(t *testing.T) 
 }
 
 func TestRunningCancelKillsOnlyTargetProcessGroup(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	pidFile := filepath.Join(root, "pid")
 	var output bytes.Buffer
 	server := newAgentServer(context.Background(), root, testResponseWriter(&output))
@@ -433,7 +433,7 @@ func TestForegroundEscalationOutlivesLeaderForCancelDeadlineAndDisconnect(t *tes
 
 	for _, trigger := range []string{"cancel", "deadline", "disconnect"} {
 		t.Run(trigger, func(t *testing.T) {
-			root := t.TempDir()
+			root := privateTempDir(t)
 			leaderFile := filepath.Join(root, "leader")
 			childFile := filepath.Join(root, "child")
 			var output bytes.Buffer
@@ -494,7 +494,7 @@ wait
 			if trigger == "disconnect" {
 				quickOutput = &bytes.Buffer{}
 				quickWriter = testResponseWriter(quickOutput)
-				quickServer = newAgentServer(context.Background(), t.TempDir(), quickWriter)
+				quickServer = newAgentServer(context.Background(), privateTempDir(t), quickWriter)
 				t.Cleanup(quickServer.close)
 			}
 			quickServer.process(&proto.Request{
@@ -547,7 +547,7 @@ func (c *manualDeadline) expire() {
 func (c *manualDeadline) cancel() { c.once.Do(func() { c.err = context.Canceled; close(c.done) }) }
 
 func TestExecDataFrameArrivesWhileProcessIsRunning(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	gate := filepath.Join(root, "release")
 	reader, writer := io.Pipe()
 	responseWriter := newRespWriter(writer, writer.Close)
@@ -684,7 +684,7 @@ func (w *blockingFrameWriter) Close() error {
 
 func TestCancelAfterFinalDoesNotCreateSecondTargetTerminal(t *testing.T) {
 	var output bytes.Buffer
-	server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+	server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 	t.Cleanup(server.close)
 	target := &proto.Request{
 		ID: "target", OperationID: "op_0000000000000040", ClientID: "client_0123456789abcdef",
@@ -763,7 +763,7 @@ func TestIneligibleOperationCacheCannotBeCanceled(t *testing.T) {
 
 func TestProtocolDeadlineRejectedForIndependentMutation(t *testing.T) {
 	var output bytes.Buffer
-	server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+	server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 	t.Cleanup(server.close)
 	request := mutationRequest("op_0000000000000044", "payload", false)
 	request.ID = "deadline-write"
@@ -782,7 +782,7 @@ func TestCancelFastPathCannotBypassControlValidation(t *testing.T) {
 		func(request *proto.Request) { request.StreamWindowBytes = proto.AbsoluteStreamWindowBytes + 1 },
 	} {
 		var output bytes.Buffer
-		server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+		server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 		request := &proto.Request{
 			ID: "cancel", OperationID: "op_0000000000000045", ClientID: "client_0123456789abcdef",
 			Op: proto.OpCancel, Cancel: &proto.CancelParams{OperationID: "op_0000000000000046"},
@@ -801,7 +801,7 @@ func TestCancelFastPathCannotBypassControlValidation(t *testing.T) {
 func TestCancelPolicyCannotTargetOrPoisonIndependentOperation(t *testing.T) {
 	t.Run("live_target", func(t *testing.T) {
 		var output bytes.Buffer
-		server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+		server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 		t.Cleanup(server.close)
 		target := mutationRequest("op_0000000000000047", "payload", false)
 		canceled := false
@@ -821,7 +821,7 @@ func TestCancelPolicyCannotTargetOrPoisonIndependentOperation(t *testing.T) {
 	})
 
 	t.Run("early_target_op_binding", func(t *testing.T) {
-		state := t.TempDir()
+		state := privateTempDir(t)
 		var output bytes.Buffer
 		server := newAgentServer(context.Background(), state, testResponseWriter(&output))
 		t.Cleanup(server.close)
@@ -886,7 +886,7 @@ func TestNegotiatedFeaturesGateDeadlineAndCancel(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
-			server := newAgentServer(context.Background(), t.TempDir(), testResponseWriter(&output))
+			server := newAgentServer(context.Background(), privateTempDir(t), testResponseWriter(&output))
 			features := make([]proto.Feature, 0, len(proto.SupportedFeatures()))
 			for _, feature := range proto.SupportedFeatures() {
 				if feature != tt.omit {
@@ -915,7 +915,7 @@ func TestNegotiatedFeaturesGateDeadlineAndCancel(t *testing.T) {
 
 func TestDisconnectCancelsForegroundAndKeepsAcceptedDetachedJob(t *testing.T) {
 	t.Run("foreground", func(t *testing.T) {
-		root := t.TempDir()
+		root := privateTempDir(t)
 		pidFile := filepath.Join(root, "foreground-pid")
 		var output bytes.Buffer
 		server := newAgentServer(context.Background(), root, testResponseWriter(&output))
@@ -939,7 +939,7 @@ func TestDisconnectCancelsForegroundAndKeepsAcceptedDetachedJob(t *testing.T) {
 	})
 
 	t.Run("detached", func(t *testing.T) {
-		root := t.TempDir()
+		root := privateTempDir(t)
 		var output bytes.Buffer
 		server := newAgentServer(context.Background(), root, testResponseWriter(&output))
 		request := &proto.Request{
@@ -1003,13 +1003,13 @@ func waitForPIDFile(t *testing.T, path string) int {
 func runtimeYield() { runtime.Gosched() }
 
 func TestWaitHubFanoutLimitsAndCancellationCleanup(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	id := "synthetic-job"
 	dir := jobDir(state, id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+	if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 		ID: id, PID: os.Getpid(), StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
@@ -1092,7 +1092,7 @@ func TestAdmissionQueueDoesNotCreateGoroutinePerRequest(t *testing.T) {
 	defer cancel()
 	var output bytes.Buffer
 	server := &agentServer{
-		ctx: ctx, cancel: cancel, state: t.TempDir(), writer: testResponseWriter(&output),
+		ctx: ctx, cancel: cancel, state: privateTempDir(t), writer: testResponseWriter(&output),
 		normalQ: make(chan queuedRequest, 4), waitQ: make(chan queuedRequest, 2),
 	}
 	before := runtime.NumGoroutine()

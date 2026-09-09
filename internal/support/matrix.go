@@ -9,36 +9,39 @@ type Platform struct {
 	OS         string `json:"os"`
 	Arch       string `json:"arch"`
 	Tier       string `json:"tier"`
+	TargetTier string `json:"target_tier"`
 	Status     string `json:"status"`
 	Validation string `json:"validation"`
 }
 
 type Matrix struct {
-	SchemaVersion       int        `json:"schema_version"`
-	Local               []Platform `json:"local"`
-	Remote              []Platform `json:"remote"`
-	RequiredSSHFeatures []string   `json:"required_ssh_features"`
-	RequiredLocalTools  []string   `json:"required_local_tools"`
-	NonGoals            []string   `json:"non_goals"`
-	Capabilities        []Boundary `json:"capabilities"`
+	SchemaVersion           int        `json:"schema_version"`
+	ProductionCertification string     `json:"production_certification"`
+	Local                   []Platform `json:"local"`
+	Remote                  []Platform `json:"remote"`
+	RequiredSSHFeatures     []string   `json:"required_ssh_features"`
+	RequiredLocalTools      []string   `json:"required_local_tools"`
+	NonGoals                []string   `json:"non_goals"`
+	Capabilities            []Boundary `json:"capabilities"`
 }
 
 func Snapshot() Matrix {
 	return Matrix{
-		SchemaVersion: SchemaVersion,
+		SchemaVersion:           SchemaVersion,
+		ProductionCertification: "pending: Tier 1 runtime, trusted official signing, hosted CI, complete compatibility/scale and continuous 24h evidence required",
 		Local: []Platform{
-			{OS: "darwin", Arch: "arm64", Tier: "tier1", Status: "historical development baseline; shared runtime unverified and deferred; fd-native config ACL checks require cgo", Validation: "historical_only"},
-			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "cross-build only", Validation: "build_only"},
-			{OS: "linux", Arch: "amd64", Tier: "tier1", Status: "Linux standalone and shared broker real-SSH runtime verified", Validation: "runtime_verified"},
-			{OS: "linux", Arch: "arm64", Tier: "build", Status: "cross-build only", Validation: "build_only"},
+			{OS: "darwin", Arch: "arm64", Tier: "tier1", TargetTier: "tier1", Status: "historical development baseline; shared runtime unverified and deferred; fd-native config ACL checks require cgo", Validation: "historical_only"},
+			{OS: "darwin", Arch: "amd64", Tier: "build", TargetTier: "tier1", Status: "cross-build only", Validation: "build_only"},
+			{OS: "linux", Arch: "amd64", Tier: "tier1", TargetTier: "tier1", Status: "Linux standalone and shared broker real-SSH runtime verified", Validation: "runtime_verified"},
+			{OS: "linux", Arch: "arm64", Tier: "build", TargetTier: "tier1", Status: "cross-build only", Validation: "build_only"},
 		},
 		Remote: []Platform{
-			{OS: "linux", Arch: "amd64", Tier: "tier1", Status: "Ubuntu standalone and shared bootstrap, exec, file, sync, cancellation and jobs runtime verified", Validation: "runtime_verified"},
-			{OS: "linux", Arch: "arm64", Tier: "build", Status: "agent cross-build only", Validation: "build_only"},
-			{OS: "darwin", Arch: "amd64", Tier: "build", Status: "agent cross-build only", Validation: "build_only"},
-			{OS: "darwin", Arch: "arm64", Tier: "build", Status: "agent cross-build only", Validation: "build_only"},
+			{OS: "linux", Arch: "amd64", Tier: "tier1", TargetTier: "tier1", Status: "Ubuntu standalone and shared bootstrap, exec, file, sync, cancellation and jobs runtime verified", Validation: "runtime_verified"},
+			{OS: "linux", Arch: "arm64", Tier: "build", TargetTier: "tier1", Status: "agent cross-build only", Validation: "build_only"},
+			{OS: "darwin", Arch: "amd64", Tier: "build", TargetTier: "tier1", Status: "agent cross-build only", Validation: "build_only"},
+			{OS: "darwin", Arch: "arm64", Tier: "build", TargetTier: "tier1", Status: "agent cross-build only", Validation: "build_only"},
 		},
-		RequiredSSHFeatures: []string{"BatchMode", "ControlMaster", "ControlPath", "ControlPersist"},
+		RequiredSSHFeatures: []string{"BatchMode", "ControlMaster", "ControlPath", "ControlPersist", "OpenSSH SSHSIG (-Y sign/verify) for release trust"},
 		RequiredLocalTools:  []string{"ssh", "rsync for sync operations"},
 		Capabilities: []Boundary{
 			{Name: "ssh_alias_ipv4_ipv6_proxyjump", Status: "supported"},

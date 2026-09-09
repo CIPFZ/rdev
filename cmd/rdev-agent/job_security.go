@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	statepkg "github.com/CIPFZ/rdev/internal/state"
 )
 
 // secureDir creates or repairs a private directory and rejects ownership that
@@ -56,6 +58,19 @@ func secureRecordFile(path string) error {
 		return fmt.Errorf("%s is not owned by the current user", path)
 	}
 	if st.Mode().Perm() != 0o600 {
+		// Legacy reads can repair permissions, so that small write also needs
+		// fencing. Ordinary private reads acquire no lease and remain usable
+		// for observation while a maintenance operation is deciding admission.
+		parent := filepath.Dir(path)
+		root := filepath.Dir(parent)
+		if filepath.Base(parent) != ".job-locks" && filepath.Base(parent) != "job-start-intents" && filepath.Base(root) == "jobs" {
+			root = filepath.Dir(root)
+		}
+		lease, err := statepkg.AcquireWriter(root)
+		if err != nil {
+			return stateWriteError(err)
+		}
+		defer lease.Close()
 		if err := os.Chmod(path, 0o600); err != nil {
 			return err
 		}

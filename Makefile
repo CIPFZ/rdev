@@ -15,7 +15,8 @@ PLATFORMS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64
 PKG         := github.com/CIPFZ/rdev/internal/buildinfo
 COMMIT      := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-STAMP       := -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
+VERSION     ?= 0.1.0-dev.0
+STAMP       := -X $(PKG).Version=$(VERSION) -X $(PKG).ReleaseIdentity=rdev-release-identity-v1[$(VERSION)] -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
 .PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-routes remote-lane-traffic remote-connection-diagnostics remote-secrets remote-secret-import remote-secret-qos remote-approval remote-qos remote-ingress remote-frontends remote-warm-pool remote-mux-capacity remote-audit-continuity remote-audit-routes remote-audit-soak remote-audit-upgrade stress-broker
 
@@ -221,3 +222,12 @@ fmt:
 
 clean:
 	rm -rf bin $(AGENT_DIR)
+
+# These entries execute real fuzzing and isolated OpenSSH runtime tests. A
+# successful local run is not a hosted CI run or a 24-hour production soak.
+.PHONY: fuzz-smoke isolated-ssh
+fuzz-smoke: agents
+	RDEV_GO='$(GO)' sh scripts/fuzz-smoke.sh
+
+isolated-ssh: agents
+	python3 scripts/isolated-ssh.py --go '$(GO)' --out '$(RDEV_SSH_EVIDENCE_OUT)'

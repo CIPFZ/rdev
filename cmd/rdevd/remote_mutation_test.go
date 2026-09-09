@@ -440,7 +440,13 @@ func remoteDurableReplay(t *testing.T, sshRun func(string) ([]byte, error), requ
 	wire.ProjectID = owner.ProjectID
 	wire.Replay = true
 	wire.ID = "durable-replay"
-	data, _ := json.Marshal(&wire)
+	// Replay the effective envelope the broker sent, including bounded defaults.
+	// An omitted resource envelope is a different durable operation digest.
+	normalized, err := proto.NormalizeTimeouts(&wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(normalized)
 	script := fmt.Sprintf(`import os,sys,json,subprocess,base64
 root=os.path.expanduser('~/'+sys.argv[1])
 p=subprocess.Popen([root+'/rdev-agent','-state',root],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
@@ -451,11 +457,11 @@ def send(request):
   result=json.loads(line)
   if result.get('terminal') or request['id']=='hello':return result
 try:
- hello=send({'id':'hello','op':'ping','hello':{'min_version':3,'max_version':3,'features':['operation_id','deduplication','durable_job_start']}})
+ hello=send({'id':'hello','op':'ping','hello':{'min_version':3,'max_version':3,'features':['operation_id','deduplication','durable_job_start','job_resource_envelope']}})
  assert hello.get('ok')
  request=json.loads(base64.b64decode('%s'))
  result=send(request)
- if %s:assert result.get('ok') and result['job']['info']['id']=='%s'
+ if %s:assert result.get('ok') and result.get('job',{}).get('info',{}).get('id')=='%s', ('durable replay rejected',result.get('error',{}).get('code'),result.get('execution_state'))
  else:assert not result.get('ok') and result.get('error',{}).get('code')=='transport.ambiguous_outcome'
 finally:
  p.stdin.close()

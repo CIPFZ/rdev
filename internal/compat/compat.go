@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -16,43 +17,10 @@ import (
 
 const SchemaVersion = 1
 
-type Format struct {
-	Name       string   `json:"name"`
-	Current    int      `json:"current,omitempty"`
-	Minimum    int      `json:"minimum,omitempty"`
-	Versioning string   `json:"versioning"`
-	Legacy     string   `json:"legacy"`
-	Migration  string   `json:"migration"`
-	Unknown    string   `json:"unknown"`
-	Fields     []string `json:"fields,omitempty"`
-}
-
-type Protocol struct {
-	Name        string              `json:"name"`
-	Encoding    string              `json:"encoding"`
-	Range       proto.ProtocolRange `json:"range"`
-	Features    []proto.Feature     `json:"features,omitempty"`
-	Previous    string              `json:"previous"`
-	Unsupported string              `json:"unsupported"`
-}
-
-type ErrorContract struct {
-	Version int                     `json:"version"`
-	Codes   []proto.ErrorDescriptor `json:"codes"`
-	Unknown string                  `json:"unknown"`
-	Changes string                  `json:"changes"`
-}
-
-type Contract struct {
-	SchemaVersion   int            `json:"schema_version"`
-	Release         string         `json:"release"`
-	Protocols       []Protocol     `json:"protocols"`
-	Formats         []Format       `json:"formats"`
-	Errors          ErrorContract  `json:"errors"`
-	Upgrade         string         `json:"upgrade"`
-	BreakingChanges []string       `json:"breaking_changes"`
-	Timeouts        map[string]int `json:"timeout_seconds"`
-}
+type Format = artifact.CompatibilityFormat
+type Protocol = artifact.CompatibilityProtocol
+type ErrorContract = artifact.CompatibilityErrors
+type Contract = artifact.Compatibility
 
 // Current reads versions from the exact constants used by readers, writers and
 // negotiation. Field inventories are derived from the actual config structs.
@@ -66,6 +34,9 @@ func Current() Contract {
 			{Name: "broker_agent", Encoding: "ID-correlated NDJSON (not JSON-RPC)", Range: proto.ProtocolRange{Min: proto.TypedProtocolVersion, Max: proto.Version}, Features: proto.SupportedFeatures(), Previous: "protocol 2 explicitly rejected for shared requests because it cannot preserve principal identity; existing protocol 3 agents may serve only operations whose required features they advertise", Unsupported: "shared requests reject a legacy peer before business dispatch; new job_start requires job_resource_envelope"},
 		},
 		Formats: []Format{
+			{Name: "release_manifest", Current: artifact.SchemaVersion, Minimum: artifact.SchemaVersion, Versioning: "exact signed SSHSIG payload", Legacy: "unsigned local manifest remains evidence, not release authority", Migration: "verify external release.json after immutable agents/CLI/broker/SBOM/provenance/notices; no embedded signature cycle", Unknown: "unknown/duplicate/noncanonical/future fields fail closed", Fields: fields(reflect.TypeFor[artifact.Manifest](), "")},
+			{Name: "release_policy", Current: artifact.SchemaVersion, Minimum: artifact.SchemaVersion, Versioning: "exact administrator policy", Legacy: "unsigned dev requires explicit private global policy; project cannot supply roots", Migration: "administrator key rotation/revocation and validity refresh; no network fallback", Unknown: "unknown/duplicate/future fields rejected; nonempty host scopes deny unlisted identities", Fields: fields(reflect.TypeFor[artifact.Policy](), "")},
+			{Name: "agent_upgrade", Current: 1, Minimum: 1, Versioning: "exact durable transaction", Legacy: "older installers do not implement namespace lease; drain them before migration", Migration: "prepare/verify/health/switch/commit with one known-good binary; never state downgrade", Unknown: "future/corrupt journal preserves state and requires recovery"},
 			{Name: "host_config", Versioning: "unversioned JSON shape", Legacy: "existing hosts array remains readable and writable", Migration: "none; use only fields understood by every participating build", Unknown: "standalone ignores unknown JSON fields; administrator hosts-file rejects them; no future version support is implied", Fields: fields(reflect.TypeOf(session.HostConfigShape()), "")},
 			{Name: "broker_config", Versioning: "unversioned JSON shape", Legacy: "existing omitted fields retain defaults", Migration: "none; new fields require a reader that recognizes them", Unknown: "reject unknown fields and trailing documents", Fields: fields(reflect.TypeOf(broker.Config{}), "")},
 			{Name: "broker_policy", Versioning: "unversioned JSON owner-key to grant-key boolean map", Legacy: "existing operation-wide, capability and exact-host grants remain readable", Migration: "none; preserve exact owner keys and grant scope", Unknown: "duplicate keys, null and non-boolean grants are rejected; unknown grant strings are retained as data, but unsupported executable routes fail closed"},
@@ -81,7 +52,7 @@ func Current() Contract {
 			{Name: "broker_audit", Current: broker.AuditSchemaVersion, Versioning: "schema", Legacy: "legacy owner display identities remain admin-readable on disk but are omitted from principal queries", Migration: "no lossless owner migration; omission marker is returned", Unknown: "non-current records never attributed to a principal"},
 		},
 		Errors:          ErrorContract{Version: proto.ErrorContractVersion, Codes: proto.ErrorDescriptors(), Unknown: "incoming unknown codes or changed code/category/message/retry/terminal combinations fail ErrorEnvelope.Validate; constructors map unknown local codes to internal.failure", Changes: "existing code/retry/execution meaning is stable; changed semantics require contract and protocol/feature gating; unknown codes are not treated as retryable"},
-		Upgrade:         "N/N-1 refers to the explicit protocol/schema ranges, not an arbitrary release-version promise. Agent downgrade protection compares known clean build commit dates. Automatic upgrade/rollback combination certification remains Phase8.",
+		Upgrade:         "N/N-1 release combinations require source-bound runtime evidence; protocol/schema ranges alone are not certification. Signed agent updates verify administrator roots/channel/pin and numeric release order; rollback needs exact target/digest authorization and state readiness. Unsigned dev retains clean commit-date checks. Namespace transactions preserve prior binary; old non-lease writers require maintenance/drain. Production certification and complete platform/24h matrix remain pending.",
 		BreakingChanges: []string{"CLI unknown/duplicate/conflicting flags and malformed numbers now fail", "exec, job wait and new job wall timeout: omitted/zero selects the shared bounded default; negative or unlimited values are rejected", "new job_start requires the negotiated job_resource_envelope feature; older peers must update before starting new jobs; read/ping and existing job observation/control retain their independently checked compatibility", "new job wall timeout omitted/zero is now bounded to one hour; existing supervisors are not retroactively changed"},
 	}
 }

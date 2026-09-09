@@ -241,7 +241,7 @@ func waitForHelperExit(t *testing.T, helper *blockedPipeHelper) {
 // process-level witness with an instrumented binary.
 func TestBlockedPipeProcessExitIsBounded100Cycles(t *testing.T) {
 	for i := 0; i < 100; i++ {
-		state := filepath.Join(t.TempDir(), "state")
+		state := filepath.Join(privateTempDir(t), "state")
 		if err := os.Mkdir(state, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestBlockedPipeProcessExitIsBounded100Cycles(t *testing.T) {
 }
 
 func TestBlockedPipeExitReapsAttachedGroup(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "state")
+	state := filepath.Join(privateTempDir(t), "state")
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestBlockedPipeExitReapsAttachedGroup(t *testing.T) {
 }
 
 func TestBlockedPipeExitDoesNotKillDetachedSupervisor(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "state")
+	state := filepath.Join(privateTempDir(t), "state")
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func waitForPIDFileUntil(t *testing.T, path string, timeout time.Duration) int {
 func TestBlockedPipeCleanupCoversEarlyFailures(t *testing.T) {
 	for _, mode := range []string{"barrier", "decode", "assertion"} {
 		t.Run(mode, func(t *testing.T) {
-			root := t.TempDir()
+			root := privateTempDir(t)
 			var helperPID, targetPGID int
 			var injected error
 			if ok := t.Run("early-return", func(t *testing.T) {

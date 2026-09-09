@@ -10,10 +10,10 @@ import (
 
 func benchLog(b *testing.B, lines int) string {
 	b.Helper()
-	state := b.TempDir()
+	state := privateTempDir(b)
 	dir := filepath.Join(state, "jobs", "big")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "big", Argv: []string{"x"}, PID: 1})
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "big", Argv: []string{"x"}, PID: 1})
 	f, _ := os.Create(filepath.Join(dir, "stdout"))
 	buf := make([]byte, 100)
 	for i := range buf {

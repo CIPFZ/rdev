@@ -39,6 +39,7 @@ const (
 )
 
 const supervisorParentEnv = "RDEV_SUPERVISOR_PARENT_PID"
+const supervisorLeaseEnv = "RDEV_SUPERVISOR_STATE_LEASE_FD"
 
 func setEnvValue(env []string, key, value string) []string {
 	prefix := key + "="
@@ -72,6 +73,11 @@ func jobStartWithIdentity(p *proto.JobParams, state string, identity *jobStartId
 	if p.Spec == nil || len(p.Spec.Argv) == 0 {
 		return nil, invalidRequestError("job spec with argv required")
 	}
+	lease, err := statepkg.AcquireWriter(state)
+	if err != nil {
+		return nil, stateWriteError(err)
+	}
+	defer lease.Close()
 	// The jobs directory is shared by multiple agent processes. The directory
 	// creation itself is the uniqueness commit point; Mkdir (rather than
 	// MkdirAll) lets a deliberately repeated ID fail closed instead of opening
@@ -87,7 +93,7 @@ func jobStartWithIdentity(p *proto.JobParams, state string, identity *jobStartId
 	var effective proto.ResourceEnvelope
 	var id, dir string
 	reserved := false
-	err := withJobLock(filepath.Join(state, "jobs", ".admission"), func() error {
+	err = withJobLock(filepath.Join(state, "jobs", ".admission"), func() error {
 		var err error
 		if identity != nil {
 			reserved, err = reserveJobStart(state, *identity, !replay)
@@ -174,6 +180,13 @@ func startJobTransaction(p *proto.JobParams, id, dir string, effective proto.Res
 	cmd.Args = append([]string{self, superviseFlag, dir, "--"}, inner...)
 	cmd.Env = setEnvValue(cmd.Env, supervisorParentEnv, strconv.Itoa(os.Getpid()))
 	state := filepath.Dir(filepath.Dir(dir))
+	lease, err := statepkg.AcquireWriter(state)
+	if err != nil {
+		return nil, stateWriteError(err)
+	}
+	defer lease.Close()
+	cmd.ExtraFiles = []*os.File{lease.File()}
+	cmd.Env = setEnvValue(cmd.Env, supervisorLeaseEnv, "3")
 	policy, err := storage.Load(filepath.Join(state, "storage-policy.json"))
 	if err != nil {
 		os.RemoveAll(dir)
@@ -281,6 +294,11 @@ func rollbackStartedJob(cmd *exec.Cmd, dir string) error {
 }
 
 func jobStop(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	lease, err := statepkg.AcquireWriter(state)
+	if err != nil {
+		return nil, stateWriteError(err)
+	}
+	defer lease.Close()
 	if p.ID == "" {
 		return nil, invalidRequestError("job id required")
 	}

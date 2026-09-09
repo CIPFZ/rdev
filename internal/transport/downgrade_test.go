@@ -9,6 +9,8 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -161,7 +163,7 @@ func TestEnsureAgentRefusesDowngradeBeforeUploading(t *testing.T) {
 		agentPath: "/home/u/.cache/rdev/rdev-agent",
 		stateDir:  "/home/u/.cache/rdev",
 	}
-	bin := &AgentBinary{Data: []byte("local agent"), SHA256: "localsha"}
+	bin := &AgentBinary{Data: []byte("local agent"), SHA256: ""}
 
 	err := c.ensureAgent(context.Background(), bin, "remotesha")
 	if err == nil {
@@ -190,7 +192,7 @@ func TestForceAgentUploadSkipsTheCheck(t *testing.T) {
 		agentPath: "/home/u/.cache/rdev/rdev-agent",
 		stateDir:  "/home/u/.cache/rdev",
 	}
-	bin := &AgentBinary{Data: []byte("local agent"), SHA256: "localsha"}
+	bin := &AgentBinary{Data: []byte("local agent"), SHA256: ""}
 
 	if err := c.ensureAgent(context.Background(), bin, "remotesha"); err != nil {
 		t.Fatalf("-force-agent-upload must install regardless of the installed build: %v", err)
@@ -216,9 +218,11 @@ func TestMatchingHashSkipsEverything(t *testing.T) {
 		agentPath: "/home/u/.cache/rdev/rdev-agent",
 		stateDir:  "/home/u/.cache/rdev",
 	}
-	bin := &AgentBinary{Data: []byte("agent"), SHA256: "samesha"}
+	bin := &AgentBinary{Data: []byte("agent")}
+	sum := sha256.Sum256(bin.Data)
+	bin.SHA256 = hex.EncodeToString(sum[:])
 
-	if err := c.ensureAgent(context.Background(), bin, "samesha"); err != nil {
+	if err := c.ensureAgent(context.Background(), bin, bin.SHA256); err != nil {
 		t.Fatalf("an already-current agent must be a no-op: %v", err)
 	}
 	if calls := sshCalls(t, log); calls != "" {
@@ -238,7 +242,7 @@ func TestFirstInstallSkipsTheCheck(t *testing.T) {
 		agentPath: "/home/u/.cache/rdev/rdev-agent",
 		stateDir:  "/home/u/.cache/rdev",
 	}
-	bin := &AgentBinary{Data: []byte("agent"), SHA256: "localsha"}
+	bin := &AgentBinary{Data: []byte("agent"), SHA256: ""}
 
 	// Empty installedSHA is what the probe reports when no agent is present.
 	if err := c.ensureAgent(context.Background(), bin, ""); err != nil {
@@ -270,7 +274,7 @@ func TestUnrunnableInstalledAgentIsReplaced(t *testing.T) {
 		agentPath: "/home/u/.cache/rdev/rdev-agent",
 		stateDir:  "/home/u/.cache/rdev",
 	}
-	bin := &AgentBinary{Data: []byte("agent"), SHA256: "localsha"}
+	bin := &AgentBinary{Data: []byte("agent"), SHA256: ""}
 
 	if err := c.ensureAgent(context.Background(), bin, "remotesha"); err != nil {
 		t.Fatalf("a broken installed agent must be replaceable: %v", err)

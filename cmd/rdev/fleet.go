@@ -119,8 +119,8 @@ func brokerFleet(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !r.OK {
-		return errors.New(r.Error)
+	if err := r.Failure(); err != nil {
+		return err
 	}
 	var output any
 	switch {

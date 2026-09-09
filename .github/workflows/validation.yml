@@ -1,0 +1,82 @@
+name: Validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# This workflow never receives signing credentials and never publishes/deploys.
+# A production signing workflow requires separately authorized trust and identity.
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.26.8'
+          cache: true
+      - name: Install local SSH fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-server rsync
+          sudo install -d -m 755 /run/sshd
+      - name: Bind runner and tool identities
+        run: |
+          mkdir -p "$RUNNER_TEMP/rdev-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/rdev-evidence/source.txt"
+          go version > "$RUNNER_TEMP/rdev-evidence/toolchain.txt"
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+          ssh -V 2> "$RUNNER_TEMP/rdev-evidence/openssh.txt"
+          printf '%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$RUNNER_TEMP/rdev-evidence/run.txt"
+      - name: Build, vet, test, and check embedded agents
+        run: |
+          make GO=go all daemon
+          make GO=go check
+      - name: Race instrumentation
+        run: go test -race ./... -count=1 -timeout=20m
+      - name: Coverage-guided fuzz smoke
+        run: RDEV_GO=go RDEV_FUZZ_TIME=10s sh scripts/fuzz-smoke.sh
+      - name: Harness supervision regressions
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
+      - name: Real IPv4, IPv6 and ProxyJump runtime
+        run: python3 scripts/isolated-ssh.py --go "$(command -v go)" --out "$RUNNER_TEMP/rdev-evidence/ssh"
+      - name: Online release audit and artifact binding
+        env:
+          RDEV_RELEASE_OUT: ${{ runner.temp }}/rdev-evidence/release
+        run: |
+          make GO=go release-gate
+          make GO=go verify-release
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: validation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Explicit evidence allowlist: failed SSH fixtures retain test keys
+          # and principal credentials privately for recovery, never as uploads.
+          path: |
+            ${{ runner.temp }}/rdev-evidence/source.txt
+            ${{ runner.temp }}/rdev-evidence/toolchain.txt
+            ${{ runner.temp }}/rdev-evidence/openssh.txt
+            ${{ runner.temp }}/rdev-evidence/run.txt
+            ${{ runner.temp }}/rdev-evidence/ssh/result.json
+            ${{ runner.temp }}/rdev-evidence/ssh/recovery.json
+            ${{ runner.temp }}/rdev-evidence/ssh/target-v4-runtime.log
+            ${{ runner.temp }}/rdev-evidence/ssh/target-v6-runtime.log
+            ${{ runner.temp }}/rdev-evidence/ssh/jump.log
+            ${{ runner.temp }}/rdev-evidence/ssh/v4.log
+            ${{ runner.temp }}/rdev-evidence/ssh/v6.log
+            ${{ runner.temp }}/rdev-evidence/release/
+          retention-days: 14
+          if-no-files-found: error

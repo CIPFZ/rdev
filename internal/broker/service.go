@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,6 +96,7 @@ func (s *Service) Client() *client.Client { return s.client }
 func (s *Service) SetReady(v bool)        { s.readiness.SetReady(v) }
 func (s *Service) Ready() bool            { return s.readiness.Ready() }
 func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request) (*proto.Response, error) {
+	ctx = s.observeBackgroundRelease(ctx, host, req)
 	if s.closed.Load() {
 		return nil, errors.New("broker service closed")
 	}
@@ -115,6 +117,7 @@ func (s *Service) Dispatch(ctx context.Context, host string, req *proto.Request)
 	return s.client.DoProtocol(ctx, host, req)
 }
 func (s *Service) DispatchApproved(ctx context.Context, host string, req *proto.Request, target string) (*proto.Response, error) {
+	ctx = s.observeBackgroundRelease(ctx, host, req)
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -326,7 +329,10 @@ func (s *Service) ReapWarmIdle(now time.Time) int {
 }
 func (s *Service) PoolHealth() PoolHealth {
 	h := s.Pool.Snapshot()
+	h.Goroutines = runtime.NumGoroutine()
+	h.ObserverMetricSeries, h.ObserverMetricSeriesBound = s.client.Hosts.SecuritySnapshot().Cardinality()
 	h.BaseTransports, h.BulkTransports = s.client.PoolTransportCounts()
+	h.DialAdmission = s.client.DialAdmission()
 	return h
 }
 

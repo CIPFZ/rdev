@@ -10,7 +10,7 @@ import (
 )
 
 func TestDurableJobStartReplaySurvivesCacheLossAndRemoval(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	proof := filepath.Join(state, "proof")
 	req := &proto.Request{Op: proto.OpJobStart, ClientID: "principal_job_identity", OperationID: "op_job_identity_123", Job: &proto.JobParams{DurableStart: true, Spec: &proto.ExecParams{Argv: []string{"sh", "-c", `printf once >> "$1"`, "proof", proof}}}}
 	first, err := jobStartRequest(req, state)
@@ -60,7 +60,7 @@ func TestDurableJobStartReplaySurvivesCacheLossAndRemoval(t *testing.T) {
 }
 
 func TestDurableJobStartFailedMetadataCannotRunOnRetry(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	proof := filepath.Join(state, "proof")
 	req := &proto.Request{Op: proto.OpJobStart, ClientID: "principal_job_identity", OperationID: "op_job_identity_fail", Job: &proto.JobParams{DurableStart: true, Spec: &proto.ExecParams{Argv: []string{"sh", "-c", `printf forbidden > "$1"`, "proof", proof}}}}
 	previous := writeJobMeta

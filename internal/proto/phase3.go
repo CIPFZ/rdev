@@ -316,6 +316,12 @@ const (
 )
 
 const (
+	CodeReleasePolicy        ErrorCode = "release.policy_required"
+	CodeReleaseUntrusted     ErrorCode = "release.untrusted"
+	CodeReleaseChannel       ErrorCode = "release.channel_denied"
+	CodeReleaseVersion       ErrorCode = "release.version_denied"
+	CodeUnsupportedPlatform  ErrorCode = "release.platform_unsupported"
+	CodeStateIncompatible    ErrorCode = "state.incompatible"
 	CodeUnknownOperation     ErrorCode = "protocol.unknown_operation"
 	CodeUnsupportedFeature   ErrorCode = "protocol.unsupported_feature"
 	CodeInvalidFrame         ErrorCode = "protocol.invalid_frame"
@@ -347,6 +353,12 @@ type ErrorDescriptor struct {
 }
 
 var errorRegistry = map[ErrorCode]ErrorDescriptor{
+	CodeReleasePolicy:        errorDescriptor(CodeReleasePolicy, CategoryPolicy, "administrator release policy is required", RetryDispositionAfterUserAction, false, true),
+	CodeReleaseUntrusted:     errorDescriptor(CodeReleaseUntrusted, CategoryAuth, "release signature or artifact identity is untrusted", RetryDispositionAfterUserAction, false, true),
+	CodeReleaseChannel:       errorDescriptor(CodeReleaseChannel, CategoryPolicy, "release channel is not allowed", RetryDispositionAfterUserAction, false, true),
+	CodeReleaseVersion:       errorDescriptor(CodeReleaseVersion, CategoryPolicy, "release version or rollback is not allowed", RetryDispositionAfterUserAction, false, true),
+	CodeUnsupportedPlatform:  errorDescriptor(CodeUnsupportedPlatform, CategoryProtocol, "release platform is unsupported", RetryDispositionAfterUserAction, false, true),
+	CodeStateIncompatible:    errorDescriptor(CodeStateIncompatible, CategoryStorage, "persisted state is not compatible", RetryDispositionAfterUserAction, false, true),
 	CodeUnknownOperation:     errorDescriptor(CodeUnknownOperation, CategoryProtocol, "unknown operation", RetryDispositionNever, false, true),
 	CodeUnsupportedFeature:   errorDescriptor(CodeUnsupportedFeature, CategoryProtocol, "required protocol feature is unavailable", RetryDispositionAfterUserAction, false, true),
 	CodeInvalidFrame:         errorDescriptor(CodeInvalidFrame, CategoryProtocol, "invalid protocol frame", RetryDispositionNever, false, true),

@@ -108,8 +108,8 @@ func brokerSync(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !r.OK {
-		return errors.New(r.Error)
+	if err := r.Failure(); err != nil {
+		return err
 	}
 	if r.Sync == nil {
 		return errors.New("broker sync returned no result")
@@ -221,8 +221,8 @@ func brokerSecret(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !resp.OK {
-		return errors.New(resp.Error)
+	if err := resp.Failure(); err != nil {
+		return err
 	}
 	if args[0] == "list" {
 		entries := resp.Secrets

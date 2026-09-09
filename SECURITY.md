@@ -262,7 +262,24 @@ The executable release gate pins Go 1.26.8 through `go.mod` and govulncheck
 v1.8.0, audits online dependencies and source/binaries, and verifies module
 checksums and artifact-bound manifest/SBOM/provenance metadata. `verify-release`
 rechecks the local output. Local unsigned provenance does not authenticate a
-publisher; configured or skipped CI is not an executed gate. Complete signing,
-distribution licensing/NOTICE packaging, release channels, automated rollback
-combinations and production certification remain Phase8 work. Go binaries link
+publisher; configured or skipped CI is not an executed gate. Phase8 adds SSHSIG manifests, administrator channel/root/pin policy, linked
+dependency notices and namespace-locked health/rollback transactions. Official
+signer identity, actual hosted CI, complete platform/upgrade matrices and 24h
+production certification remain pending; see [Phase8 acceptance](docs/phase8-acceptance.md). Go binaries link
 dependency code, including the MCP SDK, regardless of whether it is vendored.
+
+Release trust is read only from the administrator-owned private policy, including
+its protected ancestors and native ACL checks. Project files and broker requests
+cannot supply keys, unsigned opt-in or rollback permissions. Stable/beta never
+fall back to unsigned on verification failure. SSHSIG authenticates the release;
+SSH host keys authenticate the remote endpoint. Offline verification uses the
+local policy's bounded validity and revocation snapshot. Test roots require an
+explicit test opt-in and never constitute official release identity.
+
+Signed rollback requires an exact administrator target/digest grant and retains
+channel, signature, pin and state-readability checks. The binary transaction does
+not downgrade durable state. New writers hold a permanent shared state lease;
+migration/repair takes it exclusively. Legacy writers cannot be retroactively
+fenced and must be drained before first migration. Unknown journal/state and
+unconfirmed rollback remain preserved for recovery. Policy refusal before the
+first business send is distinguishable from an uncertain prior mutation.

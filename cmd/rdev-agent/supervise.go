@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	statepkg "github.com/CIPFZ/rdev/internal/state"
 	"github.com/CIPFZ/rdev/internal/storage"
 )
 
@@ -50,6 +51,21 @@ func killJobChildGroup(pid int) {
 // outcome in <jobDir>/status.json. It never returns; it exits with the child's
 // code so `ps` and any outer waiter see a faithful status.
 func runSupervisor(jobDir string, argv []string) {
+	root := filepath.Dir(filepath.Dir(jobDir))
+	var lease *statepkg.Lease
+	var leaseErr error
+	if os.Getenv(supervisorLeaseEnv) == "3" {
+		lease, leaseErr = statepkg.AdoptWriter(root, os.NewFile(3, "state-writer-lease"))
+	} else {
+		lease, leaseErr = statepkg.AcquireWriter(root)
+	}
+	if leaseErr != nil {
+		fmt.Fprintln(os.Stderr, "rdev-agent: supervisor state is incompatible or migration is active")
+		os.Exit(125)
+	}
+	// Hold across log flushing and terminal status. Migration returns busy;
+	// existing jobs are never killed to obtain the exclusive lease.
+	defer lease.Close()
 	// Install before the metadata start barrier. TERM during startup is queued
 	// until the child can receive it, so the supervisor can still persist output.
 	stopSignals := make(chan os.Signal, 4)
@@ -121,7 +137,7 @@ func runSupervisor(jobDir string, argv []string) {
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = nil
-	cmd.Env = withoutEnvValue(os.Environ(), supervisorParentEnv)
+	cmd.Env = withoutEnvValue(withoutEnvValue(os.Environ(), supervisorParentEnv), supervisorLeaseEnv)
 	// Isolate the child in its own process group. This lets timeout and log-limit
 	// enforcement kill the complete descendant tree while keeping the
 	// supervisor alive long enough to publish a terminal status. TERM is relayed

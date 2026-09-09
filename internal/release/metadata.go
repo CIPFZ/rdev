@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	artifactcontract "github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/compat"
 )
 
@@ -183,38 +184,26 @@ func WriteJSON(path string, v any) error {
 }
 
 func ReadJSON(path string, v any) error {
-	b, err := os.ReadFile(path)
+	b, err := artifactcontract.ReadFile(filepath.Dir(path), filepath.Base(path), artifactcontract.MaxDocumentBytes)
 	if err != nil {
 		return err
 	}
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err := d.Decode(v); err != nil {
-		return err
-	}
-	if err := d.Decode(new(any)); err != io.EOF {
-		return errors.New("expected one JSON document")
-	}
-	return nil
+	return artifactcontract.DecodeEvidence(b, v)
 }
 
 func artifact(dir, name, goVersion string) (Artifact, error) {
-	path := filepath.Join(dir, name)
-	info, err := os.Lstat(path)
+	data, err := artifactcontract.ReadFile(dir, name, 512<<20)
 	if err != nil {
 		return Artifact{}, err
 	}
-	if !info.Mode().IsRegular() {
-		return Artifact{}, errors.New("artifact must be a regular file")
-	}
-	b, err := buildinfo.ReadFile(path)
+	b, err := buildinfo.Read(bytes.NewReader(data))
 	if err != nil {
 		return Artifact{}, err
 	}
 	if b.GoVersion != goVersion {
 		return Artifact{}, fmt.Errorf("%s toolchain %s, expected %s", name, b.GoVersion, goVersion)
 	}
-	a := Artifact{Name: name, Size: info.Size(), Build: b}
+	a := Artifact{Name: name, Size: int64(len(data)), Build: b}
 	for _, setting := range b.Settings {
 		switch setting.Key {
 		case "GOOS":
@@ -226,8 +215,8 @@ func artifact(dir, name, goVersion string) (Artifact, error) {
 	if strings.HasPrefix(name, "rdev-agent-") && name != "rdev-agent-"+a.GOOS+"-"+a.GOARCH {
 		return Artifact{}, errors.New("artifact name/platform mismatch")
 	}
-	a.SHA256, err = Digest(path)
-	return a, err
+	a.SHA256 = artifactcontract.Hash(data)
+	return a, nil
 }
 
 var AgentNames = []string{"rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64"}
@@ -248,6 +237,16 @@ func Generate(dir string, source Source, goVersion string) error {
 		}
 		m.Artifacts = append(m.Artifacts, a)
 	}
+	data, err := os.ReadFile(filepath.Join(dir, "rdev"))
+	if err != nil {
+		return err
+	}
+	version, err := artifactcontract.BinaryVersion(data)
+	if err != nil {
+		return err
+	}
+	m.Compatibility.Release = version
+
 	// go:embed stores these assets uncompressed. Check their full bytes in the
 	// produced CLI; a truncated human-readable hash is not sufficient evidence.
 	cli, err := os.ReadFile(filepath.Join(dir, "rdev"))
@@ -278,7 +277,7 @@ func Generate(dir string, source Source, goVersion string) error {
 			return err
 		}
 	}
-	for _, name := range []string{"modules.json", "module-verify.txt", "tools.txt", "source.json"} {
+	for _, name := range []string{"modules.json", "module-verify.txt", "tools.txt", "source.json", "THIRD_PARTY_NOTICES.txt"} {
 		m.Evidence[name], err = Digest(filepath.Join(dir, name))
 		if err != nil {
 			return err
@@ -315,60 +314,14 @@ func auditNames() []string {
 
 type object = map[string]any
 
-func sbom(m Manifest) object {
-	components := []object{}
-	dependencies := []object{}
-	seen := make(map[string]bool)
-	for _, a := range m.Artifacts {
-		components = append(components, object{"type": "application", "bom-ref": a.Name, "name": a.Name, "version": m.Source.Commit, "hashes": []object{{"alg": "SHA-256", "content": a.SHA256}}})
-		refs := []string{}
-		mods := append([]*debug.Module{{Path: "stdlib", Version: a.Build.GoVersion}}, a.Build.Deps...)
-		for _, dep := range mods {
-			if dep.Replace != nil {
-				dep = dep.Replace
-			}
-			ref := dep.Path + "@" + dep.Version
-			refs = append(refs, ref)
-			if seen[ref] {
-				continue
-			}
-			seen[ref] = true
-			component := object{"type": "library", "bom-ref": ref, "name": dep.Path, "version": dep.Version}
-			if dep.Sum != "" {
-				component["properties"] = []object{{"name": "go:module:sum", "value": dep.Sum}}
-			}
-			components = append(components, component)
-		}
-		dependencies = append(dependencies, object{"ref": a.Name, "dependsOn": refs})
-	}
-	// The CLI also embeds four executable components, each with its own deps.
-	dependencies[0]["dependsOn"] = append(dependencies[0]["dependsOn"].([]string), AgentNames...)
-	return object{"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1, "components": components, "dependencies": dependencies}
+func localEvidence(m Manifest) artifactcontract.LocalEvidence {
+	b, _ := json.Marshal(m)
+	var local artifactcontract.LocalEvidence
+	_ = json.Unmarshal(b, &local)
+	return local
 }
-
-func provenance(m Manifest) object {
-	subjects := []object{}
-	for _, a := range m.Artifacts {
-		subjects = append(subjects, object{"name": a.Name, "digest": object{"sha256": a.SHA256}})
-	}
-	return object{"_type": "https://in-toto.io/Statement/v1", "subject": subjects, "predicateType": "https://slsa.dev/provenance/v1", "predicate": object{
-		"buildDefinition": object{"buildType": "https://github.com/CIPFZ/rdev/local-release-gate/v1", "externalParameters": object{"source": m.Source, "command": "make release-gate"}, "internalParameters": object{"assurance": "local unsigned evidence; no hosted CI execution or signing claim"}, "resolvedDependencies": []object{{"uri": "git+https://github.com/CIPFZ/rdev", "digest": object{"gitCommit": m.Source.Commit, "sha256": m.Source.TreeSHA256}}}},
-		"runDetails":      object{"builder": object{"id": "https://github.com/CIPFZ/rdev/local-release-gate/v1"}, "metadata": object{}, "byproducts": evidence(m.Evidence)},
-	}}
-}
-
-func evidence(e map[string]string) []object {
-	names := make([]string, 0, len(e))
-	for name := range e {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	out := []object{}
-	for _, name := range names {
-		out = append(out, object{"name": name, "digest": object{"sha256": e[name]}})
-	}
-	return out
-}
+func sbom(m Manifest) object       { return artifactcontract.SBOM(localEvidence(m)) }
+func provenance(m Manifest) object { return artifactcontract.Provenance(localEvidence(m)) }
 
 func Verify(dir string) error {
 	var m Manifest
@@ -378,40 +331,87 @@ func Verify(dir string) error {
 	if m.SchemaVersion != 1 || len(m.Artifacts) != 6 {
 		return errors.New("invalid manifest")
 	}
+	contract, err := json.Marshal(m.Compatibility)
+	if err != nil {
+		return err
+	}
+	if err = artifactcontract.DecodeCompatibility(contract, m.Compatibility.Release); err != nil {
+		return err
+	}
 	wanted := append([]string{"rdev", "rdevd"}, AgentNames...)
+	binaries := make(map[string][]byte)
 	for i, a := range m.Artifacts {
 		if a.Name != wanted[i] || a.Build == nil {
 			return errors.New("missing or unexpected artifact")
 		}
-		if filepath.Base(a.Name) != a.Name || a.Name == "." {
-			return errors.New("invalid artifact path")
+		for _, dep := range a.Build.Deps {
+			if dep == nil {
+				return errors.New("null linked dependency")
+			}
 		}
-		actual, err := artifact(dir, a.Name, a.Build.GoVersion)
+		data, err := artifactcontract.ReadExpected(dir, artifactcontract.File{Name: a.Name, SHA256: a.SHA256, Size: a.Size})
 		if err != nil {
 			return err
 		}
-		want, _ := json.Marshal(a)
-		got, _ := json.Marshal(actual)
-		if !bytes.Equal(want, got) {
-			return fmt.Errorf("artifact changed: %s", a.Name)
+		if err = artifactcontract.CheckAgentBuild(data, artifactcontract.LocalArtifact{Build: a.Build}); err != nil {
+			return err
+		}
+		if err = artifactcontract.CheckBinaryVersion(data, m.Compatibility.Release); err != nil {
+			return err
+		}
+		settings := map[string]string{}
+		for _, setting := range a.Build.Settings {
+			if _, ok := settings[setting.Key]; ok {
+				return errors.New("duplicate build setting")
+			}
+			settings[setting.Key] = setting.Value
+		}
+		if settings["GOOS"] != a.GOOS || settings["GOARCH"] != a.GOARCH || settings["vcs.revision"] != m.Source.Commit || settings["vcs.modified"] != fmt.Sprint(m.Source.Dirty) {
+			return errors.New("build source/platform mismatch")
+		}
+		if i >= 2 && a.Name != "rdev-agent-"+a.GOOS+"-"+a.GOARCH {
+			return errors.New("artifact platform mismatch")
+		}
+		binaries[a.Name] = data
+	}
+	for _, name := range AgentNames {
+		if !bytes.Contains(binaries["rdev"], binaries[name]) {
+			return errors.New("embedded agent bytes mismatch")
 		}
 	}
-	for _, name := range append(auditNames(), "modules.json", "module-verify.txt", "tools.txt", "source.json") {
-		if m.Evidence[name] == "" {
+	expectedNames := append(auditNames(), "modules.json", "module-verify.txt", "tools.txt", "source.json", "THIRD_PARTY_NOTICES.txt")
+	if len(m.Evidence) != len(expectedNames) {
+		return errors.New("unexpected evidence set")
+	}
+	evidence := make(map[string][]byte)
+	for _, name := range expectedNames {
+		want := m.Evidence[name]
+		if len(want) != 64 {
 			return fmt.Errorf("missing evidence: %s", name)
 		}
-	}
-	for name, expected := range m.Evidence {
-		if filepath.Base(name) != name {
-			return errors.New("invalid evidence path")
-		}
-		actual, err := Digest(filepath.Join(dir, name))
+		data, err := artifactcontract.ReadFile(dir, name, artifactcontract.MaxDocumentBytes)
 		if err != nil {
 			return err
 		}
-		if actual != expected {
+		if artifactcontract.Hash(data) != want {
 			return fmt.Errorf("evidence changed: %s", name)
 		}
+		evidence[name] = data
+	}
+	var source Source
+	if err := artifactcontract.DecodeEvidence(evidence["source.json"], &source); err != nil {
+		return err
+	}
+	if source != m.Source {
+		return errors.New("source evidence mismatch")
+	}
+	for _, name := range auditNames() {
+		if err := Audit(bytes.NewReader(evidence[name])); err != nil {
+			return err
+		}
+	}
+	if err := AuditModules(bytes.NewReader(evidence["modules.json"])); err != nil {
+		return err
 	}
 	for name, expected := range map[string]object{"sbom.cdx.json": sbom(m), "provenance.intoto.json": provenance(m)} {
 		var got object

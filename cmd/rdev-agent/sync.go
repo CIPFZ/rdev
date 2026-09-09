@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/CIPFZ/rdev/internal/proto"
+	statepkg "github.com/CIPFZ/rdev/internal/state"
 	"github.com/CIPFZ/rdev/internal/synctree"
 	"path/filepath"
 )
@@ -25,6 +26,11 @@ func doSync(ctx context.Context, request *proto.Request, state string) (*proto.S
 		result.Snapshot = &snap
 		return result, nil
 	}
+	lease, err := statepkg.AcquireWriter(state)
+	if err != nil {
+		return nil, stateWriteError(err)
+	}
+	defer lease.Close()
 	store, err := synctree.NewStore(filepath.Join(state, ".sync"))
 	if err != nil {
 		return nil, syncError(err, request.OperationID)

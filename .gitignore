@@ -1,2 +1,5 @@
 bin/
 cmd/rdev/agents/
+
+# Python runtime harness bytecode
+__pycache__/

@@ -5,8 +5,6 @@
 package state
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const CurrentSchemaVersion = 1
@@ -72,6 +72,13 @@ func validateRoot(root string) error {
 	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
 		return errors.New("state root is not a directory")
 	}
+	var native unix.Stat_t
+	if err := unix.Lstat(root, &native); err != nil {
+		return err
+	}
+	if st.Mode().Perm() != 0700 || int(native.Uid) != os.Geteuid() {
+		return errors.New("state root is not private and owned")
+	}
 	return nil
 }
 
@@ -94,17 +101,39 @@ func validateJobsDir(root string) error {
 // symlink. It is used for backup/quarantine roots because MkdirAll alone would
 // happily traverse an attacker-supplied symlink.
 func ensurePrivateDir(path string, mode os.FileMode) error {
-	if err := os.MkdirAll(path, mode); err != nil {
-		return err
-	}
+	return ensurePrivateDirSynced(path, mode, syncDirectory)
+}
+func ensurePrivateDirSynced(path string, mode os.FileMode, sync func(string) error) error {
 	st, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err = ensurePrivateDirSynced(filepath.Dir(path), mode, sync); err != nil {
+			return err
+		}
+		if err = os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		st, err = os.Lstat(path)
+	}
 	if err != nil {
 		return err
 	}
 	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
 		return fmt.Errorf("%s is not a directory", filepath.Base(path))
 	}
-	return nil
+	// Persist the child contents and its parent's name binding before a caller
+	// may overwrite active metadata based on a supposedly durable backup.
+	if err = sync(path); err != nil {
+		return err
+	}
+	return sync(filepath.Dir(path))
+}
+func syncDirectory(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func privateRegular(path string) (os.FileInfo, error) {
@@ -123,18 +152,33 @@ func privateRegular(path string) (os.FileInfo, error) {
 
 func loadManifest(root string) (*Manifest, error) {
 	p := filepath.Join(root, manifestName)
-	if _, err := privateRegular(p); err != nil {
+	st, err := privateRegular(p)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return &Manifest{SchemaVersion: CurrentSchemaVersion}, nil
 		}
 		return nil, err
+	}
+	if st.Size() > MaxMetadataBytes {
+		return nil, errors.New("state manifest exceeds budget")
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
 		return nil, err
 	}
 	var m Manifest
-	if err := json.Unmarshal(b, &m); err != nil {
+	var fields map[string]json.RawMessage
+	if err := decodeMetadata(b, &fields, false); err != nil {
+		return nil, err
+	}
+	for key := range fields {
+		switch key {
+		case "schema_version", "writer_version", "agent_identity", "namespace", "last_migration":
+		default:
+			return nil, errors.New("unknown state manifest field")
+		}
+	}
+	if err := decodeMetadata(b, &m, true); err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
 	if m.SchemaVersion <= 0 {
@@ -182,29 +226,11 @@ func writeAtomic(path string, value any) error {
 }
 
 func acquire(root string) (func(), error) {
-	p := filepath.Join(root, lockName)
-	// O_EXCL makes acquisition atomic. Lstat rejects a pre-existing symlink;
-	// the exclusive create then closes the check/create race without following it.
-	if st, statErr := os.Lstat(p); statErr == nil && st.Mode()&os.ModeSymlink != 0 {
-		return nil, ErrMigrationLocked
-	}
-	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	l, err := acquireLease(root, true)
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, ErrMigrationLocked
-		}
 		return nil, err
 	}
-	var token [16]byte
-	if _, err = rand.Read(token[:]); err != nil {
-		f.Close()
-		os.Remove(p)
-		return nil, err
-	}
-	_, _ = f.WriteString(fmt.Sprintf("pid=%d token=%s\n", os.Getpid(), hex.EncodeToString(token[:])))
-	_ = f.Sync()
-	_ = f.Close()
-	return func() { _ = os.Remove(p) }, nil
+	return func() { _ = l.Close() }, nil
 }
 
 func Inspect(root string) (Report, error) {
@@ -249,23 +275,22 @@ func Inspect(root string) (Report, error) {
 			r.Findings = append(r.Findings, Finding{Path: recPath, Kind: "record_corrupt", Message: statErr.Error(), Action: "inspect and repair manually"})
 		} else {
 			rec.Bytes = st.Size()
-			b, readErr := os.ReadFile(full)
-			var raw struct {
-				SchemaVersion *int `json:"schema_version"`
+			var b []byte
+			var readErr error
+			if st.Size() > MaxMetadataBytes {
+				readErr = errors.New("state record exceeds budget")
+			} else {
+				b, readErr = os.ReadFile(full)
 			}
-			unmarshalErr := json.Unmarshal(b, &raw)
-			version := 0
-			if raw.SchemaVersion != nil {
-				version = *raw.SchemaVersion
-			}
-			// A missing version is the explicitly supported legacy v0 shape;
-			// an explicit zero/negative value is malformed and must not be
-			// silently upgraded during migration.
-			invalidVersion := raw.SchemaVersion != nil && version <= 0
-			if readErr != nil || unmarshalErr != nil || invalidVersion || version > CurrentSchemaVersion {
+			version, schemaErr := ValidateRecordSchema(b)
+			if readErr != nil || schemaErr != nil {
 				rec.Valid = false
 				rec.SchemaVersion = version
-				r.Findings = append(r.Findings, Finding{Path: recPath, Kind: "record_corrupt", Message: "invalid or future schema", Action: "quarantine after review"})
+				kind, action := "record_corrupt", "quarantine after review"
+				if errors.Is(schemaErr, ErrFutureSchema) {
+					kind, action = "record_future", "use a compatible reader; do not quarantine or downgrade"
+				}
+				r.Findings = append(r.Findings, Finding{Path: recPath, Kind: kind, Message: "invalid or future schema", Action: action})
 			} else {
 				rec.Valid = true
 				rec.SchemaVersion = version
@@ -277,12 +302,22 @@ func Inspect(root string) (Report, error) {
 }
 
 func Migrate(root string, dryRun bool) (Report, error) {
+	if !dryRun {
+		release, err := acquire(root)
+		if err != nil {
+			return Report{}, err
+		}
+		defer release()
+	}
 	r, err := Inspect(root)
 	if err != nil {
 		return r, err
 	}
 	r.DryRun = dryRun
 	for _, f := range r.Findings {
+		if f.Kind == "record_future" {
+			return r, ErrFutureSchema
+		}
 		if f.Kind == "manifest_invalid" {
 			if strings.Contains(f.Message, ErrFutureSchema.Error()) {
 				return r, ErrFutureSchema
@@ -311,11 +346,9 @@ func Migrate(root string, dryRun bool) (Report, error) {
 	if dryRun || len(r.Changed) == 0 {
 		return r, nil
 	}
-	release, err := acquire(root)
-	if err != nil {
+	if err := reserveRecovery(root, "backup", r.Changed); err != nil {
 		return r, err
 	}
-	defer release()
 	backupDir := filepath.Join(root, "backup", time.Now().UTC().Format("20060102T150405.000000000Z"))
 	if err := ensurePrivateDir(filepath.Dir(backupDir), 0700); err != nil {
 		return r, err
@@ -337,6 +370,13 @@ func Migrate(root string, dryRun bool) (Report, error) {
 		if readErr != nil {
 			return r, readErr
 		}
+		version, schemaErr := ValidateRecordSchema(b)
+		if schemaErr != nil {
+			return r, schemaErr
+		}
+		if version != rec.SchemaVersion {
+			return r, errors.New("state record changed during migration")
+		}
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(b, &obj); err != nil {
 			return r, err
@@ -344,7 +384,7 @@ func Migrate(root string, dryRun bool) (Report, error) {
 		// Keep a complete, root-relative backup before changing each record. A
 		// later failure therefore leaves an operator a reversible recovery path.
 		backupPath := filepath.Join(backupDir, filepath.FromSlash(rec.Path))
-		if err := os.MkdirAll(filepath.Dir(backupPath), 0700); err != nil {
+		if err := ensurePrivateDir(filepath.Dir(backupPath), 0700); err != nil {
 			return r, err
 		}
 		if err := writeAtomic(backupPath, json.RawMessage(b)); err != nil {
@@ -366,11 +406,23 @@ func Migrate(root string, dryRun bool) (Report, error) {
 }
 
 func Repair(root string, dryRun bool) (Report, error) {
+	if !dryRun {
+		release, err := acquire(root)
+		if err != nil {
+			return Report{}, err
+		}
+		defer release()
+	}
 	r, err := Inspect(root)
 	if err != nil {
 		return r, err
 	}
 	r.DryRun = dryRun
+	for _, f := range r.Findings {
+		if f.Kind == "manifest_invalid" {
+			return r, errors.New("state manifest is invalid; refusing repair")
+		}
+	}
 	for _, f := range r.Findings {
 		if f.Kind == "record_corrupt" {
 			r.Quarantined = append(r.Quarantined, f.Path)
@@ -382,11 +434,9 @@ func Repair(root string, dryRun bool) (Report, error) {
 	if dryRun || len(r.Quarantined) == 0 {
 		return r, nil
 	}
-	release, err := acquire(root)
-	if err != nil {
+	if err := reserveRecovery(root, "quarantine", r.Quarantined); err != nil {
 		return r, err
 	}
-	defer release()
 	qroot := filepath.Join(root, "quarantine", time.Now().UTC().Format("20060102T150405.000000000Z"))
 	if err := ensurePrivateDir(filepath.Dir(qroot), 0700); err != nil {
 		return r, err
@@ -397,9 +447,22 @@ func Repair(root string, dryRun bool) (Report, error) {
 	for _, rel := range r.Quarantined {
 		src := filepath.Join(root, rel)
 		dst := filepath.Join(qroot, filepath.Base(filepath.Dir(src))+"-meta.json")
-		if err := os.Rename(src, dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := renameRecovery(src, dst, syncDirectory); err != nil {
 			return r, err
 		}
 	}
 	return r, nil
+}
+
+func renameRecovery(src, dst string, sync func(string) error) error {
+	if err := os.Rename(src, dst); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if err := sync(filepath.Dir(dst)); err != nil {
+		return err
+	}
+	return sync(filepath.Dir(src))
 }

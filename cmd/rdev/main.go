@@ -48,8 +48,7 @@ func lookupAgent(goos, goarch string) (*transport.AgentBinary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embedded agent %s missing (run 'make agents')", name)
 	}
-	sum := sha256.Sum256(data)
-	return &transport.AgentBinary{Data: data, SHA256: hex.EncodeToString(sum[:])}, nil
+	return transport.AuthorizedBinary(data, goos, goarch), nil
 }
 
 // printVersion reports this binary's identity and that of every agent inside it.
@@ -195,8 +194,8 @@ func brokerMutation(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !r.OK {
-		return errors.New(r.Error)
+	if err := r.Failure(); err != nil {
+		return err
 	}
 	if r.Mutation == nil {
 		return errors.New("broker returned no mutation state")
@@ -226,8 +225,8 @@ func brokerPing(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !resp.OK {
-		return errors.New(resp.Error)
+	if err := resp.Failure(); err != nil {
+		return err
 	}
 	if resp.Wire == nil || resp.Wire.Ping == nil {
 		return errors.New("broker ping returned no ping result")
@@ -273,8 +272,8 @@ func brokerExec(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !res.OK {
-		return errors.New(res.Error)
+	if err := res.Failure(); err != nil {
+		return err
 	}
 	if res.Wire == nil || res.Wire.Exec == nil {
 		return errors.New("broker exec returned no result")
@@ -422,7 +421,7 @@ func brokerJob(ctx context.Context, args []string) error {
 			return err
 		}
 		if !resp.OK {
-			return errors.New(resp.Error)
+			return resp.Failure()
 		}
 		if resp.History == nil {
 			return errors.New("broker returned no event history")
@@ -460,7 +459,7 @@ func brokerJob(ctx context.Context, args []string) error {
 			return err
 		}
 		if !resp.OK {
-			return errors.New(resp.Error)
+			return resp.Failure()
 		}
 		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
 			return errors.New("broker job start returned no result")
@@ -620,8 +619,8 @@ func brokerWire(ctx context.Context, operation, host string, wire *proto.Request
 	if err != nil {
 		return nil, err
 	}
-	if !resp.OK {
-		return nil, errors.New(resp.Error)
+	if err := resp.Failure(); err != nil {
+		return nil, err
 	}
 	if resp.Wire == nil {
 		return nil, errors.New("broker returned no wire result")
@@ -630,6 +629,9 @@ func brokerWire(ctx context.Context, operation, host string, wire *proto.Request
 }
 
 func cliErrorLine(c *client.Client, envelope *proto.ErrorEnvelope) string {
+	if envelope.Validate() != nil {
+		envelope = proto.NewError(proto.CodeInternalFailure, "", proto.StatePossiblyExecuted)
+	}
 	message := envelope.Message
 	if c != nil {
 		message = c.Secrets.Redact(message)

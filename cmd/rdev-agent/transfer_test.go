@@ -12,7 +12,7 @@ import (
 )
 
 func TestTransferStagesResumesAndCommitsAtomically(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	target := filepath.Join(dir, "out")
 	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestTransferStagesResumesAndCommitsAtomically(t *testing.T) {
 }
 
 func TestTransferRejectsDigestMismatchWithoutPublishing(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	target := filepath.Join(dir, "out")
 	_ = os.WriteFile(target, []byte("old"), 0o600)
 	_, err := doTransferChunk(&proto.WriteParams{Path: target, TransferID: "op_0123456789abcdef", Offset: 0, TotalSize: 3, Digest: hex.EncodeToString(make([]byte, 32)), Content: "bad", Final: true})
@@ -59,11 +59,11 @@ func TestTransferRejectsDigestMismatchWithoutPublishing(t *testing.T) {
 }
 
 func TestTransferRejectsSymlinkedStagingArtifacts(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	target := filepath.Join(dir, "out")
 	id := "op_0123456789abcdef"
 	base := filepath.Join(dir, ".rdev-transfer-"+id)
-	outside := filepath.Join(t.TempDir(), "outside")
+	outside := filepath.Join(privateTempDir(t), "outside")
 	if err := os.WriteFile(outside, []byte("must remain"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -82,11 +82,11 @@ func TestTransferRejectsSymlinkedStagingArtifacts(t *testing.T) {
 }
 
 func TestTransferRejectsSymlinkedMetadata(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	target := filepath.Join(dir, "out")
 	id := "op_0123456789abcdef"
 	base := filepath.Join(dir, ".rdev-transfer-"+id)
-	outside := filepath.Join(t.TempDir(), "outside")
+	outside := filepath.Join(privateTempDir(t), "outside")
 	if err := os.WriteFile(outside, []byte(`{"path":"/tmp/secret"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/CIPFZ/rdev/release-policy/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "bundle_dir": {
+      "type": "string"
+    },
+    "channels": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "stable",
+          "beta",
+          "dev"
+        ]
+      }
+    },
+    "pin_version": {
+      "type": "string"
+    },
+    "allow_unsigned_dev": {
+      "type": "boolean"
+    },
+    "allow_test_roots": {
+      "type": "boolean"
+    },
+    "roots": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "public_key": {
+            "type": "string",
+            "pattern": "^ssh-ed25519 [A-Za-z0-9+/=]+$"
+          },
+          "channels": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "stable",
+                "beta",
+                "dev"
+              ]
+            }
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "not_after": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "test_only": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "public_key",
+          "channels",
+          "not_before",
+          "not_after",
+          "revoked",
+          "test_only"
+        ]
+      }
+    },
+    "hosts": {
+      "type": "object",
+      "maxProperties": 1024,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "stable",
+                "beta",
+                "dev"
+              ]
+            }
+          },
+          "pin_version": {
+            "type": "string"
+          },
+          "deny_unsigned": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "channels"
+        ]
+      }
+    },
+    "rollback_digests": {
+      "type": "object",
+      "maxProperties": 1024,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "valid_until",
+    "channels",
+    "allow_unsigned_dev",
+    "allow_test_roots",
+    "roots"
+  ]
+}

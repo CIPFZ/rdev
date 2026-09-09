@@ -12,7 +12,7 @@ import (
 func TestHelloUnaryThenV3PingEvents(t *testing.T) {
 	var output bytes.Buffer
 	writer := testResponseWriter(&output)
-	server := newAgentServer(context.Background(), t.TempDir(), writer)
+	server := newAgentServer(context.Background(), privateTempDir(t), writer)
 	defer server.close()
 	hello := proto.CurrentHello()
 	server.process(&proto.Request{ID: "hello", Op: proto.OpPing, Hello: &hello})

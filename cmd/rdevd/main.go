@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -43,8 +41,7 @@ func agentLookup(dir string) func(string, string) (*transport.AgentBinary, error
 		if err != nil {
 			return nil, fmt.Errorf("agent %s/%s unavailable: %w", goos, goarch, err)
 		}
-		sum := sha256.Sum256(data)
-		return &transport.AgentBinary{Data: data, SHA256: hex.EncodeToString(sum[:])}, nil
+		return transport.AuthorizedBinary(data, goos, goarch), nil
 	}
 }
 
@@ -207,14 +204,14 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		}
 		if boundOwner == (broker.Owner{}) {
 			if err := lease.Bind(req.Owner); err != nil {
-				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+				_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()}.WithError(err, requestOperationID(req)))
 				endRequest()
 				return
 			}
 			boundOwner = req.Owner
 		}
 		if err := req.Owner.Validate(); err != nil {
-			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()})
+			_ = enc.Encode(broker.Response{ID: req.ID, Error: err.Error()}.WithError(err, requestOperationID(req)))
 			endRequest()
 			continue
 		}
@@ -226,6 +223,9 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		}
 		respond := func(response broker.Response) error {
 			response.RequestRef = requestRef
+			if response.ErrorEnvelope == nil {
+				response.Error = service.Client().Secrets.Redact(response.Error)
+			}
 			return enc.Encode(response)
 		}
 		decision := service.DecideBrokerRequest(req)
@@ -254,7 +254,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		}
 		if err := broker.ValidateRoute(req); err != nil {
 			recordResult("route_rejected")
-			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 			endRequest()
 			continue
 		}
@@ -284,6 +284,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				continue
 			}
 		}
+		requestCtx = service.ObserveRelease(requestCtx, auditBase)
 		if req.Wire != nil {
 			if (req.Wire.ClientID != "" && req.Wire.ClientID != req.Owner.ClientID) || (req.Wire.ProjectID != "" && req.Wire.ProjectID != req.Owner.ProjectID) {
 				recordResult("request_rejected")
@@ -313,14 +314,14 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				bound, err := service.Jobs.BindRequest(req.Host, req.Owner.Key(), req.Wire)
 				if err != nil {
 					recordResult("request_rejected")
-					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 					endRequest()
 					continue
 				}
 				req.Wire = bound
 				if err := service.ValidateJobRemoval(req.Host, req.Owner.Key(), req.Wire); err != nil {
 					recordResult("request_rejected")
-					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 					endRequest()
 					continue
 				}
@@ -345,7 +346,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				approval, err := service.IssueApprovalContext(requestCtx, *req.ApprovalSpec)
 				if err != nil {
 					recordResult("request_rejected")
-					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 				} else {
 					auditBase.BindApproval(*approval.Plan, broker.ApprovalReference(approval.Token))
 					recordResult("approval_issued")
@@ -361,7 +362,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			plan, err := service.AuthorizeApprovalContext(requestCtx, req, decision)
 			if err != nil {
 				recordDecision("approval_invalid", "approval_denied")
-				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 				endRequest()
 				continue
 			}
@@ -373,7 +374,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			if err := lease.Reserve(expandedBytes); err != nil {
 				expandedBytes = 0
 				recordResult("quota_rejected")
-				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 				endRequest()
 				continue
 			}
@@ -386,7 +387,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			budget := broker.SyncPreviewBudget(req)
 			if err := lease.Reserve(budget); err != nil {
 				recordResult("quota_rejected")
-				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 				endRequest()
 				continue
 			}
@@ -407,7 +408,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				outcome, message = "dispatch_error", service.Client().Secrets.Redact(err.Error())
 			}
 			recordResult(outcome)
-			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Sync: result, Mutation: mutation})
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Sync: result, Mutation: mutation}.WithError(err, requestOperationID(req)))
 			endRequest()
 			continue
 		}
@@ -420,7 +421,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				message = err.Error()
 			}
 			recordResult(result)
-			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Secrets: entries})
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Secrets: entries}.WithError(err, requestOperationID(req)))
 			endRequest()
 			continue
 		}
@@ -434,7 +435,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				message = err.Error()
 			}
 			recordResult(result)
-			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Mutation: mutation})
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Mutation: mutation}.WithError(err, requestOperationID(req)))
 			endRequest()
 			continue
 		}
@@ -462,7 +463,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			}
 			if err != nil {
 				recordResult("request_rejected")
-				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 			} else {
 				recordResult("completed")
 				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Mutation: &m})
@@ -479,7 +480,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 				page, err := service.Events.Query(req.Owner.Key(), req.Host, req.JobEvents.ID, req.JobEvents.Cursor, req.JobEvents.Limit)
 				if err != nil {
 					result = "dispatch_error"
-					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()}.WithError(err, requestOperationID(req)))
 				} else {
 					_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, History: &page})
 				}
@@ -514,7 +515,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			}
 			if policyErr != nil {
 				recordResult("policy_update_failed")
-				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: policyErr.Error()})
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: policyErr.Error()}.WithError(policyErr, requestOperationID(req)))
 			} else {
 				recordResult("policy_updated")
 				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true})
@@ -555,7 +556,7 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 					result = "quota_rejected"
 				}
 				recordResult(result)
-				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error(), Mutation: mutation})
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error(), Mutation: mutation}.WithError(err, requestOperationID(req)))
 				endRequest()
 				continue
 			}
@@ -584,4 +585,11 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Scheduler: scheduler, SharedWaits: sharedWaits, Ingress: ingress})
 		endRequest()
 	}
+}
+
+func requestOperationID(req broker.Request) string {
+	if req.Wire != nil {
+		return req.Wire.OperationID
+	}
+	return req.OperationID
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -113,12 +114,15 @@ func (s *Service) DispatchMutation(ctx context.Context, req Request, plan Approv
 	if err != nil {
 		m := status()
 		state := "ambiguous"
-		// Only a correlated terminal rejection proves that this dispatch did
-		// not execute. A local/reconnect error saying not_sent cannot rule out
-		// an earlier transport attempt; Client preserves that uncertainty.
-		if m.State == "prepared" || resp != nil && !resp.OK && resp.Terminal && resp.OperationID == intent.OperationID && resp.Execution == proto.StateNotSent && resp.Error != nil && resp.Error.ExecutionState == proto.StateNotSent {
+		var before *client.BeforeDispatchError
+		// The local marker proves no business dispatch occurred. Otherwise only
+		// a registry-valid, correlated terminal response resolves uncertainty;
+		// a bare not_sent error from a later reconnect is insufficient.
+		beforeDispatch := m.State == "dispatched" && resp == nil && errors.As(err, &before)
+		terminal := resp != nil && !resp.OK && resp.Terminal && resp.OperationID == intent.OperationID && resp.Error != nil && resp.Error.Validate() == nil && resp.Error.Terminal && resp.Error.OperationID == intent.OperationID
+		if m.State == "prepared" || beforeDispatch || terminal && resp.Execution == proto.StateNotSent && resp.Error.ExecutionState == proto.StateNotSent {
 			state = "not_sent"
-		} else if resp != nil && !resp.OK && resp.Terminal && resp.OperationID == intent.OperationID && resp.Execution == proto.StateFailed && resp.Error != nil && resp.Error.ExecutionState == proto.StateFailed {
+		} else if terminal && resp.Execution == proto.StateFailed && resp.Error.ExecutionState == proto.StateFailed {
 			// The remote handler reached a terminal failure. Record that known
 			// outcome, while retaining the identity to prevent any redispatch.
 			state = "completed"

@@ -20,6 +20,17 @@ import (
 // Version is the release version, kept in sync with what MCP clients are told.
 var Version = "0.1.0"
 
+// ReleaseIdentity is a cross-platform readable stamp. Go deliberately omits
+// -ldflags from buildinfo under -trimpath, so release verification also binds
+// this linker-provided marker. Empty denotes an unstamped development build.
+var ReleaseIdentity = ""
+
+func init() {
+	if ReleaseIdentity != "" && ReleaseIdentity != "rdev-release-identity-v1["+Version+"]" {
+		panic("inconsistent release build identity")
+	}
+}
+
 // Commit is the git revision, from `git describe --always --dirty`.
 var Commit = "unknown"
 

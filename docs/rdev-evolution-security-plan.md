@@ -1136,6 +1136,8 @@ Fleet Gate（最终源码全部通过，证据层次如下）：
 
 覆盖：ENG-035、ENG-038，并作为正式稳定版发布 Gate。
 
+当前状态：**In progress，未 Production Certified**。实现、实际验证与外部条件分别记录于 [Phase8 验收表](phase8-acceptance.md)。以下原验收条件与全部 Production Gate 保持不变；测试签名、cross-build、workflow 配置与短测不替代生产认证。
+
 | Task | 内容 | 依赖 | 验收条件 |
 | --- | --- | --- | --- |
 | P8-01 | 生成签名 manifest、SBOM 和 build provenance | Phase 6 | 所有 CLI/broker/agent artifact 可验证来源和 digest |
@@ -1145,7 +1147,7 @@ Fleet Gate（最终源码全部通过，证据层次如下）：
 | P8-05 | 执行 100 host/20 client scale 和 24h soak | Phase 7 | RSS/FD/goroutine/ssh/storage 回归稳定，无饥饿和重连风暴 |
 | P8-06 | 维护 N/N-1 client/broker/agent/migration/rollback matrix | P6-08、P8-02 | 所有支持组合自动验证，unsupported 组合明确拒绝 |
 
-Production Gate：
+Production Gate（当前均未作为完整生产门槛通过；精确执行状态见 Phase8 验收表）：
 
 - [ ] 安全 High/Medium finding 已关闭或有明确接受记录。
 - [ ] Tier 1 支持矩阵全部通过真实环境测试。

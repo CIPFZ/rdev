@@ -97,6 +97,9 @@ func projectResults(scrub func(*mcp.CallToolResult), scrubError func(string) str
 			}
 			var envelope *proto.ErrorEnvelope
 			if errors.As(underlying, &envelope) {
+				if envelope.Validate() != nil {
+					envelope = proto.NewError(proto.CodeInternalFailure, "", proto.StatePossiblyExecuted)
+				}
 				copy := *envelope
 				ctr = &mcp.CallToolResult{IsError: true, StructuredContent: &copy, Content: []mcp.Content{&mcp.TextContent{Text: copy.Message}}}
 				res, err = ctr, nil

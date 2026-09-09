@@ -12,23 +12,24 @@ import (
 )
 
 type AuditEvent struct {
-	PlanRef       string    `json:"plan_ref,omitempty"`
-	HostRef       string    `json:"host_ref,omitempty"`
-	Attempt       int       `json:"attempt,omitempty"`
-	DigestScope   string    `json:"digest_scope,omitempty"`
-	TargetScope   string    `json:"target_scope,omitempty"`
-	RequestRef    string    `json:"request_ref,omitempty"`
-	OperationRef  string    `json:"operation_ref,omitempty"`
-	RequestDigest string    `json:"request_digest,omitempty"`
-	TargetDigest  string    `json:"target_digest,omitempty"`
-	ApprovalID    string    `json:"approval_id,omitempty"`
-	PolicyDigest  string    `json:"policy_digest,omitempty"`
-	Schema        int       `json:"schema,omitempty"`
-	At            time.Time `json:"at"`
-	Owner         string    `json:"owner,omitempty"`
-	Operation     string    `json:"operation,omitempty"`
-	Decision      string    `json:"decision,omitempty"`
-	Result        string    `json:"result,omitempty"`
+	Release       *ReleaseAudit `json:"release,omitempty"`
+	PlanRef       string        `json:"plan_ref,omitempty"`
+	HostRef       string        `json:"host_ref,omitempty"`
+	Attempt       int           `json:"attempt,omitempty"`
+	DigestScope   string        `json:"digest_scope,omitempty"`
+	TargetScope   string        `json:"target_scope,omitempty"`
+	RequestRef    string        `json:"request_ref,omitempty"`
+	OperationRef  string        `json:"operation_ref,omitempty"`
+	RequestDigest string        `json:"request_digest,omitempty"`
+	TargetDigest  string        `json:"target_digest,omitempty"`
+	ApprovalID    string        `json:"approval_id,omitempty"`
+	PolicyDigest  string        `json:"policy_digest,omitempty"`
+	Schema        int           `json:"schema,omitempty"`
+	At            time.Time     `json:"at"`
+	Owner         string        `json:"owner,omitempty"`
+	Operation     string        `json:"operation,omitempty"`
+	Decision      string        `json:"decision,omitempty"`
+	Result        string        `json:"result,omitempty"`
 }
 type AuditLog struct {
 	digestKey *[32]byte // immutable, private to this broker instance; nil fails closed
@@ -162,6 +163,7 @@ func (a *AuditLog) Append(e AuditEvent) {
 	// both broke queries and conflated distinct principal/project pairs. Keep a
 	// stable hash of the original bytes; never authorize by a display string.
 	e.Schema = AuditSchemaVersion
+	e.Release = sanitizeReleaseAudit(e.Release)
 	if e.DigestScope != "broker_instance" && e.DigestScope != "approval" && e.DigestScope != "fleet" {
 		e.DigestScope = ""
 	}
@@ -237,7 +239,7 @@ func auditOperation(operation string) string {
 
 func auditCode(code string) string {
 	switch code {
-	case "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_issued", "approval_used", "approval_invalid", "accepted", "completed", "dispatch_error", "request_rejected", "route_rejected", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "recovery_found", "state_persist_failed", "planned", "retry_planned", "pending", "dispatching", "running", "success", "failed", "skipped", "canceled", "ambiguous", "unreachable", "execute", "resumed", "operator_pause", "operator_cancel", "finished", "failure_threshold", "canary_failed", "approval_or_policy_changed", "permission_changed":
+	case "release_policy", "ready", "rejected", "committed", "", "allow", "deny", "granted", "denied", "denied by default", "capability mismatch", "policy storage unavailable", "approval_denied", "approval_required", "approval_issued", "approval_used", "approval_invalid", "accepted", "completed", "dispatch_error", "request_rejected", "route_rejected", "quota_rejected", "policy_updated", "policy_update_failed", "admitted", "recovery_missing", "recovery_unreachable", "recovery_found", "state_persist_failed", "planned", "retry_planned", "pending", "dispatching", "running", "success", "failed", "skipped", "canceled", "ambiguous", "unreachable", "execute", "resumed", "operator_pause", "operator_cancel", "finished", "failure_threshold", "canary_failed", "approval_or_policy_changed", "permission_changed":
 		return code
 	default:
 		return "unknown"

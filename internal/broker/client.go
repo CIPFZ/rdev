@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -168,9 +169,23 @@ func (c *Client) DoContext(ctx context.Context, req Request) (result Response, c
 			c.conn = nil
 			return Response{}, ctx.Err()
 		}
+		_ = c.conn.Close()
+		c.conn = nil
+		var syntax *json.SyntaxError
+		var shape *json.UnmarshalTypeError
+		if errors.Is(err, errInvalidBrokerResponse) || errors.As(err, &syntax) || errors.As(err, &shape) {
+			return Response{}, proto.NewError(proto.CodeInvalidFrame, requestOperationID(req), proto.StatePossiblyExecuted)
+		}
+		// EOF/deadline/network failures are transport errors. They cannot
+		// establish that an operation was not sent or completed.
 		return Response{}, err
 	}
-	if !response.OK && response.Mutation != nil {
+	if err := response.validateErrorBinding(req); err != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+		return Response{}, proto.NewError(proto.CodeInvalidFrame, requestOperationID(req), proto.StatePossiblyExecuted)
+	}
+	if !response.OK && response.Mutation != nil && response.ErrorEnvelope == nil {
 		response.Error = fmt.Sprintf("mutation %s [%s]: %s", response.Mutation.OperationID, response.Mutation.State, response.Error)
 	}
 	return response, nil

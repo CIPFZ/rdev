@@ -30,7 +30,11 @@ type runtimeDaemon struct {
 
 func newRuntimeDaemon(t *testing.T, bin string) *runtimeDaemon {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "rdev-runtime-")
+	parent := os.Getenv("RDEV_TEST_RUNTIME_ROOT")
+	if parent == "" {
+		parent = "/tmp"
+	}
+	dir, err := os.MkdirTemp(parent, "rdev-runtime-")
 	if err != nil {
 		t.Fatal(err)
 	}

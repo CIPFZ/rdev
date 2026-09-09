@@ -20,7 +20,7 @@ func writeGCJob(t *testing.T, state, id string, started, ended time.Time, body s
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	meta := jobMeta{ID: id, PID: 0, StartedAt: started.UTC().Format(time.RFC3339Nano)}
+	meta := jobMeta{SchemaVersion: 1, ID: id, PID: 0, StartedAt: started.UTC().Format(time.RFC3339Nano)}
 	if running {
 		meta.PID = os.Getpid()
 		meta.ProcessIdentity, _ = processIdentity(meta.PID)
@@ -40,7 +40,7 @@ func writeGCJob(t *testing.T, state, id string, started, ended time.Time, body s
 }
 
 func TestStorageGCRetentionAndKeepLast(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	now := time.Now().UTC()
 	writeGCJob(t, state, "old", now.Add(-48*time.Hour), now.Add(-47*time.Hour), "old", false)
 	writeGCJob(t, state, "middle", now.Add(-24*time.Hour), now.Add(-23*time.Hour), "middle", false)
@@ -63,7 +63,7 @@ func TestStorageGCRetentionAndKeepLast(t *testing.T) {
 }
 
 func TestStorageGCProtectsRunningSymlinkAndUnknown(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	now := time.Now().UTC()
 	writeGCJob(t, state, "live", now.Add(-48*time.Hour), now.Add(-47*time.Hour), "live", true)
 	unknown := writeGCJob(t, state, "unknown", now.Add(-48*time.Hour), now.Add(-47*time.Hour), "unknown", false)
@@ -99,7 +99,7 @@ func TestStorageGCProtectsRunningSymlinkAndUnknown(t *testing.T) {
 }
 
 func TestStorageGCDryRunQuotaAndBoundedBatch(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	now := time.Now().UTC()
 	for i, id := range []string{"a", "b", "c"} {
 		writeGCJob(t, state, id, now.Add(time.Duration(-3+i)*time.Hour), now.Add(time.Duration(-3+i)*time.Hour), "1234567890", false)
@@ -131,7 +131,7 @@ func TestStorageGCDryRunQuotaAndBoundedBatch(t *testing.T) {
 }
 
 func TestStorageGCScopeReportJSON(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	now := time.Now().UTC()
 	writeGCJob(t, state, "j", now.Add(-time.Hour), now.Add(-time.Hour), "x", false)
 	scope := storage.Default().RemoteState
@@ -146,7 +146,7 @@ func TestStorageGCScopeReportJSON(t *testing.T) {
 }
 
 func TestStorageGCDryRunDoesNotCreateLocks(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	now := time.Now().UTC()
 	writeGCJob(t, state, "old", now.Add(-48*time.Hour), now.Add(-47*time.Hour), "old", false)
 	scope := storage.Default().RemoteState

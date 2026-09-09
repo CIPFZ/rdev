@@ -39,7 +39,7 @@ func startFinishedJob(t *testing.T, state string) string {
 
 func newJobState(t *testing.T) string {
 	t.Helper()
-	state := t.TempDir()
+	state := privateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestJobRecencyOrderHandlesMixedPrecisionAndTies(t *testing.T) {
 }
 
 func TestDirSizeFailsClosedWhenRecordCannotBeWalked(t *testing.T) {
-	if _, err := dirSize(filepath.Join(t.TempDir(), "missing")); err == nil {
+	if _, err := dirSize(filepath.Join(privateTempDir(t), "missing")); err == nil {
 		t.Error("missing job record was measured as zero bytes instead of returning an error")
 	}
 }
@@ -110,7 +110,7 @@ func TestJobRmFailsClosedWhenRecordChangesDuringMeasurement(t *testing.T) {
 				t.Fatal(err)
 			}
 			stamp := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
-			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 				ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: stamp,
 			}); err != nil {
 				t.Fatal(err)
@@ -481,7 +481,7 @@ func TestConcurrentSweepsHaveOneWinnerPerJob(t *testing.T) {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+			if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 				ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: stamp,
 			}); err != nil {
 				t.Fatal(err)

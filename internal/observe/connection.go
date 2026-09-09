@@ -35,6 +35,8 @@ type ConnectionActivity struct {
 type ConnectionSnapshot struct {
 	DialStarted       uint64            `json:"dial_started"`
 	DialSucceeded     uint64            `json:"dial_succeeded"`
+	DialFailed        uint64            `json:"dial_failed"`
+	DialCanceled      uint64            `json:"dial_canceled"`
 	DialInFlight      int64             `json:"dial_inflight"`
 	DialDurationNS    uint64            `json:"dial_duration_ns"`
 	MaxDialDurationNS uint64            `json:"max_dial_duration_ns"`
@@ -83,6 +85,11 @@ func (a *ConnectionActivity) Snapshot() ConnectionSnapshot {
 	out.DialDurationNS, out.MaxDialDurationNS, out.RetryAttempts = a.durationNS.Load(), a.maxDurationNS.Load(), a.retries.Load()
 	for i, name := range dialStageNames {
 		out.DialFailures[name] = a.failures[i].Load()
+		if DialStage(i) == DialCanceled {
+			out.DialCanceled = out.DialFailures[name]
+		} else {
+			out.DialFailed += out.DialFailures[name]
+		}
 	}
 	return out
 }
@@ -95,4 +102,29 @@ func WithConnectionActivity(ctx context.Context, a *ConnectionActivity) context.
 func ConnectionActivityFromContext(ctx context.Context) *ConnectionActivity {
 	a, _ := ctx.Value(connectionActivityKey{}).(*ConnectionActivity)
 	return a
+}
+
+type connectionAggregateKey struct{}
+
+// WithConnectionAggregate adds one fixed administrative observer, preserving
+// the scheduler's existing principal observer. It does not record business
+// retries or introduce labels or an extensible list of observer registrations.
+func WithConnectionAggregate(ctx context.Context, a *ConnectionActivity) context.Context {
+	return context.WithValue(ctx, connectionAggregateKey{}, a)
+}
+
+// BeginConnectionDial fans actual transport setup into at most two existing
+// counters. Queue cancellation never calls this and is not an attempted dial.
+func BeginConnectionDial(ctx context.Context) func(DialStage, bool, time.Duration) {
+	primary := ConnectionActivityFromContext(ctx)
+	aggregate, _ := ctx.Value(connectionAggregateKey{}).(*ConnectionActivity)
+	if aggregate == primary {
+		aggregate = nil
+	}
+	primary.BeginDial()
+	aggregate.BeginDial()
+	return func(stage DialStage, succeeded bool, elapsed time.Duration) {
+		primary.EndDial(stage, succeeded, elapsed)
+		aggregate.EndDial(stage, succeeded, elapsed)
+	}
 }

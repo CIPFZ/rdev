@@ -974,7 +974,35 @@ must be explicitly labeled with `RDEV_RELEASE_ALLOW_DIRTY=1`.
 
 `make GO=/path/to/go verify-release` rechecks artifact hashes, embedded agents,
 Go build information, audit evidence and metadata binding. This is local evidence,
-not a hosted CI run or signed release. Formal signing, distribution notices,
-release channels, upgrade/rollback automation and production certification remain
-Phase8. [Phase7 acceptance](phase7-acceptance.md) records the current execution;
+not a hosted CI run or signed release. Phase8 adds separate signing/verification, linked-module notices, channel policy
+and remote transactions. Formal release identity and full production acceptance
+remain pending; see [Phase8 acceptance](phase8-acceptance.md). [Phase7 acceptance](phase7-acceptance.md) records the current execution;
 [Phase6 acceptance](phase6-acceptance.md) retains the prior source-bound evidence.
+
+
+### Release policy and agent transactions
+
+Use the administrator's private `~/.config/rdev/release-policy.json`, or set
+`RDEV_RELEASE_POLICY` in the trusted daemon environment. Shared clients cannot
+supply this path or their own trust root. Existing unsigned installations need an
+explicit dev opt-in; build stamped artifacts with `make all daemon`. Policy
+examples, signing commands, rotation/revocation rules and precise rollback
+permissions are maintained in [Phase8 acceptance](phase8-acceptance.md).
+
+The installed helper reconciles `.rdev-upgrade.json` under the permanent
+`.rdev-upgrade.lock` before a new upload. A same-digest connect still reconciles
+trust/journal state. Four upload slots and one prior known-good binary bound
+staging; a dead PID, ten-minute age and exact safe layout are all necessary for
+slot reclamation. Unknown/live/reused-PID objects are preserved. If all slots
+were abandoned during the very first bootstrap, no installed trusted helper
+exists: inspect the private namespace and remove only confirmed incomplete
+upload reservations during maintenance, then retry. Do not remove the active
+agent, only fallback, journal, state lease or mutation recovery evidence.
+
+Installation health uses ping/features/platform and a read-only state inspection.
+The transaction does not kill serving agents or detached jobs. Unconfirmed
+switch/rollback or lost transaction reply is ambiguous; query retained state and
+reconcile before assuming success. A committed cleanup warning means the new
+binary already took effect. Binary rollback is not state rollback. Drain old
+writers before migrating into the shared writer-lease regime; a new running job
+holds its lease until exit and blocks exclusive migration.

@@ -82,9 +82,10 @@ type Client struct {
 	callerID    string
 	callerIDErr error
 
-	lookup AgentLookup
-	dial   dialFunc
-	rsync  rsyncRunner
+	lookup      AgentLookup
+	dial        dialFunc
+	rsync       rsyncRunner
+	dialControl *dialControl
 
 	mu        sync.Mutex
 	bulkConns map[string]*bulkConnection
@@ -190,6 +191,7 @@ func New(lookup AgentLookup) *Client {
 		dialing:           make(map[string]chan struct{}),
 		latestPublication: make(map[string]uint64),
 		capabilities:      make(map[string]capabilityCacheEntry),
+		dialControl:       newDialControl(processDialSlots),
 	}
 	c.Hosts.SetHostChangeHook(c.invalidateHost)
 	c.Secrets.SetRedactionHook(c.Hosts.RecordRedactionHit)
@@ -198,8 +200,16 @@ func New(lookup AgentLookup) *Client {
 
 func (c *Client) invalidateHost(name string, generation uint64) {
 	c.mu.Lock()
+	prior, known := c.security[name]
 	delete(c.capabilities, name)
 	c.mu.Unlock()
+	// Only a real change to a previously configured identity resets backoff.
+	// Merely adding another alias must not bypass the canonical host's window.
+	if resolved, err := c.Hosts.Inspect(name); err == nil {
+		c.dialControl.identityChanged(&resolved.Host, known && prior.Generation != generation)
+	} else {
+		c.dialControl.identityChanged(nil, false)
+	}
 	detached := c.disconnectWithStatus(name, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: generation})
 	if resolved, err := c.Hosts.Resolve(name); err == nil {
 		c.Secrets.DeleteStaleHost(secrets.Scope(resolved.Scope), secretHostIdentity(resolved))
@@ -334,14 +344,13 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 	// Serialize setup for this host: bootstrap writes a shared temp file on the
 	// remote, so two concurrent dials would clobber each other.
 	lock := c.dialLock(resolved.Host.Name)
-	select {
-	case lock <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if err := c.dialControl.waitSetupLock(ctx, lock); err != nil {
+		return nil, err
 	}
 	defer func() { <-lock }()
 
 	for {
+		changed := c.dialControl.changes()
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -368,14 +377,29 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 		if failed.State == observe.SecurityFailed && failed.Generation == resolved.Generation {
 			return nil, fmt.Errorf("connection security initialization failed (%s); update the host secret declaration or explicitly register the scoped value", failed.Reason)
 		}
+		if target != "" {
+			current, err := c.ProtocolTargetIdentity(hostName)
+			if err != nil || current != target {
+				return nil, errors.New("approved target changed before connection setup")
+			}
+		}
+		permit, err := c.dialControl.reserve(ctx, resolved.Host, changed)
+		if errors.Is(err, errDialIdentityChanged) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
 
 		releaseIdentity, acquired := c.Hosts.AcquireIdentity(resolved.Host.Name, resolved.Generation, resolved.Fingerprint)
 		if !acquired {
+			permit.finish(false, nil)
 			continue
 		}
 		if target != "" {
 			current, err := c.ProtocolTargetIdentity(hostName)
 			if err != nil || current != target {
+				permit.finish(false, nil)
 				releaseIdentity()
 				return nil, errors.New("approved target changed before connection setup")
 			}
@@ -390,6 +414,7 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 		c.mu.Unlock()
 		st := c.Hosts.State(resolved.Host.Name)
 		if err := secrets.ValidateDeclarations(st.Secrets); err != nil {
+			permit.finish(false, nil)
 			c.Hosts.RecordSecretLoadFailure(observe.ReasonSecretInvalid, resolved.Host.Name)
 			c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{
 				State: observe.SecurityFailed, Generation: resolved.Generation,
@@ -404,12 +429,19 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 		}
 		c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, status)
 
-		conn, dialErr := c.dial(ctx, resolved.Host, c.lookup)
+		conn, dialErr := c.dial(observe.WithConnectionAggregate(ctx, &c.dialControl.activity), resolved.Host, c.lookup)
+		setupRejection := canonicalSetupRejection(dialErr)
+		permit.finish(ctx.Err() == nil && setupRejection == nil, dialErr)
 		if dialErr != nil {
 			if ctx.Err() != nil {
 				c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: resolved.Generation})
 				releaseIdentity()
 				return nil, ctx.Err()
+			}
+			if setupRejection != nil {
+				c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, ConnectionSecurityStatus{State: observe.SecurityCold, Generation: resolved.Generation})
+				releaseIdentity()
+				return nil, setupRejection
 			}
 			if len(st.Secrets) > 0 {
 				// Declared values are intentionally not available until the secure
@@ -708,7 +740,7 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			if firstErr != nil {
 				return nil, nil, fmt.Errorf("%w (reconnect failed: %v)", firstErr, c.redactErrWith(redactionSnapshot, err))
 			}
-			return nil, nil, c.redactErrWith(redactionSnapshot, err)
+			return nil, nil, &BeforeDispatchError{Cause: c.redactSetupErrWith(redactionSnapshot, err)}
 		}
 		identity := operationIdentity{Scope: pooled.scope, Host: pooled.host, State: st}
 		if firstIdentity == (secrets.HostIdentity{}) {
@@ -1124,6 +1156,9 @@ func (c *Client) redactTextWith(snapshot *secrets.Store, text string) string {
 func (c *Client) redactErrWith(snapshot *secrets.Store, err error) error {
 	if err == nil {
 		return nil
+	}
+	if before, ok := err.(*BeforeDispatchError); ok {
+		return &BeforeDispatchError{Cause: c.redactSetupErrWith(snapshot, before.Cause)}
 	}
 	msg := c.redactTextWith(snapshot, err.Error())
 	if msg == err.Error() {

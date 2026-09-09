@@ -1,6 +1,10 @@
 #!/bin/sh
 # Local executable gate only. It creates no hosted release and signs nothing.
 set -eu
+# Native Darwin trust-file ACL verification requires cgo. Cross-built agents
+# remain CGO=0; runtime platform certification is separate.
+case $(uname -s) in Darwin) CGO_ENABLED=1 ;; *) CGO_ENABLED=0 ;; esac
+export CGO_ENABLED
 cd "$(dirname "$0")/.."
 . scripts/release-tools.env
 RDEV_RELEASE_GO=${RDEV_RELEASE_GO:-go}
@@ -27,7 +31,7 @@ GOBIN="$RDEV_RELEASE_TOOLS" "$RDEV_RELEASE_GO" install "golang.org/x/vuln/cmd/go
 "$RDEV_RELEASE_GO" mod verify > "$RDEV_RELEASE_OUT/module-verify.txt"
 "$RDEV_RELEASE_GO" list -m -u -json all > "$RDEV_RELEASE_OUT/modules.json"
 "$RDEV_RELEASE_TOOLS/releasecheck" modules "$RDEV_RELEASE_OUT/modules.json"
-make GO="$RDEV_RELEASE_GO" all daemon
+make GO="$RDEV_RELEASE_GO" VERSION="${RDEV_RELEASE_TAG:-0.1.0-dev.0}" all daemon
 cp bin/rdevd "$RDEV_RELEASE_OUT/rdevd"
 cp bin/rdev "$RDEV_RELEASE_OUT/rdev"
 for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
@@ -41,5 +45,6 @@ for artifact in rdev rdevd rdev-agent-linux-amd64 rdev-agent-linux-arm64 rdev-ag
     "$RDEV_RELEASE_TOOLS/govulncheck" -mode=binary -json "$RDEV_RELEASE_OUT/$artifact" > "$report"
     "$RDEV_RELEASE_TOOLS/releasecheck" audit "$report"
 done
+"$RDEV_RELEASE_TOOLS/releasecheck" licenses "$RDEV_RELEASE_OUT" "$RDEV_RELEASE_GO"
 "$RDEV_RELEASE_TOOLS/releasecheck" generate "$RDEV_RELEASE_OUT" "$RDEV_RELEASE_PIN"
 printf 'release gate passed: %s (unsigned local artifacts and evidence)\n' "$RDEV_RELEASE_OUT"

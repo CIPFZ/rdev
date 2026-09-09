@@ -4,7 +4,9 @@
 
 ## 快速开始
 
-构建使用 `go.mod` 固定的 Go 1.26.8 工具链；Go 语言版本基线为 1.25。需要本地 OpenSSH；standalone 同步和共享 rsync preview 路径还需要本地、远端的 rsync。
+构建使用 `go.mod` 固定的 Go 1.26.8 工具链；Go 语言版本基线为 1.25。需要本地支持 SSHSIG 的 OpenSSH（8.2+）；standalone 同步和共享 rsync preview 路径还需要本地、远端的 rsync。
+
+首次连接前须配置管理员发行策略；当前开发构建需要显式 unsigned-dev opt-in。私有 policy 示例、签名候选与旧安装迁移步骤见 [Phase8 验收与操作](docs/phase8-acceptance.md#contracts-and-operation)。共享模式使用 rdevd 的策略。
 
 ```bash
 make GO="$(command -v go)" all daemon
@@ -219,11 +221,11 @@ shared `support HOST` 返回当前 principal 的权限快照；`permission_denie
 
 `rdev compat` / `rdev_compat` 从实际版本常量、错误注册表、配置结构和校验逻辑生成机器可读契约，覆盖 client/agent、client/broker、错误 code、host/broker config、project trust 和持久 state。
 
-standalone client/agent 当前协商 2–3，client/broker 协商 1，broker/agent 要求协议 3 保留 principal 身份。协议 2 只保留公共 unary 操作；依赖 v3 feature 的操作明确拒绝，不能获得 v3 取消、streaming 或去重保证。不相交或非法版本区间在业务请求前失败。N/N-1 指声明的协议/schema 范围，不代表任意前一发行版或任意配置字段都兼容；旧 broker 上没有的新路由会失败，不回退为 standalone。
+standalone client/agent 当前协商 2–3，client/broker 协商 1，broker/agent 要求协议 3 保留 principal 身份。协议 2 只保留公共 unary 操作；依赖 v3 feature 的操作明确拒绝，不能获得 v3 取消、streaming 或去重保证。不相交或非法版本区间在业务请求前失败。N/N-1 必须绑定实际发行源码与二进制；协议/schema 范围只说明协商边界，不代表发行组合已经认证；旧 broker 上没有的新路由会失败，不回退为 standalone。
 
 host/broker config 当前仍是无版本 JSON shape，两者对未知字段的处理不同，以 `compat` 为准。state 迁移只按声明的 legacy→current 方向进行；未来 schema、损坏记录和不支持组合不会被静默当作当前版本。错误 code 和 retry/execution-state 含义属于契约，未知 code 不应被猜成可重试。
 
-agent 上传比较 SHA-256；可比较的 clean build commit 时间阻止旧构建覆盖较新 agent，`-force-agent-upload` 是显式 per-host 例外。无 stamp、dirty tree 或不可比较的构建不能提供可靠的新旧顺序。这一保护不代替完整升级/回滚兼容认证。
+agent 上传须先通过管理员 release policy：默认 `~/.config/rdev/release-policy.json`，共享模式由 rdevd 读取自己的可信配置。stable/beta 验证 SSHSIG、渠道、版本 pin 与实际内嵌字节；unsigned dev 必须显式 opt-in。项目配置不能提供信任根或放宽渠道。签名 rollback 还需管理员为具体目标和 digest 授权，force 不绕过校验。远端每个安装目录使用跨进程锁、真实 hello/state readiness、原子切换与已知可用版本回退。详见 [Phase8 验收与操作](docs/phase8-acceptance.md)。
 
 ```bash
 make GO="$(command -v go)" release-gate
@@ -235,7 +237,7 @@ release gate 固定 `govulncheck v1.8.0` 和 `go.mod` 的 Go 工具链，联网�
 
 产物包含实际二进制、`manifest.json`、CycloneDX `sbom.cdx.json`、未签名 `provenance.intoto.json`、源码快照和审计报告；验证器核对产物摘要、构建信息、模块依赖及 metadata 对应关系。它是可执行的本地 gate，没有宣称托管 CI 已运行或 provenance 已由可信签名者认证。联网失败或 skipped 不是通过，实际执行证据以验收记录为准。
 
-完整签名发布、第三方许可/NOTICE 汇总、发布渠道、自动升级/回滚组合和生产规模认证仍属于 Phase8。上述命令不发布 release、不部署，也不修改仓库权限。
+Phase8 已加入独立 SSHSIG 签名/验签入口、实际链接依赖的 `THIRD_PARTY_NOTICES.txt`、渠道策略和升级事务；完整工程验收、正式发行身份、真实托管 CI、平台矩阵和 24h 认证状态见 [验收表](docs/phase8-acceptance.md)。默认 gate 仍生成 unsigned 本地产物，不发布 release 或部署。
 
 ## 开发与验证
 
@@ -272,7 +274,7 @@ internal/release/   发布检查、SBOM和provenance校验
 
 项目代码使用 MIT，见 [LICENSE](LICENSE)。依赖各有自己的许可证，以固定版本附带的 LICENSE/NOTICE 为准。MCP SDK 含 Apache-2.0/MIT 许可代码；其他模块的许可不能由本项目 MIT 自动替代。
 
-Go 二进制会链接使用到的依赖代码，包括 MCP SDK；`go.mod` 引用且未 vendor 不代表分发的二进制不含这些代码。分发源码或二进制时须遵守相应许可、版权及适用 NOTICE 义务。本阶段 SBOM 提供依赖基础，尚未宣称完整的分发许可/NOTICE 包已收齐；该发布收口保留在 Phase8。
+Go 二进制会链接使用到的依赖代码，包括 MCP SDK；`go.mod` 引用且未 vendor 不代表分发的二进制不含这些代码。分发源码或二进制时须遵守相应许可、版权及适用 NOTICE 义务。release gate 按六个实际二进制的链接模块版本收集原文 LICENSE/NOTICE/COPYING/COPYRIGHT 和 Go 工具链许可，生成有摘要绑定的 `THIRD_PARTY_NOTICES.txt`；最终分发须携带对应文件与 SBOM。实际收集结果与认证边界见 Phase8 验收表。
 
 ## 项目文档
 

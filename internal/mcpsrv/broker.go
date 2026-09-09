@@ -3,7 +3,6 @@ package mcpsrv
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/client"
@@ -272,22 +271,8 @@ func callBroker(ctx context.Context, socket string, owner broker.Owner, req brok
 	if err != nil {
 		return broker.Response{}, err
 	}
-	if !resp.OK {
-		if resp.Error != "" {
-			return broker.Response{}, errors.New(resp.Error)
-		}
-		return broker.Response{}, fmt.Errorf("broker %s failed", req.Operation)
-	}
-	if resp.Wire != nil {
-		if resp.Wire.Error != nil {
-			return broker.Response{}, resp.Wire.Error
-		}
-		if resp.Wire.Err != "" {
-			return broker.Response{}, errors.New(resp.Wire.Err)
-		}
-		if !resp.Wire.OK {
-			return broker.Response{}, fmt.Errorf("remote %s failed", req.Operation)
-		}
+	if err := resp.Failure(); err != nil {
+		return broker.Response{}, err
 	}
 	return resp, nil
 }

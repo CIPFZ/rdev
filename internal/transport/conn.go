@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/framewriter"
 	"github.com/CIPFZ/rdev/internal/observe"
@@ -302,6 +303,9 @@ func (l *lockedBuilder) String() string {
 type AgentBinary struct {
 	Data   []byte
 	SHA256 string
+	// Authorize is supplied by production CLI/broker lookup. Test/library callers
+	// are responsible for their own trusted artifact source.
+	Authorize func(context.Context, Host) (artifact.Decision, error)
 }
 
 // Dial establishes a connection, bootstrapping the agent when needed.
@@ -309,15 +313,14 @@ type AgentBinary struct {
 // lookup resolves an agent build for the remote platform. It is called only
 // when an upload is required, so a warm connection costs one ssh round trip.
 func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*AgentBinary, error)) (result *Conn, dialErr error) {
-	activity := observe.ConnectionActivityFromContext(ctx)
 	started := time.Now()
 	stage := observe.DialValidation
-	activity.BeginDial()
+	endDial := observe.BeginConnectionDial(ctx)
 	defer func() {
 		if ctx.Err() != nil && dialErr != nil {
 			stage = observe.DialCanceled
 		}
-		activity.EndDial(stage, dialErr == nil, time.Since(started))
+		endDial(stage, dialErr == nil, time.Since(started))
 	}()
 	normalized, err := NormalizeHost(host)
 	if err != nil {
@@ -717,26 +720,61 @@ func (c *Conn) effectiveResponseFrameLimit() int {
 //
 // A refusal is the default rather than a silent downgrade, since the failure it
 // prevents is invisible while it happens and confusing afterwards.
-func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA string) error {
+func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA string) (resultErr error) {
+	if bin == nil || len(bin.Data) == 0 || len(bin.Data) > 64<<20 {
+		return errors.New("agent bytes are empty")
+	}
+	// Check the actual bytes before the identical-installed shortcut and force.
+	actual := artifact.Hash(bin.Data)
+	if bin.SHA256 != "" && bin.SHA256 != actual {
+		return errors.New("agent lookup digest mismatch")
+	}
+	var decision artifact.Decision
+	if bin.Authorize != nil {
+		defer func() { observeRelease(ctx, decision, resultErr) }()
+		var err error
+		if decision, err = bin.Authorize(ctx, c.host); err != nil {
+			decision.Digest = actual
+			return err
+		}
+	}
 	want := bin.SHA256
 	if want == "" {
 		sum := sha256.Sum256(bin.Data)
 		want = hex.EncodeToString(sum[:])
 	}
 	if installedSHA != "" && installedSHA == want {
-		return nil // already current
+		if bin.Authorize != nil {
+			return c.reconcileAgent(ctx, decision, installedSHA)
+		}
+		return nil
+	}
+	if bin.Authorize != nil && installedSHA != "" {
+		// Only the version command is safe for legacy agents. Never send a new mode
+		// to an old main that could otherwise interpret it as ordinary serve startup.
+		probeCtx, cancel := context.WithTimeout(ctx, agentVersionTimeout)
+		out, err := c.runShell(probeCtx, `exec "$1" -version`, c.agentPath)
+		cancel()
+		if err == nil && strings.Contains("\n"+out, "\nrdev-installer 1\n") {
+			if err = c.recoverAgent(ctx); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Only reached when an upload is actually on the table, so the extra round
 	// trip is paid on first connect and after a rebuild, not on every warm one.
-	if installedSHA != "" && !c.host.ForceAgentUpload {
+	if installedSHA != "" && !c.host.ForceAgentUpload && (bin.Authorize == nil || decision.Unsigned) {
 		if err := c.checkNotDowngrade(ctx); err != nil {
 			return err
 		}
 	}
 
-	if _, err := c.runShell(ctx, `mkdir -p -- "$1/jobs"`, c.stateDir); err != nil {
+	if _, err := c.runShell(ctx, `set -eu; [ ! -L "$1" ]; mkdir -p -- "$1/jobs"; [ -d "$1" ]; chmod 700 -- "$1"`, c.stateDir); err != nil {
 		return fmt.Errorf("create remote dir: %w", err)
+	}
+	if bin.Authorize != nil {
+		return c.installAgentTransaction(ctx, bin.Data, want, installedSHA, decision)
 	}
 	return c.installAgent(ctx, bin.Data, want)
 }
@@ -832,10 +870,29 @@ published_by_us=0
 old_ident=
 old_digest=
 umask 077
-mkdir -- "$stage"
-owned=1
+if [ "${4-}" = transaction ]; then
+  slot=0
+  while [ "$slot" -lt 4 ]; do
+    stage="$(dirname "$target")/.rdev-upload-slot-$slot"
+    if mkdir -- "$stage" 2>/dev/null; then owned=1; break; fi
+    slot=$((slot + 1))
+  done
+  if [ "$owned" != 1 ]; then
+    printf 'RDEV_AGENT_INSTALL_NOT_SENT:upload_slots_full\n' >&2
+    exit 1
+  fi
+  file=$stage/agent
+  ready=$stage/ready
+  proof=$stage/published
+  old=$stage/old
+  failed=$stage/failed
+else
+  mkdir -- "$stage"
+  owned=1
+fi
 chmod 700 "$stage"
 set -C
+if [ "${4-}" = transaction ]; then printf '%s\n' "$$" > "$stage/owner"; fi
 exec 8> "$file"
 uid=$(id -u)
 if stat -c '%u:%h' -- "$file" >/dev/null 2>&1; then
@@ -893,7 +950,7 @@ publication_visible() {
 
 cleanup_staged() {
   cleanup_ok=1
-  if ! rm -f -- "$file" "$ready" "$proof" "$old" "$failed"; then
+  if ! rm -f -- "$file" "$ready" "$proof" "$old" "$failed" "$stage/owner"; then
     printf 'rdev agent staging cleanup failed\n' >&2
     cleanup_ok=0
   fi
@@ -1057,6 +1114,20 @@ exec 9<&-
 [ "$(ident "$ready")" = "$(ident "$fd")" ]
 state=VERIFIED
 
+if [ "${4-}" = transaction ]; then
+  # Executing an inode still open for writing returns ETXTBSY on real Unix.
+  # The private staging path and verified read descriptor retain its identity.
+  exec 9< "$ready"
+  [ "$(ident "$readfd")" = "$(ident "$fd")" ]
+  exec 8>&-
+  "$ready" -install-candidate "$(dirname "$target")" "$5" "$6"
+  state=COMMITTED
+  exec 8>&-
+  cleanup_staged
+  trap - EXIT HUP INT TERM
+  exit 0
+fi
+
 ln -- "$ready" "$proof"
 published_ident=$(ident "$fd")
 [ "$(ident "$proof")" = "$published_ident" ]
@@ -1150,6 +1221,25 @@ func agentInstallError(runErr error, stderr string) error {
 		if _, ok := strings.CutPrefix(line, agentInstallAmbiguousMarker); ok {
 			return &AgentInstallAmbiguousError{Detail: "remote reported an ambiguous publication outcome", Cause: runErr}
 		}
+		if phase, ok := strings.CutPrefix(line, "RDEV_AGENT_INSTALL_NOT_SENT:"); ok {
+			code := proto.CodeProcessInvalidState
+			switch phase {
+			case "state_readiness", "rollback_state":
+				code = proto.CodeStateIncompatible
+			case "identity", "verify", "installed_identity":
+				code = proto.CodeReleaseUntrusted
+			case "direction":
+				code = proto.CodeReleaseVersion
+			case "health", "previous_health":
+				code = proto.CodeUnsupportedFeature
+			case "upload_slots_full":
+				code = proto.CodeLimitExceeded
+			case "prepare", "stage", "backup", "lock", "switch", "verify_installed", "recovery_cleanup", "arguments", "rolled_back":
+			default:
+				phase = "rejected"
+			}
+			return fmt.Errorf("agent install %s: %w", phase, proto.NewError(code, "", proto.StateNotSent))
+		}
 		if _, ok := strings.CutPrefix(line, agentInstallCommittedMarker); ok {
 			return &AgentInstallCommittedError{Detail: "remote reported a committed publication with cleanup warning", Cause: runErr}
 		}
@@ -1157,10 +1247,32 @@ func agentInstallError(runErr error, stderr string) error {
 	return fmt.Errorf("secure agent install failed: %w", runErr)
 }
 
+// A disconnected helper may already have published or reconciled trust. Only
+// its explicit terminal marker can establish a more precise install outcome.
+func transactionInstallError(err error, detail string) error {
+	for _, line := range strings.Split(detail, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, agentInstallAmbiguousMarker) || strings.HasPrefix(line, agentInstallCommittedMarker) || strings.HasPrefix(line, "RDEV_AGENT_INSTALL_NOT_SENT:") {
+			return agentInstallError(err, detail)
+		}
+	}
+	return &AgentInstallAmbiguousError{Detail: "transaction response lost; remote journal must be reconciled", Cause: err}
+}
+
 // installAgent binds the upload to a cryptographically unpredictable,
 // exclusively-created staging object and atomically replaces the installed
 // agent only after identity and digest checks succeed.
 func (c *Conn) installAgent(ctx context.Context, data []byte, want string) error {
+	return c.installAgentMode(ctx, data, want, nil)
+}
+func (c *Conn) installAgentTransaction(ctx context.Context, data []byte, want, old string, d artifact.Decision) error {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	return c.installAgentMode(ctx, data, want, []string{"transaction", string(raw), old})
+}
+func (c *Conn) installAgentMode(ctx context.Context, data []byte, want string, extra []string) error {
 	suffixFn := c.stageSuffix
 	if suffixFn == nil {
 		suffixFn = randomStageSuffix
@@ -1170,7 +1282,7 @@ func (c *Conn) installAgent(ctx context.Context, data []byte, want string) error
 		return fmt.Errorf("name agent staging object: %w", err)
 	}
 	stage := c.stateDir + "/.rdev-agent.stage-" + suffix
-	args, err := c.sshArgs(shellCommand(installAgentScript, stage, c.agentPath, want)...)
+	args, err := c.sshArgs(shellCommand(installAgentScript, append([]string{stage, c.agentPath, want}, extra...)...)...)
 	if err != nil {
 		return err
 	}
@@ -1181,7 +1293,11 @@ func (c *Conn) installAgent(ctx context.Context, data []byte, want string) error
 	errBuf := &lockedBuilder{}
 	cmd.Stderr = errBuf
 	if err := cmd.Run(); err != nil {
-		return agentInstallError(err, errBuf.String())
+		detail := errBuf.String()
+		if len(extra) > 0 {
+			return transactionInstallError(err, detail)
+		}
+		return agentInstallError(err, detail)
 	}
 	return nil
 }
@@ -1913,4 +2029,39 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// AuthorizedBinary binds an administrator release decision to the bytes that
+// the transport actually uploads. Shared frontends cannot choose daemon roots.
+func AuthorizedBinary(data []byte, goos, goarch string) *AgentBinary {
+	return &AgentBinary{Data: data, SHA256: artifact.Hash(data), Authorize: func(ctx context.Context, h Host) (artifact.Decision, error) {
+		dir, err := ValidateRemoteDir(h.RemoteDir)
+		if err != nil {
+			return artifact.Decision{}, err
+		}
+		target := artifact.TargetKey(h.Addr, h.Port, dir)
+		return artifact.AuthorizeAgent(ctx, data, goos, goarch, target, h.ForceAgentUpload)
+	}}
+}
+
+func (c *Conn) reconcileAgent(ctx context.Context, d artifact.Decision, old string) error {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	_, err = c.runShell(ctx, `set -eu
+s=$(sha256sum "$1" 2>/dev/null || shasum -a 256 "$1")
+[ "${s%% *}" = "$4" ] || { printf 'RDEV_AGENT_INSTALL_NOT_SENT:verify\n' >&2; exit 1; }
+exec "$1" -install-candidate "$2" "$3" "$4"`, c.agentPath, c.stateDir, string(raw), old)
+	if err != nil {
+		return transactionInstallError(err, err.Error())
+	}
+	return nil
+}
+func (c *Conn) recoverAgent(ctx context.Context) error {
+	_, err := c.runShell(ctx, `exec "$1" -recover-upgrades "$2"`, c.agentPath, c.stateDir)
+	if err != nil {
+		return transactionInstallError(err, err.Error())
+	}
+	return nil
 }

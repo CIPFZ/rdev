@@ -274,3 +274,11 @@ func (r *Registry) Snapshot() Snapshot {
 	out.RedactionHits = r.redactionHits
 	return out
 }
+
+// Cardinality counts only this registry's enumerated counter series. It is not
+// a process-wide Prometheus collector count or a count of target log identities.
+func (s Snapshot) Cardinality() (current, bound int) {
+	current = 2 + len(s.SecurityRejects) + len(s.SecretLoadFailures) + len(s.SecretRejections) + len(s.ConnectionSecurityTransitions) + len(s.RequestEvents) + len(s.ProtocolEvents) + len(s.ResourceEvents) + len(s.DedupeEvents)
+	bound = 2 + len(securityReasons) + 2*len(secretReasons) + len(connectionSecurityStates) + len(requestEvents) + len(protocolEvents) + len(resourceEvents) + len(dedupeEvents)
+	return
+}

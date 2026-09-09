@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	statepkg "github.com/CIPFZ/rdev/internal/state"
 	"github.com/CIPFZ/rdev/internal/storage"
 )
 
@@ -131,6 +132,11 @@ func validatedJobDir(state, id string) (string, error) {
 			return "", processStateError("job root is not a private directory")
 		}
 		if st.Mode().Perm() != 0o700 {
+			lease, err := statepkg.AcquireWriter(filepath.Dir(root))
+			if err != nil {
+				return "", stateWriteError(err)
+			}
+			defer lease.Close()
 			if chmodErr := os.Chmod(root, 0o700); chmodErr != nil {
 				return "", chmodErr
 			}
@@ -280,17 +286,15 @@ func jobAlive(m *jobMeta, dir string) bool {
 }
 
 func readMeta(dir string) (*jobMeta, error) {
-	var m jobMeta
-	if err := readJSON(filepath.Join(dir, "meta.json"), &m); err != nil {
+	m, err := readMetaReadOnly(dir)
+	if err != nil {
 		return nil, err
 	}
-	if m.ID == "" {
-		return nil, processStateError("invalid job metadata")
+	// Validate schema before repairing legacy permissions.
+	if err := secureRecordFile(filepath.Join(dir, "meta.json")); err != nil {
+		return nil, err
 	}
-	if err := validateJobID(m.ID); err != nil || m.ID != filepath.Base(dir) {
-		return nil, processStateError("invalid job metadata id")
-	}
-	return &m, nil
+	return m, nil
 }
 
 func writeJSON(path string, v any) error {

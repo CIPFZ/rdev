@@ -27,7 +27,7 @@ func TestEffectiveEnvelopeRejectsUnsupportedControls(t *testing.T) {
 }
 
 func TestJobWallTimeoutKillsDescendantGroup(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}

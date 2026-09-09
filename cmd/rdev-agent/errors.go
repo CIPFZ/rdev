@@ -15,6 +15,7 @@ const (
 	agentNotFound
 	agentProcessStart
 	agentProcessState
+	agentStateWrite
 )
 
 type agentError struct {
@@ -51,6 +52,8 @@ func processStateError(message string) error {
 	return &agentError{kind: agentProcessState, cause: errors.New(message)}
 }
 
+func stateWriteError(cause error) error { return &agentError{kind: agentStateWrite, cause: cause} }
+
 // classifyAgentError is the sole agent error-to-wire boundary. Leaf errors keep
 // private diagnostics for local control flow, while the returned envelope is
 // registry-backed and never includes a path, argv, or raw OS message.
@@ -80,6 +83,8 @@ func classifyAgentError(err error, operationID string) *proto.ErrorEnvelope {
 			return proto.NewError(proto.CodeProcessStartFailure, operationID, proto.StateFailed)
 		case agentProcessState:
 			return proto.NewError(proto.CodeProcessInvalidState, operationID, proto.StateFailed)
+		case agentStateWrite:
+			return proto.NewError(proto.CodeProcessInvalidState, operationID, proto.StateNotSent)
 		}
 	}
 	if errors.Is(err, os.ErrNotExist) {

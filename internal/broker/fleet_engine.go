@@ -317,6 +317,7 @@ func (s *Service) runFleetHost(id string, index int, fresh bool) {
 	r := p.Runs[index]
 	ctx, cancel := context.WithCancel(s.observationCtx)
 	defer cancel()
+	ctx = s.ObserveRelease(ctx, AuditEvent{Owner: p.Owner.Key(), Operation: "fleet.execute", PlanRef: fleetHash(p.PlanID), HostRef: fleetHash(r.Host.HostID), Attempt: r.Attempt, OperationRef: OperationReference(Request{Wire: &proto.Request{OperationID: r.OperationID}}), TargetDigest: r.Host.TargetDigest, PolicyDigest: r.PolicyDigest, ApprovalID: r.ApprovalRef, DigestScope: "fleet", TargetScope: "fleet"})
 	wire := &proto.Request{Op: proto.OpJobStart, ClientID: p.Owner.ClientID, ProjectID: p.Owner.ProjectID, OperationID: r.OperationID, Job: cloneFleet(p.Spec.Job)}
 	var m *MutationIntent
 	if fresh {

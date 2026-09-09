@@ -2,8 +2,10 @@ package client
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/session"
 )
 
@@ -14,22 +16,44 @@ type bulkConnection struct {
 }
 
 func (c *Client) leasedBulkConn(ctx context.Context, host, target string) (pooledConnection, session.State, func(), error) {
-	// The base transport bootstraps and initializes secrets once. Keep its
-	// immutable identity lease through bulk setup, I/O and response redaction.
+	for {
+		pooled, state, release, err := c.leasedBulkConnAttempt(ctx, host, target)
+		if errors.Is(err, errDialIdentityChanged) {
+			continue
+		}
+		return pooled, state, release, err
+	}
+}
+
+func (c *Client) leasedBulkConnAttempt(ctx context.Context, host, target string) (pooledConnection, session.State, func(), error) {
+	changed := c.dialControl.changes()
+	// The base transport bootstraps and initializes secrets once. Capture its
+	// publication, then reacquire the identity after every admission wait.
 	base, st, releaseIdentity, err := c.leasedConnForTarget(ctx, host, target)
 	if err != nil {
 		return pooledConnection{}, session.State{}, nil, err
 	}
 	name := base.conn.Host().Name
 	lock := c.dialLock("bulk\x00" + name)
-	select {
-	case lock <- struct{}{}:
-	case <-ctx.Done():
-		releaseIdentity()
-		return pooledConnection{}, session.State{}, nil, ctx.Err()
+	releaseIdentity()
+	if hook := c.dialControl.testBeforeBulkLockWait; hook != nil {
+		hook()
+	}
+	if err := c.dialControl.waitSetupLock(ctx, lock); err != nil {
+		return pooledConnection{}, session.State{}, nil, err
 	}
 	defer func() { <-lock }()
+	releaseIdentity, valid := c.Hosts.AcquireIdentity(name, base.generation, base.fingerprint)
+	if !valid {
+		return pooledConnection{}, session.State{}, nil, errDialIdentityChanged
+	}
 	c.mu.Lock()
+	current, published := c.conns[name]
+	if !published || current.conn != base.conn || current.publication != base.publication {
+		c.mu.Unlock()
+		releaseIdentity()
+		return pooledConnection{}, session.State{}, nil, errDialIdentityChanged
+	}
 	entry := c.bulkConns[name]
 	if entry != nil && (entry.pooled.generation != base.generation || entry.pooled.fingerprint != base.fingerprint || entry.pooled.connectionFingerprint != base.connectionFingerprint) {
 		delete(c.bulkConns, name)
@@ -42,12 +66,48 @@ func (c *Client) leasedBulkConn(ctx context.Context, host, target string) (poole
 		entry.active++
 		entry.idleSince = time.Time{}
 		c.mu.Unlock()
+		st = c.Hosts.State(name)
 		return entry.pooled, st, c.bulkRelease(entry, releaseIdentity), nil
 	}
 	c.mu.Unlock()
-	conn, err := c.dial(ctx, base.conn.Host(), c.lookup)
+	// Waiting for backoff/global dial capacity must not pin host policy or its
+	// redaction generation. Reacquire and validate the exact base publication
+	// once admitted, before any SSH setup or business request.
+	releaseIdentity()
+	permit, err := c.dialControl.reserve(ctx, base.conn.Host(), changed)
+	if err != nil {
+		return pooledConnection{}, session.State{}, nil, err
+	}
+	releaseIdentity, valid = c.Hosts.AcquireIdentity(name, base.generation, base.fingerprint)
+	if !valid {
+		permit.finish(false, nil)
+		return pooledConnection{}, session.State{}, nil, errDialIdentityChanged
+	}
+	c.mu.Lock()
+	current, published = c.conns[name]
+	c.mu.Unlock()
+	if !published || current.conn != base.conn || current.publication != base.publication {
+		permit.finish(false, nil)
+		releaseIdentity()
+		return pooledConnection{}, session.State{}, nil, errDialIdentityChanged
+	}
+	if target != "" {
+		current, err := c.ProtocolTargetIdentity(host)
+		if err != nil || current != target {
+			permit.finish(false, nil)
+			releaseIdentity()
+			return pooledConnection{}, session.State{}, nil, errors.New("approved target changed before bulk connection setup")
+		}
+	}
+	st = c.Hosts.State(name)
+	conn, err := c.dial(observe.WithConnectionAggregate(ctx, &c.dialControl.activity), base.conn.Host(), c.lookup)
+	setupRejection := canonicalSetupRejection(err)
+	permit.finish(ctx.Err() == nil && setupRejection == nil, err)
 	if err != nil {
 		releaseIdentity()
+		if setupRejection != nil {
+			return pooledConnection{}, session.State{}, nil, setupRejection
+		}
 		return pooledConnection{}, session.State{}, nil, err
 	}
 	base.conn, base.bulk = conn, true

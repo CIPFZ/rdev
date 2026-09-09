@@ -10,13 +10,13 @@ import (
 )
 
 func TestJobListScopePrecedesPaginationAndTotals(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	for i, id := range []string{"owner-old", "owner-new", "other-newest"} {
 		dir := filepath.Join(state, "jobs", id)
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 			ID: id, PID: 999999, Argv: []string{"x"},
 			StartedAt: time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC).Format(time.RFC3339),
 		}); err != nil {

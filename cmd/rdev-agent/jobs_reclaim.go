@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	statepkg "github.com/CIPFZ/rdev/internal/state"
 )
 
 // jobRm deletes job records, either one by ID or a filtered sweep.
@@ -29,6 +30,11 @@ import (
 // than the disk usage. Such jobs come back in Skipped so the caller knows why
 // nothing happened.
 func jobRm(p *proto.JobParams, state string) (*proto.JobResult, error) {
+	lease, err := statepkg.AcquireWriter(state)
+	if err != nil {
+		return nil, stateWriteError(err)
+	}
+	defer lease.Close()
 	if p.ID != "" {
 		return jobRmOne(p.ID, state)
 	}

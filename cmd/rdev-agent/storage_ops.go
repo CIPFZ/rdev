@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
+	statepkg "github.com/CIPFZ/rdev/internal/state"
 	"github.com/CIPFZ/rdev/internal/storage"
 	"golang.org/x/sys/unix"
 )
@@ -100,6 +101,9 @@ func loadStoragePolicy(state string) (storage.Policy, string, error) {
 // permissions. readMeta uses secureRecordFile, which chmods legacy records;
 // status and doctor must not mutate those records while inspecting them.
 func readMetaReadOnly(dir string) (*jobMeta, error) {
+	if err := statepkg.CheckCompatible(filepath.Dir(filepath.Dir(dir))); err != nil {
+		return nil, stateWriteError(err)
+	}
 	path := filepath.Join(dir, "meta.json")
 	st, err := os.Lstat(path)
 	if err != nil {
@@ -108,9 +112,15 @@ func readMetaReadOnly(dir string) (*jobMeta, error) {
 	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
 		return nil, fmt.Errorf("%s is not an owned regular file", path)
 	}
+	if st.Size() > statepkg.MaxMetadataBytes {
+		return nil, processStateError("job metadata exceeds budget")
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := statepkg.ValidateRecordSchema(b); err != nil {
+		return nil, stateWriteError(err)
 	}
 	var m jobMeta
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -187,6 +197,15 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 }
 
 func storageGC(p *proto.StorageParams, state string) (*proto.StorageGCReport, error) {
+	if !p.DryRun {
+		lease, err := statepkg.AcquireWriter(state)
+		if err != nil {
+			return nil, stateWriteError(err)
+		}
+		defer lease.Close()
+	} else if err := statepkg.CheckCompatible(state); err != nil {
+		return nil, stateWriteError(err)
+	}
 	if p.MaxScanJobs < 0 || p.MaxScanJobs > storage.HardKeepLastJobs || p.MaxDeleteJobs < 0 || p.MaxDeleteJobs > storage.HardKeepLastJobs || p.MaxDeleteBytes < 0 || p.MaxDeleteBytes > storage.HardMaxBytes {
 		return nil, limitExceededError("storage gc bounds are outside the hard limit")
 	}

@@ -21,6 +21,16 @@ import (
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
+// privateTempDir models the 0700 state namespace created by the production agent.
+func privateTempDir(t testing.TB) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // TestMain lets the test binary act as its own job supervisor.
 //
 // jobStart re-execs os.Executable() with -supervise, which in production is the
@@ -57,7 +67,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestSupervisorCrashBeforeMetadataCleansRecord(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.MkdirAll(jobs, 0o755); err != nil {
 		t.Fatal(err)
@@ -203,7 +213,7 @@ func TestExecEnvAndStdin(t *testing.T) {
 }
 
 func TestExecCwd(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	res, err := doExec(&proto.ExecParams{Argv: []string{"pwd"}, Cwd: dir})
 	if err != nil {
 		t.Fatal(err)
@@ -243,7 +253,7 @@ func TestExecMaxOutputBytes(t *testing.T) {
 }
 
 func TestWriteThenReadRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "nested", "deep", "file.txt")
 	body := "line1\nline2 with \"quotes\"\n中文\n"
 
@@ -269,7 +279,7 @@ func TestWriteThenReadRoundTrip(t *testing.T) {
 }
 
 func TestWriteDefaultModeDoesNotWidenNewFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "private")
 	if _, err := doWrite(&proto.WriteParams{Path: path, Content: "secret"}); err != nil {
 		t.Fatal(err)
@@ -284,7 +294,7 @@ func TestWriteDefaultModeDoesNotWidenNewFile(t *testing.T) {
 }
 
 func TestWriteMode(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "script.sh")
 	if _, err := doWrite(&proto.WriteParams{Path: path, Content: "#!/bin/sh\n", Mode: 0o755}); err != nil {
 		t.Fatal(err)
@@ -299,7 +309,7 @@ func TestWriteMode(t *testing.T) {
 }
 
 func TestWriteAppend(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "log")
 	doWrite(&proto.WriteParams{Path: path, Content: "first\n"})
 	doWrite(&proto.WriteParams{Path: path, Content: "second\n", Append: true})
@@ -311,7 +321,7 @@ func TestWriteAppend(t *testing.T) {
 }
 
 func TestWriteAtomicOverwriteRetainsModeByDefault(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "mode")
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
@@ -336,7 +346,7 @@ func TestWriteAtomicOverwriteRetainsModeByDefault(t *testing.T) {
 }
 
 func TestWriteRejectsSymlinkTarget(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	target := filepath.Join(dir, "target")
 	link := filepath.Join(dir, "link")
 	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
@@ -358,7 +368,7 @@ func TestWriteRejectsSymlinkTarget(t *testing.T) {
 }
 
 func TestReadOffsetAndLimit(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "f")
 	os.WriteFile(path, []byte("0123456789"), 0o644)
 
@@ -378,7 +388,7 @@ func TestReadOffsetAndLimit(t *testing.T) {
 }
 
 func TestReadBinaryIsBase64(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "bin")
 	// A NUL byte would not survive a JSON string round-trip intact.
 	os.WriteFile(path, []byte{0x00, 0x01, 0xff}, 0o644)
@@ -393,7 +403,7 @@ func TestReadBinaryIsBase64(t *testing.T) {
 }
 
 func TestReadDirectoryErrors(t *testing.T) {
-	if _, err := doRead(&proto.ReadParams{Path: t.TempDir()}); err == nil {
+	if _, err := doRead(&proto.ReadParams{Path: privateTempDir(t)}); err == nil {
 		t.Error("reading a directory should error")
 	}
 }
@@ -417,7 +427,7 @@ func TestExpandHome(t *testing.T) {
 }
 
 func TestJobLifecycle(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +484,7 @@ func TestJobLifecycle(t *testing.T) {
 }
 
 func TestJobStartMetadataFailureRollsBackSupervisor(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +525,7 @@ func TestJobStartMetadataFailureRollsBackSupervisor(t *testing.T) {
 }
 
 func TestJobStartRetriesDuplicateID(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(state, "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -542,10 +552,10 @@ func TestJobStartRetriesDuplicateID(t *testing.T) {
 }
 
 func TestJobLogsGrepAndTail(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "j1")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "j1", Argv: []string{"x"}, PID: 1})
 	os.WriteFile(filepath.Join(dir, "stdout"),
 		[]byte("alpha\nbeta\nalpha2\ngamma\nalpha3\n"), 0o644)
 
@@ -564,7 +574,7 @@ func TestJobLogsGrepAndTail(t *testing.T) {
 }
 
 func TestJobLogsRejectsBadStream(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "j1")
 	os.MkdirAll(dir, 0o755)
 	if _, err := jobLogs(&proto.JobParams{ID: "j1", Stream: "bogus"}, state); err == nil {
@@ -573,7 +583,7 @@ func TestJobLogsRejectsBadStream(t *testing.T) {
 }
 
 func TestJobStatusUnknownID(t *testing.T) {
-	if _, err := jobStatus("nope", t.TempDir()); err == nil {
+	if _, err := jobStatus("nope", privateTempDir(t)); err == nil {
 		t.Error("an unknown job id should error")
 	}
 }
@@ -659,7 +669,7 @@ func TestCapWriterASCIITruncationUnaffected(t *testing.T) {
 // A SIGKILLed supervisor leaves its child orphaned to init. Reporting that as
 // "unknown" would hide work that is still running, so the child pid is probed.
 func TestOrphanedChildReportsRunning(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "orphan")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -672,7 +682,7 @@ func TestOrphanedChildReportsRunning(t *testing.T) {
 	}
 	defer live.Process.Kill()
 
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 		ID: "orphan", Argv: []string{"sleep", "30"}, PID: 999999,
 	})
 	writeJSON(filepath.Join(dir, "child.json"), map[string]any{"child_pid": live.Process.Pid})
@@ -693,10 +703,10 @@ func TestOrphanedChildReportsRunning(t *testing.T) {
 }
 
 func TestDeadJobWithNoChildIsUnknown(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "gone")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "gone", Argv: []string{"x"}, PID: 999999})
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "gone", Argv: []string{"x"}, PID: 999999})
 
 	info, err := jobStatus("gone", state)
 	if err != nil {
@@ -708,7 +718,7 @@ func TestDeadJobWithNoChildIsUnknown(t *testing.T) {
 }
 
 func TestJobStopKillsOrphanedChild(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "orphan2")
 	os.MkdirAll(dir, 0o755)
 
@@ -719,7 +729,7 @@ func TestJobStopKillsOrphanedChild(t *testing.T) {
 	pid := live.Process.Pid
 	go live.Wait() // reap so the probe below sees a real death, not a zombie
 
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "orphan2", Argv: []string{"sleep"}, PID: 999999})
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "orphan2", Argv: []string{"sleep"}, PID: 999999})
 	writeJSON(filepath.Join(dir, "child.json"), map[string]any{"child_pid": pid})
 
 	// Stopping must reach the child even though the supervisor is long gone,
@@ -738,7 +748,7 @@ func TestJobStopKillsOrphanedChild(t *testing.T) {
 }
 
 func TestJobWaitBlocksUntilExit(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	res, err := jobStart(&proto.JobParams{
@@ -774,7 +784,7 @@ func TestJobWaitBlocksUntilExit(t *testing.T) {
 }
 
 func TestJobWaitTimesOutWithoutAffectingJob(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	res, err := jobStart(&proto.JobParams{
@@ -803,7 +813,7 @@ func TestJobWaitTimesOutWithoutAffectingJob(t *testing.T) {
 }
 
 func TestJobWaitReturnsImmediatelyForFinishedJob(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	res, _ := jobStart(&proto.JobParams{
@@ -827,7 +837,7 @@ func TestJobWaitReturnsImmediatelyForFinishedJob(t *testing.T) {
 }
 
 func TestJobWaitRejectsBudgetAboveHardLimit(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	// Callers may lower budgets but cannot silently raise them past the absolute
@@ -839,13 +849,13 @@ func TestJobWaitRejectsBudgetAboveHardLimit(t *testing.T) {
 }
 
 func TestJobWaitUnknownID(t *testing.T) {
-	if _, err := jobWait(&proto.JobParams{ID: "nope"}, t.TempDir()); err == nil {
+	if _, err := jobWait(&proto.JobParams{ID: "nope"}, privateTempDir(t)); err == nil {
 		t.Error("an unknown job id should error")
 	}
 }
 
 func TestReadTail(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "log")
 	os.WriteFile(path, []byte("a\nb\nc\nd\ne\n"), 0o644)
 
@@ -859,7 +869,7 @@ func TestReadTail(t *testing.T) {
 }
 
 func TestReadTailFewerLinesThanRequested(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "log")
 	os.WriteFile(path, []byte("only\n"), 0o644)
 
@@ -887,7 +897,7 @@ func TestEveryJobOpIsRouted(t *testing.T) {
 }
 
 func TestHandleRejectsUnknownOp(t *testing.T) {
-	resp := handle(&proto.Request{Op: "not_a_real_op"}, t.TempDir())
+	resp := handle(&proto.Request{Op: "not_a_real_op"}, privateTempDir(t))
 	if resp.OK {
 		t.Error("an unknown op should not succeed")
 	}
@@ -899,7 +909,7 @@ func TestHandleRejectsUnknownOp(t *testing.T) {
 // Exercises the dispatcher rather than doJob directly, which is the layer that
 // was broken.
 func TestHandleRoutesJobWait(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	resp := handle(&proto.Request{
@@ -918,10 +928,10 @@ func TestHandleRoutesJobWait(t *testing.T) {
 // rotated or truncated. That used to compute a negative slice length and panic,
 // taking the whole agent -- and every job's only observer -- down with it.
 func TestJobLogsStaleOffsetPastEOF(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "j1")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "j1", Argv: []string{"x"}, PID: 1})
 	os.WriteFile(filepath.Join(dir, "stdout"), []byte("hello\n"), 0o644)
 
 	res, err := jobLogs(&proto.JobParams{ID: "j1", SinceOffset: 9999}, state)
@@ -938,10 +948,10 @@ func TestJobLogsStaleOffsetPastEOF(t *testing.T) {
 }
 
 func TestJobLogsNegativeOffsetIsInvalidRequest(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "j1")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "j1", Argv: []string{"x"}, PID: 1})
 	os.WriteFile(filepath.Join(dir, "stdout"), []byte("a\nb\n"), 0o644)
 
 	_, err := jobLogs(&proto.JobParams{ID: "j1", SinceOffset: -5}, state)
@@ -955,7 +965,7 @@ func TestJobLogsNegativeOffsetIsInvalidRequest(t *testing.T) {
 // encoding/json silently rewrites them to U+FFFD. base64 is what keeps the
 // content intact.
 func TestReadInvalidUTF8IsBase64(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "latin1.txt")
 	// Latin-1 "éè" plus 0xFF: invalid UTF-8, but contains no NUL byte.
 	os.WriteFile(path, []byte{0xE9, 0xE8, 0xFF, 'a', 'b'}, 0o644)
@@ -977,7 +987,7 @@ func TestReadInvalidUTF8IsBase64(t *testing.T) {
 }
 
 func TestReadValidUTF8StaysText(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "utf8.txt")
 	os.WriteFile(path, []byte("中文 ok"), 0o644)
 
@@ -997,7 +1007,7 @@ func TestReadValidUTF8StaysText(t *testing.T) {
 // base64'd rather than corrupted. This is a different path from capWriter's
 // trimming: doRead reports exact bytes at an offset, so it cannot drop the tail.
 func TestReadPartialRuneIsBase64(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "cut.txt")
 	os.WriteFile(path, []byte("中文"), 0o644)
 
@@ -1014,10 +1024,10 @@ func TestReadPartialRuneIsBase64(t *testing.T) {
 // One bad request must not take down the serve loop: a running job's only
 // observer is the agent process.
 func TestHandleSafelyContainsPanic(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "j1")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j1", Argv: []string{"x"}, PID: 1})
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "j1", Argv: []string{"x"}, PID: 1})
 	os.WriteFile(filepath.Join(dir, "stdout"), []byte("x\n"), 0o644)
 
 	// Now fixed, so this exercises the guard without relying on a live panic.
@@ -1057,7 +1067,7 @@ func TestIsJSONSafeText(t *testing.T) {
 // reading different job directories.
 
 func TestStateDirCustomAndDefault(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 
 	got, err := stateDir("")
@@ -1079,7 +1089,7 @@ func TestStateDirCustomAndDefault(t *testing.T) {
 		t.Errorf("jobs dir not created: %v", err)
 	}
 
-	abs := filepath.Join(t.TempDir(), "abs")
+	abs := filepath.Join(privateTempDir(t), "abs")
 	got, err = stateDir(abs)
 	if err != nil {
 		t.Fatal(err)
@@ -1101,10 +1111,10 @@ func TestStateDirCustomAndDefault(t *testing.T) {
 // Job logs are unbounded, so without a reclaim path the state dir grows for the
 // life of the machine.
 func TestJobRmByID(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "j1")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 		ID: "j1", Argv: []string{"x"}, PID: 999999,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	})
@@ -1131,11 +1141,11 @@ func TestJobRmByID(t *testing.T) {
 // Removing a live job's records would leave the process running with no way to
 // observe or stop it, which is worse than the disk usage.
 func TestJobRmSkipsRunningJob(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "live")
 	os.MkdirAll(dir, 0o755)
 	// os.Getpid() is certainly alive, so this job reads as running.
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 		ID: "live", Argv: []string{"sleep"}, PID: os.Getpid(),
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	})
@@ -1156,12 +1166,12 @@ func TestJobRmSkipsRunningJob(t *testing.T) {
 }
 
 func TestJobRmKeepLast(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	// Distinct StartedAt values so "newest" is well defined.
 	for i, id := range []string{"old1", "old2", "new1", "new2"} {
 		dir := filepath.Join(state, "jobs", id)
 		os.MkdirAll(dir, 0o755)
-		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 			ID: id, Argv: []string{"x"}, PID: 999999,
 			StartedAt: time.Date(2020, 1, 1+i, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 		})
@@ -1190,12 +1200,12 @@ func TestJobRmKeepLast(t *testing.T) {
 // Both filters must agree, so the combination is conservative rather than
 // surprising: a job inside the keep window stays even when it is old.
 func TestJobRmFiltersAreConjunctive(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	ancient := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
 	for _, id := range []string{"a", "b", "c"} {
 		dir := filepath.Join(state, "jobs", id)
 		os.MkdirAll(dir, 0o755)
-		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 			ID: id, Argv: []string{"x"}, PID: 999999, StartedAt: ancient,
 		})
 		writeJSON(filepath.Join(dir, "status.json"), map[string]any{
@@ -1214,12 +1224,12 @@ func TestJobRmFiltersAreConjunctive(t *testing.T) {
 }
 
 func TestJobRmOlderThanKeepsRecent(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	now := time.Now().UTC()
 	mk := func(id string, ended time.Time) {
 		dir := filepath.Join(state, "jobs", id)
 		os.MkdirAll(dir, 0o755)
-		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 			ID: id, Argv: []string{"x"}, PID: 999999,
 			StartedAt: ended.Format(time.RFC3339),
 		})
@@ -1240,7 +1250,7 @@ func TestJobRmOlderThanKeepsRecent(t *testing.T) {
 }
 
 func TestJobRmRequiresAFilter(t *testing.T) {
-	if _, err := jobRm(&proto.JobParams{}, t.TempDir()); err == nil {
+	if _, err := jobRm(&proto.JobParams{}, privateTempDir(t)); err == nil {
 		t.Error("job_rm with no id and no filters should error rather than wipe everything")
 	}
 }
@@ -1248,10 +1258,10 @@ func TestJobRmRequiresAFilter(t *testing.T) {
 // A missing EndedAt (supervisor died without recording status) falls back to
 // StartedAt rather than being treated as age zero and kept forever.
 func TestJobRmFallsBackToStartedAt(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := filepath.Join(state, "jobs", "noend")
 	os.MkdirAll(dir, 0o755)
-	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+	writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 		ID: "noend", Argv: []string{"x"}, PID: 999999,
 		StartedAt: time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339),
 	})
@@ -1266,7 +1276,7 @@ func TestJobRmFallsBackToStartedAt(t *testing.T) {
 }
 
 func TestListReturnsStructuredEntries(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("hello"), 0o644)
 	os.MkdirAll(filepath.Join(dir, "subdir"), 0o755)
 	os.Symlink(filepath.Join(dir, "file.txt"), filepath.Join(dir, "link"))
@@ -1303,7 +1313,7 @@ func TestListReturnsStructuredEntries(t *testing.T) {
 }
 
 func TestListLimitReportsTruncation(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	for _, n := range []string{"a", "b", "c", "d", "e"} {
 		os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644)
 	}
@@ -1324,7 +1334,7 @@ func TestListLimitReportsTruncation(t *testing.T) {
 }
 
 func TestListCursorPaginatesDeterministically(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	for _, n := range []string{"c", "a", "d", "b"} {
 		if err := os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644); err != nil {
 			t.Fatal(err)
@@ -1353,7 +1363,7 @@ func TestListCursorPaginatesDeterministically(t *testing.T) {
 }
 
 func TestListMaxBytesUsesEncodedEntrySize(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "汉字"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1368,7 +1378,7 @@ func TestListMaxBytesUsesEncodedEntrySize(t *testing.T) {
 }
 
 func TestListLargeDirectoryKeepsPageBounded(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	for i := 0; i < 12_000; i++ {
 		name := fmt.Sprintf("%05d", i)
 		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
@@ -1388,16 +1398,16 @@ func TestListLargeDirectoryKeepsPageBounded(t *testing.T) {
 }
 
 func TestListMissingDirErrors(t *testing.T) {
-	if _, err := doList(&proto.ListParams{Path: filepath.Join(t.TempDir(), "nope")}); err == nil {
+	if _, err := doList(&proto.ListParams{Path: filepath.Join(privateTempDir(t), "nope")}); err == nil {
 		t.Error("listing a missing directory should error")
 	}
 }
 
 func TestListRoutedThroughHandle(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644)
 
-	resp := handle(&proto.Request{Op: proto.OpList, List: &proto.ListParams{Path: dir}}, t.TempDir())
+	resp := handle(&proto.Request{Op: proto.OpList, List: &proto.ListParams{Path: dir}}, privateTempDir(t))
 	if !resp.OK {
 		t.Fatalf("list not routed: %q", resp.Err)
 	}
@@ -1407,7 +1417,7 @@ func TestListRoutedThroughHandle(t *testing.T) {
 }
 
 func TestJobRmRoutedThroughHandle(t *testing.T) {
-	resp := handle(&proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: "missing"}}, t.TempDir())
+	resp := handle(&proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: "missing"}}, privateTempDir(t))
 	if strings.Contains(resp.Err, "unknown op") {
 		t.Errorf("job_rm was not routed: %q", resp.Err)
 	}
@@ -1474,7 +1484,7 @@ func (l *lockedBuffer) String() string {
 // Handlers run concurrently, and they share the job state directory, so parallel
 // job_start calls must not collide on IDs or clobber each other's records.
 func TestConcurrentJobStartsAreIsolated(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	const n = 8
@@ -1557,10 +1567,10 @@ func TestJobLogsFastPathMatchesScan(t *testing.T) {
 		{"utf8", "中文\nline2\n", 2},
 	}
 	for _, c := range cases {
-		state := t.TempDir()
+		state := privateTempDir(t)
 		dir := filepath.Join(state, "jobs", "j")
 		os.MkdirAll(dir, 0o755)
-		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: "j", Argv: []string{"x"}, PID: 1})
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: "j", Argv: []string{"x"}, PID: 1})
 		os.WriteFile(filepath.Join(dir, "stdout"), []byte(c.body), 0o644)
 
 		fast, err := jobLogs(&proto.JobParams{ID: "j", TailLines: c.tail}, state)
@@ -1589,7 +1599,7 @@ func refTail(body string, n int) string {
 
 // A line longer than one read chunk must still be tailed correctly.
 func TestReadTailHugeLine(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "log")
 	huge := strings.Repeat("H", 300<<10) // 300 KB, spans several 64 KB chunks
 	os.WriteFile(path, []byte("first\n"+huge+"\nlast\n"), 0o644)
@@ -1611,7 +1621,7 @@ func TestReadTailHugeLine(t *testing.T) {
 }
 
 func TestReadTailStatusReportsBoundedScan(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "log")
+	path := filepath.Join(privateTempDir(t), "log")
 	body := bytes.Repeat([]byte{'x'}, int(proto.AbsoluteOutputBytes)+1024)
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
@@ -1627,7 +1637,7 @@ func TestReadTailStatusReportsBoundedScan(t *testing.T) {
 
 // The scan cap must not corrupt output when the tail exceeds it.
 func TestReadTailBeyondScanCap(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	path := filepath.Join(dir, "log")
 	var sb strings.Builder
 	for i := 0; i < 100; i++ {
@@ -1652,7 +1662,7 @@ func TestReadTailBeyondScanCap(t *testing.T) {
 // Waiting on N jobs used to cost N serial blocking calls, each re-sending the
 // same context. One call now covers a batch under a shared deadline.
 func TestJobWaitManyReturnsAllOutcomes(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	// Two jobs with different exit codes, so results cannot be confused.
@@ -1706,7 +1716,7 @@ func TestJobWaitManyReturnsAllOutcomes(t *testing.T) {
 // One unknown id must not fail the whole call: the other jobs still have useful
 // answers, and a batch assembled from several places can easily carry a stale id.
 func TestJobWaitManyReportsBadIDPerJob(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	resp := handleSafely(&proto.Request{
@@ -1739,7 +1749,7 @@ func TestJobWaitManyReportsBadIDPerJob(t *testing.T) {
 // wait_any lets a caller react to the first finisher -- usually the first failure
 // in a batch -- without waiting out the slowest job.
 func TestJobWaitAnyReturnsBeforeSlowJob(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 
 	start := func(argv ...string) string {
@@ -1792,7 +1802,7 @@ func TestJobWaitAnyReturnsBeforeSlowJob(t *testing.T) {
 
 // A duplicated id would otherwise be polled twice per round for no benefit.
 func TestJobWaitManyDeduplicates(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 	resp := handleSafely(&proto.Request{
 		Op:  proto.OpJobStart,
@@ -1810,7 +1820,7 @@ func TestJobWaitManyDeduplicates(t *testing.T) {
 }
 
 func TestJobWaitManyRejectsNoUsableIDs(t *testing.T) {
-	if _, err := jobWait(&proto.JobParams{IDs: []string{"", ""}}, t.TempDir()); err == nil {
+	if _, err := jobWait(&proto.JobParams{IDs: []string{"", ""}}, privateTempDir(t)); err == nil {
 		t.Error("a list of empty ids should error rather than wait on nothing")
 	}
 }
@@ -1818,7 +1828,7 @@ func TestJobWaitManyRejectsNoUsableIDs(t *testing.T) {
 // A still-running job at deadline is reported as running, with TimedOut set, and
 // is left untouched so the caller can wait again.
 func TestJobWaitManyTimesOutWithoutAffectingJobs(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	os.MkdirAll(filepath.Join(state, "jobs"), 0o755)
 	resp := handleSafely(&proto.Request{
 		Op:  proto.OpJobStart,
@@ -1843,13 +1853,13 @@ func TestJobWaitManyTimesOutWithoutAffectingJobs(t *testing.T) {
 // The limit bounds the returned records after the metadata-defined global order
 // is known. Total still reports every directory seen.
 func TestJobListLimitAndTotals(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	root := filepath.Join(state, "jobs")
 	os.MkdirAll(root, 0o755)
 	for i := 0; i < 12; i++ {
 		dir := filepath.Join(root, fmt.Sprintf("2026010%d-000000-%04x", i%10, i))
 		os.MkdirAll(dir, 0o755)
-		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 			ID: filepath.Base(dir), Argv: []string{"x"}, PID: 999999,
 			StartedAt: time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC).Format(time.RFC3339),
 		})
@@ -1880,7 +1890,7 @@ func TestJobListLimitAndTotals(t *testing.T) {
 // filesystem state. Drive the real handler across the jobs directory's full
 // lifecycle so a missing directory cannot turn an invalid limit into success.
 func TestJobListLimitValidatedBeforeJobsDirectoryAccess(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	jobsRoot := filepath.Join(state, "jobs")
 	type stateStep struct {
 		name  string
@@ -1947,7 +1957,7 @@ func TestJobListLimitValidatedBeforeJobsDirectoryAccess(t *testing.T) {
 // equal-nanosecond ID ties, an old outlier, a damaged record, and every limit
 // boundary in one deterministic fixture.
 func TestJobListLimitUsesGlobalMetadataOrderAndMatchesSweep(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	root := filepath.Join(state, "jobs")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -1972,7 +1982,7 @@ func TestJobListLimitUsesGlobalMetadataOrderAndMatchesSweep(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 			ID: id, Argv: []string{"true"}, PID: 999999, StartedAt: startedAt,
 		}); err != nil {
 			t.Fatal(err)
@@ -2068,13 +2078,13 @@ func TestJobListLimitUsesGlobalMetadataOrderAndMatchesSweep(t *testing.T) {
 }
 
 func TestJobListUnlimitedReportsNoTruncation(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	root := filepath.Join(state, "jobs")
 	os.MkdirAll(root, 0o755)
 	for i := 0; i < 3; i++ {
 		dir := filepath.Join(root, fmt.Sprintf("20260101-00000%d-aaaa", i))
 		os.MkdirAll(dir, 0o755)
-		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{
+		writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1,
 			ID: filepath.Base(dir), Argv: []string{"x"}, PID: 999999,
 			StartedAt: "2026-01-01T00:00:00Z",
 		})

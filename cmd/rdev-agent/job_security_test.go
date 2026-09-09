@@ -9,7 +9,7 @@ import (
 )
 
 func TestJobIDRejectsPathBearingValues(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	for _, id := range []string{"../escape", "..", "/tmp/x", `a\\b`, "a\x00b", "a/b"} {
 		if _, err := jobStatus(id, state); err == nil {
 			t.Errorf("jobStatus accepted malicious id %q", id)
@@ -22,7 +22,7 @@ func TestJobIDRejectsPathBearingValues(t *testing.T) {
 }
 
 func TestJobStartUsesPrivateRecordsAndIdentity(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	res, err := jobStart(&proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"sleep", "2"}}}, state)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestJobStartUsesPrivateRecordsAndIdentity(t *testing.T) {
 }
 
 func TestJobStopRefusesIdentityMismatch(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	res, err := jobStart(&proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"sleep", "3"}}}, state)
 	if err != nil {
 		t.Fatal(err)

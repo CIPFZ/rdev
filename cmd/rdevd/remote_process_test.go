@@ -213,6 +213,9 @@ func newRemoteRuntime(t *testing.T) (*runtimeDaemon, string, func(string) ([]byt
 	}
 	d := newRuntimeDaemon(t, bin)
 	namespace := ".cache/rdev-phase5-" + filepath.Base(d.dir)
+	if prefix := os.Getenv("RDEV_TEST_NAMESPACE_PREFIX"); prefix != "" {
+		namespace = prefix + "/" + filepath.Base(d.dir)
+	}
 	sshRun := func(script string) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -249,7 +252,11 @@ func newRemoteRuntime(t *testing.T) (*runtimeDaemon, string, func(string) ([]byt
 	if err := os.WriteFile(hostsPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d.extraArgs = []string{"-hosts-file", hostsPath, "-agent-dir", filepath.Join(repoRoot(t), "cmd", "rdev", "agents")}
+	agentDir := os.Getenv("RDEV_TEST_AGENT_DIR")
+	if agentDir == "" {
+		agentDir = filepath.Join(repoRoot(t), "cmd", "rdev", "agents")
+	}
+	d.extraArgs = []string{"-hosts-file", hostsPath, "-agent-dir", agentDir}
 	return d, namespace, sshRun
 }
 

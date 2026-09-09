@@ -13,7 +13,7 @@ import (
 )
 
 func TestStorageOpsStatusGCAndDoctor(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	if err := os.Chmod(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestStorageOpsStatusGCAndDoctor(t *testing.T) {
 }
 
 func TestStorageDoctorIsNonMutatingAndFindsTombstone(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	root := filepath.Join(state, "jobs")
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestStorageDoctorIsNonMutatingAndFindsTombstone(t *testing.T) {
 }
 
 func TestStorageReadOnlyOperationsDoNotRepairModesOrCreateRoots(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	root := filepath.Join(state, "jobs")
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -118,14 +118,14 @@ func TestStorageReadOnlyOperationsDoNotRepairModesOrCreateRoots(t *testing.T) {
 	if st.Mode().Perm() != 0o644 {
 		t.Fatalf("status repaired metadata mode: %o", st.Mode().Perm())
 	}
-	missing := filepath.Join(t.TempDir(), "missing")
+	missing := filepath.Join(privateTempDir(t), "missing")
 	if _, err := storageStatus(&proto.StorageParams{}, missing); err == nil {
 		t.Fatal("status unexpectedly created a missing jobs root")
 	}
 }
 
 func TestStorageDoctorDoesNotRepairExistingLockMode(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	root := filepath.Join(state, "jobs")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func TestStorageDoctorDoesNotRepairExistingLockMode(t *testing.T) {
 }
 
 func TestStorageGCHonorsConfiguredCleanupBudget(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	p := storage.Default()
 	p.Cleanup.MaxDeleteJobs = 1
 	if err := storage.Save(filepath.Join(state, "storage-policy.json"), p); err != nil {
@@ -167,7 +167,7 @@ func TestStorageGCHonorsConfiguredCleanupBudget(t *testing.T) {
 }
 
 func TestStorageRejectsUnsafeScopeAndBounds(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	if _, err := doStorage(proto.OpStorageStatus, &proto.StorageParams{Scope: "../../x"}, state); err == nil {
 		t.Fatal("unsafe scope accepted")
 	}
@@ -177,7 +177,7 @@ func TestStorageRejectsUnsafeScopeAndBounds(t *testing.T) {
 }
 
 func TestStorageMetricsConcurrentUpdatesAndLedgerAccounting(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	root := filepath.Join(state, "jobs")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestStorageMetricsConcurrentUpdatesAndLedgerAccounting(t *testing.T) {
 }
 
 func TestStorageMetricsLockRejectsSymlink(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	victim := filepath.Join(state, "victim")
 	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)

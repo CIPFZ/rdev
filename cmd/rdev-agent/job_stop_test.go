@@ -32,7 +32,7 @@ func TestLegacyStopSupervisorHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{ID: filepath.Base(dir), PID: os.Getpid(), ProcessIdentity: identity}); err != nil {
+	if err := writeJSON(filepath.Join(dir, "meta.json"), &jobMeta{SchemaVersion: 1, ID: filepath.Base(dir), PID: os.Getpid(), ProcessIdentity: identity}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeJSON(filepath.Join(dir, "child.json"), map[string]int{"child_pid": child.Process.Pid}); err != nil {
@@ -50,7 +50,7 @@ func TestLegacyStopSupervisorHelper(t *testing.T) {
 }
 
 func TestJobStopTermPreservesLegacySupervisorFlush(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	dir := jobDir(state, "legacy-stop")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestJobStopTermPreservesLegacySupervisorFlush(t *testing.T) {
 }
 
 func TestJobStopTermRetainsSupervisorOutputAndChildIdentity(t *testing.T) {
-	state := t.TempDir()
+	state := privateTempDir(t)
 	ready := filepath.Join(state, "ready")
 	job, err := jobStart(&proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"sh", "-c", `trap 'printf stopped; exit 0' TERM; printf ready; touch "$1"; while :; do sleep 1; done`, "job-test", ready}}}, state)
 	if err != nil {
