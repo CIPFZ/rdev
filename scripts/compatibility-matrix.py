@@ -108,6 +108,9 @@ def cases(current, previous):
         ('fleet-approval-attempt-upgrade-continuity', 'TestRemotePhase8FleetCompatibility', base,
          {'client': 'current test wire', 'broker': 'previous -> current -> previous -> current',
           'agent': 'previous -> current; broker rollback retains current agent'}),
+        ('secret-sync-outcome-upgrade-continuity', 'TestRemotePhase8RetainedStateCompatibility', base,
+         {'client': 'current test wire', 'broker': 'previous creates archive/outcomes -> current recovers old pre-ACK outcome -> SIGKILL/restart -> previous broker-only rollback -> current',
+          'agent': 'previous -> current -> SIGKILL/reconnect; no agent rollback or schema migration'}),
     ]
 
 
@@ -206,7 +209,7 @@ def main():
               'embedded_check': 'CLI version 12-hex SHA256 prefix comparison; not full embedded-byte proof', 'cases': [],
               'production_certification': 'pending', 'boundary': 'one authorized Linux amd64 SSH endpoint; private namespace per test; explicit unsigned-dev migration; actual CLI/MCP and state subsets only',
               'unverified_combinations': ['formal N/N-1 releases on every Tier1 platform', 'historical channel/pin/signed rollback matrix',
-                                          'full schema migration/legacy writer fencing', 'secret archive/sync outcome historical rollback matrix',
+                                          'full schema migration/legacy writer fencing', 'formal historical secret archive/sync outcome agent rollback and schema migration',
                                           'peers actually lacking job_resource_envelope or durable_job_start; e73 has both']}
     for index, (name, test, overrides, components) in enumerate(selected):
         started = timestamp()
