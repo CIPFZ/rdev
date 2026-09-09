@@ -1061,22 +1061,22 @@ Phase 3 完成记录：
 | P5-15 | 实现 launchd/systemd user service、readiness 和 single-instance recovery | P5-03 | stale socket 可恢复，READY 前不接受请求，其他 OS 用户不能连接 |
 | P5-16 | 实现 config parse/validate/swap reload 和 bounded drain shutdown | P5-15 | reload 失败保留旧配置；shutdown 不重放或丢失 mutation 状态 |
 
-多 Agent Gate：
+多 Agent Gate（2026-09-09：Linux 实测、独立评审与最终整体验证通过）：
 
-- [x] 20 个本地 client 同时访问一台 host，只有一个基础 transport/agent 会话。2026-09-08 真 SSH 运行时通过（20 进程、3 × 500 请求）；见 `docs/phase5-runtime-evidence.md`，其余 Gate 与独立 review 仍未完成。
-- [ ] 每 client 的配额和取消互不影响。
-- [ ] 长 exec、job wait、status 和 sync 混合负载下没有饥饿。
-- [x] bulk lane 空闲后按 TTL 自动退出。2026-09-08 提交 `6f62f60` 的三轮真 SSH 负载验证独立 bulk transport、1 秒 TTL + 5 秒 sweep 回收及基础 agent 保留；见 `docs/phase5-runtime-evidence.md`。独立 review 和其余 Gate 仍未完成。
-- [ ] broker 崩溃重启后不会重复执行 mutation。
-- [ ] 连接状态、client 配额、queue wait、lane 流量和 eviction reason 可通过 `status/doctor` 观察。
-- [ ] 未授权 client 无法使用 host、secret、job 或 Fleet capability。 2026-09-09 `4bfdf06` 补齐保留 Fleet operation 的真实拒绝矩阵（跨项目、capability/wire/approval 替换、SIGKILL 前后）；完整权限 Gate 和独立 review 仍未完成。
-- [ ] destructive approval 绑定精确目标 snapshot 和 operation digest。
-- [ ] broker reload、升级和异常退出不影响已脱离 SSH 的后台 job。 2026-09-09 `4ded2a4` 验证两版旧 daemon/agent 经 TERM 或 SIGKILL 后升级的 12 个真实场景，保留原 supervisor PID/二进制摘要、owner 与日志，并修复旧 supervisor TERM 日志丢失；更广 schema/rollback 和独立 review 仍未完成。
+- [x] 20 个本地 client 同时访问一台 host，只有一个基础 transport/agent 会话。
+- [x] 每 client 的配额和取消互不影响。
+- [x] 长 exec、job wait、status 和 sync 混合负载下没有饥饿。
+- [x] bulk lane 空闲后按 TTL 自动退出。
+- [x] broker 崩溃重启后不会重复执行 mutation。
+- [x] 连接状态、client 配额、queue wait、lane 流量和 eviction reason 可通过 `status/doctor` 观察。
+- [x] 未授权 client 无法使用 host、secret、job 或 Fleet capability。
+- [x] destructive approval 绑定精确目标 snapshot 和 operation digest。
+- [x] broker reload、升级和异常退出不影响已脱离 SSH 的后台 job。
 
-Phase5 的当前状态、剩余条件和运行证据统一维护在
+Phase5 已按用户确认的范围完成。逐项验收和可复现证据统一维护在
 [`phase5-acceptance.md`](phase5-acceptance.md) 与
-[`phase5-runtime-evidence.md`](phase5-runtime-evidence.md)。独立评审和 macOS
-实测尚未完成，不将已通过的 Linux runtime 检查等同于 Phase5 Complete。
+[`phase5-runtime-evidence.md`](phase5-runtime-evidence.md)。用户于 2026-09-09
+明确将 macOS 实测延期为平台验证后续项；macOS runtime 尚未验证。
 
 ### Phase 6：CLI、兼容性、文档和发布收口
 

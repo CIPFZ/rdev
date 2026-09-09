@@ -68,7 +68,8 @@ failures or pre-commit runs as successful committed-source evidence.
 | <a id="6d2eeb3"></a>`6d2eeb3` — Shared sync previews | Real CLI/MCP/rsync/SSH preview, delete grants, bounded output, descendant cancellation and peer preservation. | `remote-sync-preview` | [log](evidence/phase5/2026-09-09/committed-shared-sync-6d2eeb3.log) | [log](evidence/phase5/2026-09-09/shared-sync-race.log) | [log](evidence/phase5/2026-09-09/shared-sync-actual-race.log) |
 | <a id="5e2d9dc"></a>`5e2d9dc` — Complete source scans | Same-size/same-mtime 5 MiB content changes detected; entry/content caps and unchanged destination verified. | `remote-sync-preview` | [log](evidence/phase5/2026-09-09/committed-sync-manifest-5e2d9dc.log) | [log](evidence/phase5/2026-09-09/sync-manifest-full-race.log) | [log](evidence/phase5/2026-09-09/sync-manifest-actual-race.log) |
 | <a id="9cf6103"></a>`9cf6103` — Prepared shared sync | Real CLI/MCP + SSH retained push/pull/delete; source drift, target drift, exact approvals, pre-ACK daemon SIGKILL recovery, CLI cancellation and peer preservation; fixed deletion scopes and binary staging also tested. | `remote-sync-execution` | [log](evidence/phase5/2026-09-09/prepared-sync-9cf6103.log) | [log](evidence/phase5/2026-09-09/prepared-sync-race-9cf6103.log) | [log](evidence/phase5/2026-09-09/prepared-sync-process-race.log) |
-| <a id="9097f5d"></a>`9097f5d` — Mixed workload and sync accounting | Seven measurement processes run exec, job wait/status and two 12 MiB syncs at 2 MiB/s aggregate; control p95 0.82–0.99× baseline (1.07–1.16× with actual daemon/CLI race). Separate concurrent uploader SIGKILL releases reservations and preserves peer progress/base PID. CLI/MCP resource isolation and independent SSH byte totals match; idle bulk closes. Linux check/race/stress/readiness/systemd suite passed; macOS/review remain. | `remote-mixed-qos` | [combined log](evidence/phase5/2026-09-09/mixed-qos-9097f5d.log) | Full repository race in combined log | Actual daemon and CLI/MCP race in combined log; remote agent uninstrumented |
+| <a id="9097f5d"></a>`9097f5d` — Mixed workload and sync accounting | Seven measurement processes run exec, job wait/status and two 12 MiB syncs at 2 MiB/s aggregate; control p95 0.82–0.99× baseline (1.07–1.16× with actual daemon/CLI race). Separate concurrent uploader SIGKILL releases reservations and preserves peer progress/base PID. CLI/MCP resource isolation and independent SSH byte totals match; idle bulk closes. Linux check/race/stress/readiness/systemd suite passed; final review is recorded below and macOS runtime is deferred by the user. | `remote-mixed-qos` | [combined log](evidence/phase5/2026-09-09/mixed-qos-9097f5d.log) | Full repository race in combined log | Actual daemon and CLI/MCP race in combined log; remote agent uninstrumented |
+| <a id="phase5-review"></a>`29b5f08` — Independent review closeout | All confirmed findings resolved: audit/hello, filtered sync/layout/expiry, active-host fairness and per-job shared waits with bounded horizons. Final check, full race, 100-round stress, Linux service lifecycle, real SSH varied waits/history/sync/audit/warm pool and mixed workload passed. | `check stress-broker smoke-rdevd remote-phase5-runtime remote-wait remote-events remote-sync-execution remote-audit-routes remote-warm-pool remote-mixed-qos` | [Combined final log](evidence/phase5/2026-09-09/independent-review-final-29b5f08.log) | Full repository race in combined log | Actual daemon and CLI/MCP race; remote agent uninstrumented |
 
 Additional final-source checks preserve coverage not contained in those runtime
 logs, including the final test refinements after broader race runs:
@@ -84,6 +85,25 @@ logs, including the final test refinements after broader race runs:
 - [shared-sync-local-processes](evidence/phase5/2026-09-09/shared-sync-local-processes.log).
 - [sync-manifest-core-race](evidence/phase5/2026-09-09/sync-manifest-core-race.log).
 - [sync-manifest-guards](evidence/phase5/2026-09-09/sync-manifest-guards.log).
+
+## Independent review closure
+
+Three fresh reviewer agents independently reviewed `8652849`. Confirmed defects
+were fixed and cross-reviewed; the author was not the sole reviewer of a fix.
+The final integrated production source is `29b5f08`; validation logs identify
+the documentation-only working-tree changes separately.
+
+| Reviewer | Findings and corrections | Final independent result |
+|---|---|---|
+| `phase5_authority_review` | Missing request/target audit digests, invalid hello replies and uncancellable handshake; fixed by `e87b88f` (authored as `a4f108f`) | Sync reviewer approved audit/handshake fixes. Authority reviewer cross-reviewed concurrency and independently verified the final horizon correction. |
+| `phase5_sync_review` | Excluded descendants during replacement, destination trailing slash, missing single-file directory target, invalid UTF-8 operands, executing-plan reservation expiry and missing directory-target layout; fixed by `23f7393` and `0e179c1` | Sync reviewer approved both commits after independent local pipeline/rsync comparison and targeted race. Real SSH regression passed. |
+| `phase5_concurrency_review` | Active-host starvation and parameter-dependent duplicate wait observers; fixed by `f426034`. Cross-review found queued observation expiry leakage; fixed by `29b5f08`. `418c20b` verifies fair cold-host handoff while the original job survives. | Authority reviewer confirmed the fixes and lifecycle test semantics. Final real 20-process variants, cold-host handoff, history, mixed-load and race checks passed. |
+
+Wait cancellation joins the broker dispatch callback before an extended-horizon
+retry. This is not a claim that a disconnected remote `ObserveOnly` handler
+instantly exits; the remote wait hub still coalesces job observation work.
+No confirmed review findings remain open in this Phase5 scope. macOS runtime is
+explicitly deferred by the user, not reported as passing.
 
 ## Failure and regression evidence
 
@@ -111,8 +131,9 @@ index identifies the correction and successful checks.
   loss, not complete retention through SIGKILL or a 24-hour production soak.
 - Mixed exec/job/status/sync evidence comes from `remote-mixed-qos` in `9097f5d`.
 - Sync previews and source observations do not authorize immutable execution.
-- These batches have implementing-agent review only; independent review and
-  actual macOS launchd validation are still required.
+- Independent review and final integrated validation are complete in the entry
+  above. The user deferred actual macOS launchd validation on 2026-09-09; it
+  remains an unverified platform follow-up.
 
 Update the relevant row after a meaningful implementation batch. Keep the final
 runtime/check log, necessary race coverage and distinct failure regressions.

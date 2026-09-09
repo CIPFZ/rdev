@@ -88,13 +88,16 @@ hosts with active broker work; it no longer changes the per-host handler limit.
 Setup and detached cleanup still occupy slots. `warm_idle_ttl` defaults to five
 minutes and reaps idle hosts even while frontend sockets remain connected. The
 existing `idle_ttl` controls final-client grace. Both use the five-second sweep;
-in-flight work and detached shared observations retain their host leases.
+in-flight requests retain their host leases. Detached shared observations retain
+the broker lifecycle lease and reacquire a host lease for each bounded poll.
 
 Cold-host requests stay in the weighted scheduler queue until a slot is available;
 they do not occupy lane workers. Idle entries are retired by LRU. Eligible cold
 waiters stop new warm exec/bulk admission while active work finishes. Existing
 work retains one control request so job stop remains possible; overlapping hot
-control requests cannot keep an otherwise idle host busy indefinitely. A lower
+control requests cannot keep an otherwise idle host busy indefinitely. The active
+`max_hosts` limit hands slots to queued hosts independently of the warm-pool cap.
+A lower
 live capacity drains idle entries first; existing active entries may temporarily
 exceed the new limit until their leases end. No new cold slot is allocated above
 the limit. This bounds retained logical hosts, not independent remote machines or
@@ -317,10 +320,14 @@ remote limit and totals, so another project's newer jobs cannot hide owned jobs.
 ## Shared job wait lifecycle
 
 A disconnected wait frontend releases its subscription immediately. The broker
-keeps one observation and its transport lease until the remote wait budget ends,
-the job becomes terminal or the broker shuts down. Reconnecting with the same
-owner, host, wait parameters and explicit deadline joins that active observation.
-Different owners never share broker results. Authenticated `status` includes
+keeps one observation per owner/host/job until the latest accepted observation
+budget ends, the job becomes terminal or the broker shuts down. Subscribers share
+that observation while keeping their own timeout, deadline, tail length, batch
+order and wait-any condition. Short remote polls yield the execution quota between
+polls; bounded response snapshots remain charged to their owner. Pool pressure
+can evict an idle transport between polls; the logical observation continues via
+reconnection without stopping the detached job. Different
+owners never share broker results. Authenticated `status` includes
 owner-scoped `shared_waits.observers` and `shared_waits.subscribers`.
 
 SIGTERM cancels observations before draining requests; this does not stop the
@@ -577,6 +584,14 @@ with the individual request chain. Queries continue to filter by exact principal
 and project. Identity/ingress failures rejected before owner binding are outside
 this authenticated request trace.
 
+Ordinary reads, denied requests and policy changes carry request/target HMACs
+under a private per-broker-instance key (`digest_scope: broker_instance`). These
+digests are comparable only within that instance and do not expose low-entropy
+request values to offline guessing. `target_scope` distinguishes the submitted
+target from an authorized configured snapshot. Denied requests do not resolve or
+dial hosts. Approved operations retain their approval-bound digests and references
+(`digest_scope` and `target_scope`: `approval`).
+
 `audit_query` records its own query before its durability barrier. Its response
 can therefore contain that event. Audit health polling also generates an event,
 so accepted/written/pending counts are live snapshots. Request acknowledgment does
@@ -716,7 +731,13 @@ unused plans and approval tokens.
 Preparation retains regular file bytes without hard links. Later source edits do
 not alter that retained content. Rsync evaluates exclusions and directory layout
 before approval; execution applies only the fixed change list. Excluded targets
-and unrelated siblings are preserved. The destination snapshot is checked before
+and unrelated siblings are preserved; replacing a directory containing an
+excluded descendant is rejected during preparation. A trailing slash names a
+directory, including a missing destination for a single-file transfer. Root path
+operands and exclusion patterns must be valid UTF-8; retained tree entry names
+use a byte-preserving format. Directory sources without a trailing slash retain
+their basename under existing and newly created destination directories. The
+destination snapshot is checked before
 business writes, and competing prepared sync operations are serialized. Files
 publish by atomic rename; directories are removed only when empty. A multi-file
 plan is not one atomic transaction: a later I/O failure can leave partial work.
@@ -728,8 +749,9 @@ Prepared operations have a two-minute deadline and a 256 MiB content / 8192-entr
 source before exclusion filtering; scope large sources accordingly. Managed
 staging has a ten-minute TTL, reclaimed on subsequent admission, with at most
 16 stages globally / 4 per owner; memory admission can reduce those counts.
-Retained plans reserve 16 MiB until consumption/expiry, with an additional 8 MiB
-during execution. Output remains bounded: a plan too large to review is rejected,
+Retained plans reserve 16 MiB through execution until all workers finish, with an
+additional 8 MiB during execution. Expiry releases unused plans. Output remains
+bounded: a plan too large to review is rejected,
 and `-max-output-bytes` may raise the default 256 KiB up to 512 KiB. Outcome
 identities are retained separately with fixed caps; automatic safe retirement
 remains follow-up work. State and raw chunks are private and never returned in
@@ -742,5 +764,6 @@ in agent-protocol counters. Shared preview scans allow 8192 entries, 2 MiB of
 metadata and 8 GiB of hashed content. `preserve` keeps source links; `follow` is
 confined to the source root, and special files are rejected. The Linux daemon,
 CLI/MCP, real SSH execution, cancellation and pre-acknowledgment crash paths are
-covered by `make remote-sync-execution`; macOS runtime and the mixed-load gate
-remain in [Phase5 acceptance](phase5-acceptance.md).
+covered by `make remote-sync-execution`; `make remote-mixed-qos` covers concurrent
+exec/wait/status/transfers. macOS runtime remains unverified and was deferred by
+the user; see [Phase5 acceptance](phase5-acceptance.md).
