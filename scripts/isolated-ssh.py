@@ -217,6 +217,28 @@ def port(address):
         return listener.getsockname()[1]
 
 
+def artifact_inputs(repo):
+    """Report the same explicit binary selectors the real runtime helpers use."""
+    for variable in ("RDEV_TEST_AGENT_DIR", "RDEV_TEST_CLI_BINARY", "RDEV_TEST_DAEMON_BINARY"):
+        if os.environ.get(variable) and not Path(os.environ[variable]).is_absolute():
+            raise ValueError(variable + " requires an absolute path; runtime working directories differ")
+    agents = Path(os.environ.get("RDEV_TEST_AGENT_DIR") or repo / "cmd/rdev/agents").resolve()
+    if not agents.is_dir():
+        raise ValueError("selected runtime agent directory is missing")
+    selected = {"agents": {"directory": str(agents), "sha256": {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(agents.glob("rdev-agent-*")) if path.is_file()}}}
+    if not selected["agents"]["sha256"]:
+        raise ValueError("selected runtime agent directory has no agents")
+    for role, variable in (("cli", "RDEV_TEST_CLI_BINARY"), ("broker", "RDEV_TEST_DAEMON_BINARY")):
+        if os.environ.get(variable):
+            path = Path(os.environ[variable]).resolve(strict=True)
+            selected[role] = {"selection": "explicit immutable input", "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        else:
+            selected[role] = {"selection": "runtime test defaults; per-test build/use, no single binary digest claimed"}
+    return selected
+
+
 class Topology:
     def __init__(self, root):
         self.root = root
@@ -342,6 +364,9 @@ def main():
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.umask(0o077)
     report = {"schema": 1, "kind": "isolated-loopback-ssh", "started_unix": time.time(), "status": "running", "shared_host_instances": 1, "physical_machine_count": "unverified", "sshd_instances": 3, "targets": 2, "fault_domain": "one shared Linux kernel and filesystem", "runtime": "not-run", "checks": {}}
+    report["harness_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    report["artifact_inputs"] = artifact_inputs(repo)
+    report["artifacts"] = report["artifact_inputs"]["agents"]["sha256"]
     # sshd StrictModes examines ancestors, so a private leaf below an arbitrary
     # world-writable TMPDIR is insufficient. The account home is its boundary.
     fixture = Path(tempfile.mkdtemp(prefix=".rdev-p8-ssh-", dir=Path.home()))
@@ -413,6 +438,8 @@ def main():
             if failed.returncode == 0:
                 raise RuntimeError("target succeeded without its required jump")
         report["checks"]["jump-stopped-fresh-connections-fail"] = "passed"
+        if artifact_inputs(repo) != report["artifact_inputs"]:
+            raise RuntimeError("selected runtime binary inputs changed during validation")
         report["status"] = "passed"
     except BaseException as error:
         report["status"] = "failed"
@@ -424,9 +451,6 @@ def main():
         report["ended_unix"] = time.time()
         report["source_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
         report["source_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=repo))
-        report["artifacts"] = {}
-        for artifact in sorted((repo / "cmd/rdev/agents").glob("rdev-agent-*")):
-            report["artifacts"][artifact.name] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         for name in ("jump.log", "v4.log", "v6.log"):
             if (fixture / name).exists():
                 shutil.copyfile(fixture / name, args.out / name)

@@ -50,7 +50,9 @@ jobs:
           previous=e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e
           git worktree add --detach "$RUNNER_TEMP/rdev-predecessor" "$previous"
           make -C "$RUNNER_TEMP/rdev-predecessor" GO="$(command -v go)" agents PLATFORMS=linux-amd64
+          echo '::notice title=Installer preflight::historical native agent build completed'
           go test -c -o "$RUNNER_TEMP/real-agent-install.test" ./internal/agentinstall
+          echo '::notice title=Installer preflight::test binary compiled'
           python3 scripts/real-agent-install.py \
             --test-binary "$RUNNER_TEMP/real-agent-install.test" \
             --current "$PWD/cmd/rdev/agents/rdev-agent-linux-amd64" \
@@ -60,6 +62,26 @@ jobs:
             --previous-commit "$previous" \
             --previous-sha256 "$(sha256sum "$RUNNER_TEMP/rdev-predecessor/cmd/rdev/agents/rdev-agent-linux-amd64" | cut -d ' ' -f 1)" \
             --out "$RUNNER_TEMP/rdev-evidence/install"
+      - name: Summarize real installer failures
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rdev-evidence" / "install"
+          result = root / "result.json"
+          summary = {"report_present": result.exists(), "failed_tests": [], "test_diagnostics": []}
+          if result.exists():
+              report = json.loads(result.read_text())
+              summary.update(status=report.get("status"), exit_code=report.get("exit_code"), agents=report.get("agents"))
+          log = root / "test.log"
+          if log.exists():
+              content = log.read_text(errors="replace")
+              summary["failed_tests"] = re.findall(r"--- FAIL: ([A-Za-z0-9_/=.-]+)", content)
+              # This suite has only generated local state and no credentials,
+              # SSH target, business commands or signing keys in its diagnostics.
+              summary["test_diagnostics"] = re.findall(r"^\s*real_binary_test\.go:[0-9]+: .*$", content, re.M)
+          print("::error title=Real installer diagnostics::" + json.dumps(summary, sort_keys=True))
+          PY
       - name: Actual disk-full and read-only installation failures
         run: |
           status=0
