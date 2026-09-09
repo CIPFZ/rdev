@@ -172,8 +172,17 @@ jobs:
           assert prepared["private_test_key_removed"] and prepared["signing_identity"]["test_only"]
           assert not prepared["official_identity"] and prepared["source_commit"] == os.environ["GITHUB_SHA"]
           assert all(v["status"] == "passed" and not v["draft_fixture"] and not v["source_dirty"] and v["inputs_unchanged"] for v in runtime["signed_runtime"].values())
-          summary = {"run_id": run, "run_attempt": attempt, "source_commit": prepared["source_commit"], "official_identity": False, "signing_identity": prepared["signing_identity"], "bundles": prepared["bundles"], "ipv4_ipv6_proxyjump_signed_runtime": "passed"}
-          print("::notice title=Isolated signed test identities::" + json.dumps(summary, sort_keys=True))
+          identity = {"run_id": run, "run_attempt": attempt, "source_commit": prepared["source_commit"], "official_identity": False}
+          summary = {**identity, "signing_identity": prepared["signing_identity"], "ipv4_ipv6_proxyjump_signed_runtime": "passed"}
+          annotations = [("Isolated signed test identity", summary)]
+          for role in ("previous", "candidate", "frozen"):
+              annotations.append(("Signed test bundle " + role, {**identity, "role": role, "bundle": prepared["bundles"][role]}))
+          # Public annotation messages are truncated at 4096 bytes. Keep each
+          # complete source/run/artifact identity independently readable.
+          for title, record in annotations:
+              message = json.dumps(record, sort_keys=True)
+              assert len(message.encode("utf-8")) < 3500
+              print("::notice title=" + title + "::" + message)
           PY
       - name: Summarize signed fixture failures without key or request contents
         if: failure()
