@@ -53,7 +53,7 @@ func TestRemoteBrokerSharedWait(t *testing.T) {
 		return *r.SharedWaits
 	}
 	start := func() *proto.JobInfo {
-		return call(&proto.Request{Op: proto.OpJobStart, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"sh", "-c", "printf ready; exec sleep 300"}}}}).Info
+		return call(&proto.Request{Op: proto.OpJobStart, Job: &proto.JobParams{Spec: &proto.ExecParams{Argv: []string{"sh", "-c", "printf 'first\\nready'; exec sleep 300"}}}}).Info
 	}
 	job := start()
 	if job == nil {
@@ -70,7 +70,8 @@ func TestRemoteBrokerSharedWait(t *testing.T) {
 	clients := make([]*lifecycleProcess, 20)
 	pids := make(map[int]bool)
 	for i := range clients {
-		clients[i] = startLifecycleProcess(t, d, a, wait, false)
+		variant := &proto.Request{Op: proto.OpJobWait, DeadlineUnixMilli: time.Now().Add(time.Duration(50+i) * time.Second).UnixMilli(), Job: &proto.JobParams{ID: job.ID, WaitTimeoutSec: 40 + i, TailOnExit: 1 + i%2}}
+		clients[i] = startLifecycleProcess(t, d, a, variant, false)
 		pids[clients[i].cmd.Process.Pid] = true
 	}
 	if len(pids) != 20 {
@@ -99,9 +100,13 @@ func TestRemoteBrokerSharedWait(t *testing.T) {
 	}
 	call(&proto.Request{Op: proto.OpJobStop, Job: &proto.JobParams{ID: job.ID, Signal: "TERM", GraceSec: 1}})
 	operationID := ""
-	for _, c := range clients[5:] {
+	for i, c := range clients[5:] {
 		r := c.result(t)
-		if r.Job == nil || r.Job.Info == nil || r.Job.Info.ID != job.ID || r.Job.Info.State == proto.JobRunning || r.Job.TimedOut || r.Job.Logs != "ready" {
+		logs := "ready"
+		if (i+5)%2 == 1 {
+			logs = "first\nready"
+		}
+		if r.Job == nil || r.Job.Info == nil || r.Job.Info.ID != job.ID || r.Job.Info.State == proto.JobRunning || r.Job.TimedOut || r.Job.Logs != logs {
 			t.Fatalf("subscriber lost terminal job result: job=%+v", r.Job)
 		}
 		if operationID == "" {
@@ -137,5 +142,5 @@ func TestRemoteBrokerSharedWait(t *testing.T) {
 	}
 	call(&proto.Request{Op: proto.OpJobStop, Job: &proto.JobParams{ID: next.ID, Signal: "TERM", GraceSec: 1}})
 	call(&proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: next.ID}})
-	t.Logf("real shared wait: 20 independent PIDs; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=%s; detached PID=%d preserved after restart", elapsed, next.PID)
+	t.Logf("real shared wait: 20 independent PIDs with distinct timeout/deadline and tail1/2; initiator SIGKILL leaves 1 observer/0 subscribers; reconnect yields 1/20; five SIGKILLs yield 1/15; SIGHUP preserves fan-out; 15 terminal replies preserve each tail and share one nonempty remote operation ID; other-project wait/status denied; SIGTERM drain=%s; detached PID=%d preserved after restart", elapsed, next.PID)
 }

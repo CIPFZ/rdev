@@ -123,6 +123,9 @@ func TestRemoteBrokerAuditRoutes(t *testing.T) {
 					t.Fatalf("%s trace has %d events want %d", want.operation, len(events), len(want.results))
 				}
 				for i, event := range events {
+					if len(event.RequestDigest) != 64 || len(event.TargetDigest) != 64 || (event.DigestScope != "broker_instance" && event.DigestScope != "approval") || (event.TargetScope != "submitted" && event.TargetScope != "configured" && event.TargetScope != "approval") {
+						t.Fatalf("missing request/target audit identity for %s/%s", want.operation, event.Result)
+					}
 					if event.Result != want.results[i] || event.Operation != want.operation || event.PolicyDigest != want.digest {
 						t.Fatalf("audit chain mismatch for %s: result %s", want.operation, event.Result)
 					}
@@ -155,5 +158,5 @@ func TestRemoteBrokerAuditRoutes(t *testing.T) {
 			t.Fatal("audit persisted raw client ID/output/approval token")
 		}
 	}
-	t.Log("actual daemon/SSH: repeated caller IDs have unique response/audit request references; local outcomes and pre-dispatch rejections traced; approval/admission/append/query share exact digests; all traces survive SIGKILL; same-client project isolation and payload/token privacy passed")
+	t.Log("actual daemon/SSH: repeated caller IDs have unique response/audit request references; reads, denials and policy updates carry scoped request/target digests; approval/admission/append/query share exact digests; all traces survive SIGKILL; same-client project isolation and payload/token privacy passed")
 }
