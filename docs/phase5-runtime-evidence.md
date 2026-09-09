@@ -1630,3 +1630,49 @@ Supporting logs: [initial starvation reproduction](evidence/phase5/2026-09-09/se
 The failing runs remain diagnostic evidence, not acceptance. Global archive
 capacity, concurrent mutation, mixed exec/job/sync, archive retirement,
 storage/upgrade coverage, macOS runtime and independent review remain open.
+
+
+## Reserved Fleet authority boundary (`4bfdf06`)
+
+`make remote-fleet-boundary` exercises all three reserved operations
+(`fleet.plan`, `fleet.execute`, `fleet.approve`) using actual authenticated
+broker processes and a real SSH mutation as the positive control. Two projects
+share one client ID; only one has explicit exact-host Fleet grants. For each
+operation, the test substitutes absent, matching and executable inner wire
+requests; omitted, correct and borrowed exec capabilities; and an existing valid
+exec approval. Every request is rejected before transport acquisition or mutation
+persistence. The other project receives default denial, and explicit Fleet grants
+cannot enable an absent handler. Approval administration also refuses all three
+unimplemented operations. These are Phase5 authority tests; Fleet orchestration
+remains assigned to Phase7 by the evolution plan.
+
+All 54 request rejections per daemon instance have exact owner-scoped request,
+policy digest, decision and outcome audit assertions. Rejections return no
+scheduler, pool, secret, job history, mutation or approval data. The borrowed
+approval and operation ID still execute their original command exactly once;
+reusing the consumed approval fails. The entire matrix repeats after SIGKILL,
+and the remote marker proves exactly two authorized executions in total.
+
+[Committed validation](evidence/phase5/2026-09-09/committed-fleet-boundary-4bfdf06.log)
+passed `make check remote-fleet-boundary remote-routes remote-approval remote-policy
+stress-broker smoke-rdevd remote-phase5-runtime`. Each remote boundary/policy
+scenario ran three times. Stress completed 100 twenty-client tests, local
+readiness passed, and Linux systemd install/enable/start/reload/SIGKILL recovery/
+stop/start passed (PID `1425144 -> 1425208`). Remote artifact SHA-256:
+`8ef946982e78aeb59c3dea40500652450dbf35d39d797199040eb70180da2ea4`.
+
+[Initial runtime](evidence/phase5/2026-09-09/fleet-boundary-initial-runtime.log),
+[three-run regression](evidence/phase5/2026-09-09/fleet-boundary-runtime.log),
+[full pre-commit check](evidence/phase5/2026-09-09/fleet-boundary-check.log), and
+[actual race daemon regression](evidence/phase5/2026-09-09/fleet-boundary-remote-race.log)
+also passed. The race run used the unchanged production daemon implementation
+from `1481edc`, artifact SHA-256
+`14cf6eb585bb4b84ca1eb1eaa4c1355ade475eb7459978a55403c81735f99766`,
+with the updated race-instrumented test harness. This batch changes tests and
+the Make target; it does not introduce a Fleet execution route.
+
+This closes the missing runtime negative for reserved Fleet authority, not the
+whole unauthorized-use gate. Declarative secret delegation, remaining shared
+routes, mixed workloads, upgrade/storage matrices, macOS runtime and independent
+review remain open. Implementing-agent inspection of policy, route, approval
+and audit ordering is not counted as independent review.

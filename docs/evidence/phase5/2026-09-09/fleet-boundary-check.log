@@ -1,0 +1,26 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.006s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	33.899s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	9.124s
+ok  	github.com/CIPFZ/rdev/internal/broker	4.122s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.003s
+ok  	github.com/CIPFZ/rdev/internal/client	0.480s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.039s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.699s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.006s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.005s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.007s
+ok  	github.com/CIPFZ/rdev/internal/session	10.444s
+ok  	github.com/CIPFZ/rdev/internal/state	0.086s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.037s
+ok  	github.com/CIPFZ/rdev/internal/support	0.004s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.316s
+ok       rdev-agent-linux-amd64 87bccfd49c0c
+ok       rdev-agent-linux-arm64 79e281641f44
+ok       rdev-agent-darwin-amd64 20ea3a2b20cd
+ok       rdev-agent-darwin-arm64 76b6f7eb98e6

@@ -1069,7 +1069,7 @@ Phase 3 完成记录：
 - [x] bulk lane 空闲后按 TTL 自动退出。2026-09-08 提交 `6f62f60` 的三轮真 SSH 负载验证独立 bulk transport、1 秒 TTL + 5 秒 sweep 回收及基础 agent 保留；见 `docs/phase5-runtime-evidence.md`。独立 review 和其余 Gate 仍未完成。
 - [ ] broker 崩溃重启后不会重复执行 mutation。
 - [ ] 连接状态、client 配额、queue wait、lane 流量和 eviction reason 可通过 `status/doctor` 观察。
-- [ ] 未授权 client 无法使用 host、secret、job 或 Fleet capability。
+- [ ] 未授权 client 无法使用 host、secret、job 或 Fleet capability。 2026-09-09 `4bfdf06` 补齐保留 Fleet operation 的真实拒绝矩阵（跨项目、capability/wire/approval 替换、SIGKILL 前后）；完整权限 Gate 和独立 review 仍未完成。
 - [ ] destructive approval 绑定精确目标 snapshot 和 operation digest。
 - [ ] broker reload、升级和异常退出不影响已脱离 SSH 的后台 job。
 

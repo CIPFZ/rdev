@@ -1,0 +1,5 @@
+=== RUN   TestRemoteBrokerFleetBoundary
+    remote_fleet_boundary_test.go:165: real daemon/SSH: fleet.plan/execute/approve default deny across projects; explicit fleet grants remain unsupported; capability/inner-wire/approval substitutions create no SSH or mutation; exact owner request/result audit; valid approval and stable operation ID remain usable exactly once; same boundary after SIGKILL
+--- PASS: TestRemoteBrokerFleetBoundary (1.77s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	1.770s
