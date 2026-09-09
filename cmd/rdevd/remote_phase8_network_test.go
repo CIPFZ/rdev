@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,24 +27,35 @@ func TestRemotePhase8MasterDisappearance(t *testing.T) {
 	if remote == "" {
 		remote = "service-deploy"
 	}
-	ctlDir := filepath.Join(d.dir, "rdev-ctl")
+	// OpenSSH adds a random suffix before publishing a control socket. Keep the
+	// owned path short even when the runtime fixture is under /home/runner.
+	// TMPDIR still belongs to the enclosing isolated topology for crash cleanup.
+	controlRoot, err := os.MkdirTemp(os.TempDir(), "n-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(controlRoot) })
+	ctlDir := filepath.Join(controlRoot, "rdev-ctl")
 	if err := os.Mkdir(ctlDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:0", remote)))
 	ctl := filepath.Join(ctlDir, hex.EncodeToString(sum[:])[:16])
-	d.env = append(d.env, "TMPDIR="+d.dir)
+	d.env = append(d.env, "TMPDIR="+controlRoot)
 	base := []string{}
 	if config := os.Getenv("RDEV_TEST_SSH_CONFIG"); config != "" {
 		base = append(base, "-F", config)
 	}
 	master := exec.Command("ssh", append(append([]string{}, base...), "-N", "-o", "BatchMode=yes", "-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-o", "ControlPath="+ctl, remote)...)
+	var masterError bytes.Buffer
+	master.Stderr = &masterError
 	if err := master.Start(); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
 	go func() { _ = master.Wait(); close(done) }()
 	t.Cleanup(func() {
+		d.stop(syscall.SIGTERM)
 		select {
 		case <-done:
 		default:
@@ -54,6 +66,15 @@ func TestRemotePhase8MasterDisappearance(t *testing.T) {
 		_ = exec.Command("ssh", append(append([]string{}, base...), "-S", ctl, "-O", "exit", remote)...).Run()
 	})
 	awaitRuntime(t, 5*time.Second, "private real SSH master", func() bool {
+		select {
+		case <-done:
+			category := "ssh_failed"
+			if strings.Contains(masterError.String(), "too long") {
+				category = "socket_path_too_long"
+			}
+			t.Fatalf("private master exited before readiness: category=%s control_path_bytes=%d", category, len(ctl))
+		default:
+		}
 		st, err := os.Stat(ctl)
 		return err == nil && st.Mode()&os.ModeSocket != 0
 	})
