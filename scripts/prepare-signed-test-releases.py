@@ -13,6 +13,16 @@ import subprocess
 PREVIOUS = "56351b738f1f1aaa89aa4d788858af078b82de30"
 
 
+def policy_public_key(public):
+    # ssh-keygen appends a display comment. Policy roots deliberately contain
+    # only algorithm and key; never loosen the product parser for this fixture.
+    lines = public.strip().splitlines()
+    fields = lines[0].split(maxsplit=2) if len(lines) == 1 else []
+    if len(fields) < 2 or fields[0] != "ssh-ed25519":
+        raise ValueError("expected one generated Ed25519 public key")
+    return " ".join(fields[:2])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--go", required=True)
@@ -70,7 +80,7 @@ def main():
         run("compile-verifier", [args.go, "build", "-o", str(out / "releasecheck"), "./scripts/releasecheck"])
         verifier = str(out / "releasecheck")
         run("create-test-key", ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "phase8-ephemeral-test-only", "-f", str(key)])
-        public = key.with_suffix(".pub").read_text().strip()
+        public = policy_public_key(key.with_suffix(".pub").read_text())
         fingerprint = subprocess.check_output(["ssh-keygen", "-lf", str(key.with_suffix(".pub")), "-E", "sha256"], text=True, timeout=10).split()[1]
         report["signing_identity"] = {"id": "phase8-isolated-test", "test_only": True,
                                       "public_key": public, "fingerprint": fingerprint}

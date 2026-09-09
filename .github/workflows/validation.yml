@@ -175,6 +175,25 @@ jobs:
           summary = {"run_id": run, "run_attempt": attempt, "source_commit": prepared["source_commit"], "official_identity": False, "signing_identity": prepared["signing_identity"], "bundles": prepared["bundles"], "ipv4_ipv6_proxyjump_signed_runtime": "passed"}
           print("::notice title=Isolated signed test identities::" + json.dumps(summary, sort_keys=True))
           PY
+      - name: Summarize signed fixture failures without key or request contents
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          fixture = pathlib.Path(f"/tmp/rdev-p8-signed-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}")
+          runtime = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rdev-evidence/signed-ssh"
+          summary = {"preparation_report_present": (fixture / "result.json").exists(), "failed_steps": [], "failed_tests": [], "source_locations": []}
+          if summary["preparation_report_present"]:
+              report = json.loads((fixture / "result.json").read_text())
+              summary.update(status=report.get("status"), failure_type=report.get("failure_type"), private_test_key_removed=report.get("private_test_key_removed"))
+              summary["failed_steps"] = [{"name": row["name"], "exit_code": row["exit_code"]} for row in report.get("steps", []) if row.get("exit_code")]
+          for log in runtime.glob("*-signed/signed-ssh.log"):
+              content = log.read_text(errors="replace")
+              summary["failed_tests"] += re.findall(r"--- FAIL: ([A-Za-z0-9_/=.-]+)", content)
+              summary["source_locations"] += re.findall(r"^\s*([A-Za-z0-9_]+_test\.go:[0-9]+):", content, re.M)
+          summary["source_locations"] = sorted(set(summary["source_locations"]))
+          print("::error title=Signed fixture diagnostic locations::" + json.dumps(summary, sort_keys=True))
+          PY
       - name: Record exact hosted artifact identities
         run: |
           python3 - <<'PY'
