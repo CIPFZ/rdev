@@ -1073,19 +1073,10 @@ Phase 3 完成记录：
 - [ ] destructive approval 绑定精确目标 snapshot 和 operation digest。
 - [ ] broker reload、升级和异常退出不影响已脱离 SSH 的后台 job。 2026-09-09 `4ded2a4` 验证两版旧 daemon/agent 经 TERM 或 SIGKILL 后升级的 12 个真实场景，保留原 supervisor PID/二进制摘要、owner 与日志，并修复旧 supervisor TERM 日志丢失；更广 schema/rollback 和独立 review 仍未完成。
 
-2026-09-08 后续证据：`e3ac9c2` 验证已确认后台 job 在 daemon SIGKILL、
-SSH 不可用启动、reload 和远端删除/本地持久化失败后保留 owner；`bd03436`
-验证 20 个真实进程合并 wait、断开重连、跨项目拒绝、TERM 输出保留和 observation
-shutdown；`20b4615` 修复并实测 replay digest 的 state/capability 参数遗漏。
-后续 `make remote-mutation` 增加真实 pre-ACK job/append 崩溃、稳定 operation ID、
-远端 durable tombstone、CLI/MCP 恢复查询及跨项目拒绝。这些测试尚未覆盖
-安全 identity retirement、完整混合负载、
-launchd 和独立外部 review，所以上述未勾选 Gate 保持未完成。详细提交及日志见
-`docs/phase5-acceptance.md` 和 `docs/phase5-runtime-evidence.md`。
-
-后续 `make remote-events` 增加 owner-scoped 状态事件 cursor replay、20 个
-wait client 全部退出后的唯一终态落盘、SIGKILL 后游标恢复、CLI/MCP 跨项目
-拒绝和真实 event rename 失败修复；仍未完成主动事件推送及长时间保留压力验证。
+Phase5 的当前状态、剩余条件和运行证据统一维护在
+[`phase5-acceptance.md`](phase5-acceptance.md) 与
+[`phase5-runtime-evidence.md`](phase5-runtime-evidence.md)。独立评审和 macOS
+实测尚未完成，不将已通过的 Linux runtime 检查等同于 Phase5 Complete。
 
 ### Phase 6：CLI、兼容性、文档和发布收口
 
@@ -1097,7 +1088,7 @@ wait client 全部退出后的唯一终态落盘、SIGKILL 后游标恢复、CLI
 | P6-02 | 修复 stdin 错误传播 | 无 | 非 EOF 错误返回非零状态且不执行部分写入 |
 | P6-03 | 统一 CLI/MCP timeout 契约 | Phase 3 | 默认值、0 和显式无限的含义一致并有文档 |
 | P6-04 | 使用 `net.SplitHostPort` 等方式支持 IPv6 | P4-01 | IPv4、IPv6、alias、user@host 全部覆盖 |
-| P6-05 | 修正文档协议名称和能力保证 | 全部 | README 与实际 wire protocol、权限、脱敏和连接语义一致 |
+| P6-05 | 修正文档协议名称和能力保证，明确共享前端兼容边界 | 全部 | README 与实际 wire protocol、权限、脱敏和连接语义一致；明确 shared host/session 编辑与 state/declarative-secret 前端的范围及不支持行为 |
 | P6-06 | 在线依赖审计和发布检查 | 全部 | `govulncheck`/依赖审计、SBOM、构建 provenance 纳入 release gate |
 | P6-07 | 把支持矩阵与 runtime capability 投影到 CLI/MCP | P0-08、P4-17 | unsupported/experimental 能力在调用前可发现，不靠运行失败猜测 |
 | P6-08 | 为错误 code、config、state 和 protocol 发布兼容文档 | P3-09、P4-14 | N/N-1 行为、迁移和 breaking change 有机器可读版本说明 |

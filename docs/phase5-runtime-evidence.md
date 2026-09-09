@@ -68,6 +68,7 @@ failures or pre-commit runs as successful committed-source evidence.
 | <a id="6d2eeb3"></a>`6d2eeb3` — Shared sync previews | Real CLI/MCP/rsync/SSH preview, delete grants, bounded output, descendant cancellation and peer preservation. | `remote-sync-preview` | [log](evidence/phase5/2026-09-09/committed-shared-sync-6d2eeb3.log) | [log](evidence/phase5/2026-09-09/shared-sync-race.log) | [log](evidence/phase5/2026-09-09/shared-sync-actual-race.log) |
 | <a id="5e2d9dc"></a>`5e2d9dc` — Complete source scans | Same-size/same-mtime 5 MiB content changes detected; entry/content caps and unchanged destination verified. | `remote-sync-preview` | [log](evidence/phase5/2026-09-09/committed-sync-manifest-5e2d9dc.log) | [log](evidence/phase5/2026-09-09/sync-manifest-full-race.log) | [log](evidence/phase5/2026-09-09/sync-manifest-actual-race.log) |
 | <a id="9cf6103"></a>`9cf6103` — Prepared shared sync | Real CLI/MCP + SSH retained push/pull/delete; source drift, target drift, exact approvals, pre-ACK daemon SIGKILL recovery, CLI cancellation and peer preservation; fixed deletion scopes and binary staging also tested. | `remote-sync-execution` | [log](evidence/phase5/2026-09-09/prepared-sync-9cf6103.log) | [log](evidence/phase5/2026-09-09/prepared-sync-race-9cf6103.log) | [log](evidence/phase5/2026-09-09/prepared-sync-process-race.log) |
+| <a id="9097f5d"></a>`9097f5d` — Mixed workload and sync accounting | Seven measurement processes run exec, job wait/status and two 12 MiB syncs at 2 MiB/s aggregate; control p95 0.82–0.99× baseline (1.07–1.16× with actual daemon/CLI race). Separate concurrent uploader SIGKILL releases reservations and preserves peer progress/base PID. CLI/MCP resource isolation and independent SSH byte totals match; idle bulk closes. Linux check/race/stress/readiness/systemd suite passed; macOS/review remain. | `remote-mixed-qos` | [combined log](evidence/phase5/2026-09-09/mixed-qos-9097f5d.log) | Full repository race in combined log | Actual daemon and CLI/MCP race in combined log; remote agent uninstrumented |
 
 Additional final-source checks preserve coverage not contained in those runtime
 logs, including the final test refinements after broader race runs:
@@ -108,7 +109,7 @@ index identifies the correction and successful checks.
 - One hundred aliases on one endpoint do not prove one hundred independent hosts.
 - The ten-minute audit soak reports checkpoint counts and possible crash-tail
   loss, not complete retention through SIGKILL or a 24-hour production soak.
-- File-bulk SLO results do not close the mixed exec/job/status/sync gate.
+- Mixed exec/job/status/sync evidence comes from `remote-mixed-qos` in `9097f5d`.
 - Sync previews and source observations do not authorize immutable execution.
 - These batches have implementing-agent review only; independent review and
   actual macOS launchd validation are still required.

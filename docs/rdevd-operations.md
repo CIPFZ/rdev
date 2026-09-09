@@ -469,11 +469,14 @@ pressure, anonymous/partial JSON, slow output and a held remote response.
 
 Setting `RDEV_BROKER_SOCKET` selects the authenticated broker path for the whole
 CLI invocation. `ping`, `exec`, `read`, `ls`, `write`, `capability`, supported `job`
-commands, mutation queries and `serve` use daemon-owned state and transports.
-Unsupported shared commands fail before constructing a standalone client. The
-remaining declarative secret delegation, host/session administration and state workflows
-are still incomplete; they no longer silently bypass broker policy. Local help,
-version and static support metadata remain available.
+commands, `secret`, `sync`, mutation queries and `serve` use daemon-owned state
+and transports. Unsupported shared commands fail before constructing a standalone
+client. Shared host/session editing, declarative secret delegation and state frontends
+remain unsupported. Hosts come from the administrator's private registry at
+daemon startup; change that registry and restart to update hosts. Supply cwd/env
+explicitly per request. Frontend compatibility and any online host administration
+are Phase6 scope decisions, separate from Phase5's shared transport contract.
+Local help, version and static support metadata remain available.
 
 With a `status` grant, `rdev broker status` and MCP `rdev_broker_status` return the
 principal's ingress usage, detached observation bytes, scheduler quotas and lane
