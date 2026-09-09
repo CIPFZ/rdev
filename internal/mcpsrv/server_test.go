@@ -73,7 +73,7 @@ func TestBrokerServerRegistersSharedTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"rdev_secrets": false, "rdev_broker_pool": false, "rdev_broker_status": false, "rdev_list": false, "rdev_ping": false, "rdev_exec": false, "rdev_read": false, "rdev_write": false, "rdev_capability": false, "rdev_job_start": false, "rdev_job_list": false, "rdev_job_status": false, "rdev_job_logs": false, "rdev_job_stop": false, "rdev_job_rm": false, "rdev_job_wait": false, "rdev_mutation_status": false, "rdev_job_events": false}
+	want := map[string]bool{"rdev_sync": false, "rdev_secrets": false, "rdev_broker_pool": false, "rdev_broker_status": false, "rdev_list": false, "rdev_ping": false, "rdev_exec": false, "rdev_read": false, "rdev_write": false, "rdev_capability": false, "rdev_job_start": false, "rdev_job_list": false, "rdev_job_status": false, "rdev_job_logs": false, "rdev_job_stop": false, "rdev_job_rm": false, "rdev_job_wait": false, "rdev_mutation_status": false, "rdev_job_events": false}
 	for _, tool := range tools.Tools {
 		if _, ok := want[tool.Name]; ok {
 			want[tool.Name] = true

@@ -541,7 +541,7 @@ Setting `RDEV_BROKER_SOCKET` selects the authenticated broker path for the whole
 CLI invocation. `ping`, `exec`, `read`, `ls`, `write`, `capability`, supported `job`
 commands, mutation queries and `serve` use daemon-owned state and transports.
 Unsupported shared commands fail before constructing a standalone client. The
-remaining shared sync, secret, host/session administration and state workflows
+remaining shared sync execution, declarative secret delegation, host/session administration and state workflows
 are still incomplete; they no longer silently bypass broker policy. Local help,
 version and static support metadata remain available.
 
@@ -825,3 +825,29 @@ Redaction caches immutable escaped-value plans across calls and in-flight
 snapshots, and skips full matching only when a conservative compacted-value trie
 proves no registered value could occur. Rotation/deletion invalidate the live
 plan while old snapshots retain their original protection.
+
+
+## Shared sync previews
+
+`rdev sync HOST push LOCAL REMOTE -dry-run` and the corresponding `pull` command
+run rsync in the broker through its pooled SSH connection. The CLI resolves LOCAL
+in its own working directory; the MCP `rdev_sync` tool requires an absolute local
+path and `dry_run: true`. The principal needs exact-host `sync.push` or
+`sync.pull` authority; `-delete` additionally requires `sync.delete`. A delete
+preview does not delete anything. Source and destination paths belong to the
+broker's OS account and remote SSH account respectively.
+
+Previews use bulk admission, a 30-second operation deadline and bounded, redacted
+stdout/stderr. The per-stream default is 256 KiB. The frontend and worker each
+reserve sixteen times the configured per-stream limit while retaining output,
+including worst-case JSON expansion. Cancellation terminates the preview's rsync
+and auxiliary SSH process group, preserving the already running shared master.
+Auxiliary SSH may reuse that master but cannot create a persistent replacement.
+
+`make remote-sync-preview` exercises actual daemon/CLI/MCP/rsync/SSH behavior,
+project/host/delete denial, output redaction and limits, held-server cancellation,
+unchanged trees and SIGKILL recovery. Shared mutating sync currently fails with
+`shared sync execution requires a prepared manifest`; immutable approved plans
+and durable execution are still being implemented. Preview manifests describe
+observed local metadata and are not execution approvals. Rsync traffic is not
+yet charged to the protocol byte counters or global bulk bandwidth budget.

@@ -10,6 +10,12 @@ import (
 // changes or transport acquisition. A grant cannot create an absent handler or
 // turn a host-limited administration grant into global authority.
 func ValidateRoute(req Request) error {
+	if req.Sync != nil && !isSyncOperation(req.Operation) {
+		return errors.New("unexpected sync parameters")
+	}
+	if isSyncOperation(req.Operation) {
+		return validateSyncRoute(req)
+	}
 	if req.Secret != nil && req.Operation != "secret.set" && req.Operation != "secret.delete" && req.Operation != "secret.list" && req.Operation != "secret.set_from_file" {
 		return errors.New("unexpected secret parameters")
 	}

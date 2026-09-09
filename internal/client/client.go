@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -1649,24 +1650,20 @@ func (c *Client) TransferFile(ctx context.Context, opts TransferFileOptions) (*p
 
 // SyncOptions describes an rsync transfer.
 type SyncOptions struct {
-	Host      string
-	Direction string // "push" (local->remote) or "pull" (remote->local)
-	Local     string
-	Remote    string
-	Exclude   []string
-	DryRun    bool
-	Delete    bool
-	// ConfirmDelete is required for a mutating --delete transfer. Dry-runs are
-	// always allowed; this gate prevents an accidental destructive invocation.
-	ConfirmDelete bool
-	// SymlinkPolicy is preserve (default), follow, or skip.
-	SymlinkPolicy string
-	// ConflictPolicy is overwrite (default), skip, or fail. fail performs a
-	// dry-run preflight and refuses when rsync reports conflicts.
-	ConflictPolicy string
-	// MaxOutputBytes may only lower the per-stream system cap. Zero uses the
-	// bounded default.
-	MaxOutputBytes int64
+	Host      string   `json:"host,omitempty"`
+	Direction string   `json:"direction"`
+	Local     string   `json:"local"`
+	Remote    string   `json:"remote"`
+	Exclude   []string `json:"exclude,omitempty"`
+	DryRun    bool     `json:"dry_run,omitempty"`
+	Delete    bool     `json:"delete,omitempty"`
+	// ConfirmDelete is required for a mutating standalone delete operation.
+	ConfirmDelete bool `json:"confirm_delete,omitempty"`
+	// Policies default to preserving links and overwriting conflicting files.
+	SymlinkPolicy  string `json:"symlink_policy,omitempty"`
+	ConflictPolicy string `json:"conflict_policy,omitempty"`
+	// Zero selects the bounded per-stream default; callers may lower the cap.
+	MaxOutputBytes int64 `json:"max_output_bytes,omitempty"`
 }
 
 // SyncResult reports rsync's outcome.
@@ -1689,46 +1686,71 @@ type SyncResult struct {
 
 const defaultSyncOutputBytes int64 = 256 << 10
 
-// Sync transfers files with rsync over the multiplexed ssh connection.
-//
-// rsync runs locally rather than through the agent protocol: it already solves
-// delta transfer and permissions, and reimplementing that would be strictly
-// worse. Reusing the ControlMaster socket keeps it from re-authenticating.
-func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
+// NormalizeSyncOptions validates parameters without reading paths or dialing.
+// Brokers use it before admission; standalone and shared calls use one contract.
+func NormalizeSyncOptions(opts SyncOptions) (SyncOptions, error) {
 	if opts.Local == "" || opts.Remote == "" {
-		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+		return opts, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	if opts.Direction != "" && opts.Direction != "push" && opts.Direction != "pull" {
-		return nil, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+		return opts, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 	}
 	if opts.Delete && !opts.DryRun && !opts.ConfirmDelete {
-		return nil, proto.NewError(proto.CodeInvalidRequest, "sync --delete requires explicit confirmation", proto.StateNotSent)
+		return opts, proto.NewError(proto.CodeInvalidRequest, "sync --delete requires explicit confirmation", proto.StateNotSent)
 	}
 	if opts.SymlinkPolicy == "" {
 		opts.SymlinkPolicy = "preserve"
 	}
 	if opts.SymlinkPolicy != "preserve" && opts.SymlinkPolicy != "follow" && opts.SymlinkPolicy != "skip" {
-		return nil, proto.NewError(proto.CodeInvalidRequest, "invalid symlink policy", proto.StateNotSent)
+		return opts, proto.NewError(proto.CodeInvalidRequest, "invalid symlink policy", proto.StateNotSent)
 	}
 	if opts.ConflictPolicy == "" {
 		opts.ConflictPolicy = "overwrite"
 	}
 	if opts.ConflictPolicy != "overwrite" && opts.ConflictPolicy != "skip" && opts.ConflictPolicy != "fail" {
-		return nil, proto.NewError(proto.CodeInvalidRequest, "invalid conflict policy", proto.StateNotSent)
+		return opts, proto.NewError(proto.CodeInvalidRequest, "invalid conflict policy", proto.StateNotSent)
 	}
 	limit := opts.MaxOutputBytes
 	if limit < 0 || limit > proto.AbsoluteOutputBytes {
-		return nil, proto.NewError(proto.CodeLimitExceeded, "", proto.StateNotSent)
+		return opts, proto.NewError(proto.CodeLimitExceeded, "", proto.StateNotSent)
 	}
 	if limit == 0 {
 		limit = defaultSyncOutputBytes
 	}
 	if err := validateLocalSyncPath(opts.Local); err != nil {
-		return nil, err
+		return opts, err
 	}
 	if err := validateRemoteSyncPath(opts.Remote); err != nil {
+		return opts, err
+	}
+	opts.MaxOutputBytes = limit
+	return opts, nil
+}
+
+// Sync runs local rsync over the pooled connection's ControlMaster.
+func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
+	return c.syncForTarget(ctx, opts, "", false)
+}
+
+// PreviewSync holds the approved host identity and a bulk lease. Only explicit
+// dry-runs are accepted until manifest-bound shared execution is implemented.
+func (c *Client) PreviewSync(ctx context.Context, opts SyncOptions, target string) (*SyncResult, error) {
+	if !opts.DryRun || target == "" || !filepath.IsAbs(opts.Local) {
+		return nil, errors.New("shared sync preview requires dry_run, an absolute local path and a host snapshot")
+	}
+	current, err := c.ProtocolTargetIdentity(opts.Host)
+	if err != nil || current != target {
+		return nil, errors.New("sync host unavailable or changed")
+	}
+	return c.syncForTarget(ctx, opts, target, true)
+}
+
+func (c *Client) syncForTarget(ctx context.Context, opts SyncOptions, target string, bulk bool) (*SyncResult, error) {
+	opts, err := NormalizeSyncOptions(opts)
+	if err != nil {
 		return nil, err
 	}
+	limit := opts.MaxOutputBytes
 	if _, err := exec.LookPath("rsync"); err != nil {
 		return nil, errors.New("rsync not found on the local host")
 	}
@@ -1736,7 +1758,11 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	// Dial first so the ControlMaster exists and the remote host is validated
 	// before rsync tries to use the socket.
 	redactionSnapshot := c.Secrets.Snapshot()
-	pooled, _, release, err := c.leasedConn(ctx, opts.Host)
+	lease := c.leasedConnForTarget
+	if bulk {
+		lease = c.leasedBulkConn
+	}
+	pooled, _, release, err := lease(ctx, opts.Host, target)
 	if err != nil {
 		return nil, c.redactErrWith(redactionSnapshot, err)
 	}
@@ -1745,7 +1771,7 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
 	manifest := syncManifest{}
 	if opts.Direction == "" || opts.Direction == "push" {
-		manifest, err = buildSyncManifest(opts.Local, opts.SymlinkPolicy)
+		manifest, err = buildSyncManifestContext(ctx, opts.Local, opts.SymlinkPolicy)
 		if err != nil {
 			// Preserve rsync's own diagnostics for a missing source path. The
 			// manifest is an audit aid, not a second path-validation mechanism.
@@ -1770,10 +1796,7 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		if c.rsync != nil {
 			preflightErr = c.rsync(ctx, preflightArgs, preflightOut, preflightErrOut)
 		} else {
-			cmd := exec.CommandContext(ctx, "rsync", preflightArgs...)
-			cmd.Stdout = preflightOut
-			cmd.Stderr = preflightErrOut
-			preflightErr = cmd.Run()
+			preflightErr = runRsync(ctx, preflightArgs, preflightOut, preflightErrOut)
 		}
 		if preflightErr != nil {
 			if ctx.Err() != nil {
@@ -1805,10 +1828,10 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	if c.rsync != nil {
 		runErr = c.rsync(ctx, args, stdoutCapture, stderrCapture)
 	} else {
-		cmd := exec.CommandContext(ctx, "rsync", args...)
-		cmd.Stdout = stdoutCapture
-		cmd.Stderr = stderrCapture
-		runErr = cmd.Run()
+		runErr = runRsync(ctx, args, stdoutCapture, stderrCapture)
+	}
+	if runErr != nil && ctx.Err() != nil {
+		return nil, c.redactErrWith(redactionSnapshot, ctx.Err())
 	}
 	stdoutRaw, stdoutTruncation := stdoutCapture.payload()
 	stderrRaw, stderrTruncation := stderrCapture.payload()
@@ -1840,7 +1863,7 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("run rsync: %w", runErr))
 	}
 	if manifest.Digest != "" {
-		if verifyErr := verifySyncManifest(opts.Local, opts.SymlinkPolicy, manifest); verifyErr != nil {
+		if verifyErr := verifySyncManifestContext(ctx, opts.Local, opts.SymlinkPolicy, manifest); verifyErr != nil {
 			return res, c.redactErrWith(redactionSnapshot, proto.NewError(proto.CodeInvalidRequest, "sync source changed during transfer", proto.StateCompleted))
 		}
 	}
@@ -1899,7 +1922,9 @@ func buildSyncArgs(host transport.Host, sshArgs []string, opts SyncOptions) []st
 }
 
 func buildSyncArgsWith(host transport.Host, sshArgs []string, opts SyncOptions, preflight bool) []string {
-	sshCmd := append([]string{"ssh"}, sshArgs...)
+	// Reuse the existing master without allowing this auxiliary process to
+	// daemonize a replacement master outside its cancellable process group.
+	sshCmd := append([]string{"ssh", "-o", "ControlMaster=no", "-o", "ControlPersist=no"}, sshArgs...)
 	// Only long-standing flags: macOS ships openrsync, which rejects newer
 	// options like --info=stats1 that samba rsync accepts. -v gives a
 	// transferred-file list on both implementations.

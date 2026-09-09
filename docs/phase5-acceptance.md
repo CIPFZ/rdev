@@ -9,7 +9,7 @@ runtime path is exercised.
 |---|---|---|---|
 | P5-01 | Broker hello version/min-version negotiation, incompatible-peer tests, and pipelined hello/request integration test | Complete | Cross-version release matrix still needs CI coverage |
 | P5-02 | Private parent and lock validation, refusal of symlink/non-socket objects, idempotent close retaining the lock through drain; real daemon duplicate-start/SIGKILL recovery and UID 65534 denial on Linux (`TestDaemonRuntimeLifecycle`) | Complete (Linux runtime) | Darwin peer-credential/runtime coverage remains part of the platform matrix |
-| P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch; real CLI job/file/capability process tests through Unix broker; broker-backed `rdev serve` MCP ping/exec/read/write/capability and full job start/list/status/logs/stop/wait/rm tools with registration test; pipelined request test; `make stress-broker` passed 20-client wire test 100 times, with an additional 1000-run stress pass; Linux amd64 binary remote smoke passed; `make remote-session-benchmark` ran 3 x 500 real SSH requests from 20 independent client processes, with one SSH child, one remote PID and 20 distinct remote principal IDs | In progress | Real 20-process / one-agent benchmark now passes; shared CLI now rejects unsupported routes and directory listing uses the broker; shared owner-scoped secret set/list/delete and use now have initial runtime evidence; sync/session and declarative secret delegation plus independent review remain open |
+| P5-03 | `rdevd` owns `client.Client`, host registry, secrets, configurable agent lookup, wire dispatch; real CLI job/file/capability process tests through Unix broker; broker-backed `rdev serve` MCP ping/exec/read/write/capability and full job start/list/status/logs/stop/wait/rm tools with registration test; pipelined request test; `make stress-broker` passed 20-client wire test 100 times, with an additional 1000-run stress pass; Linux amd64 binary remote smoke passed; `make remote-session-benchmark` ran 3 x 500 real SSH requests from 20 independent client processes, with one SSH child, one remote PID and 20 distinct remote principal IDs | In progress | Real 20-process / one-agent benchmark now passes; shared CLI now rejects unsupported routes and directory listing uses the broker; shared owner-scoped secret set/list/delete and use now have initial runtime evidence; shared push/pull/delete previews have real CLI/MCP/rsync evidence; manifest-bound sync execution/session and declarative secret delegation plus independent review remain open |
 | P5-04 | Owner validation, handshake-declared and connection-level owner binding, wire client/project binding, persisted job owner, required daemon authentication by default, 0600 key provisioning, expiring HMAC token bound to owner identity, live SIGHUP revocation, and real daemon credential lifecycle tests | In progress | Credential lifecycle and distinct remote client/project identities now have process evidence; owner-scoped secret set/list/delete/use now have initial runtime evidence; declarative delegation and host administration remain open |
 | P5-05 | Per-connection context cancellation, broker frontend `DoContext` cancellation that closes only the local socket, shared client pool, disconnect integration test, transport cancellation/late-frame tests, full race test, and `make remote-lifecycle` real daemon/OpenSSH retry cancellation | In progress | Real SSH retry barrier, frontend context cancellation, SIGKILL and other-owner exec preservation now pass; independent review and shared job lifecycle integration remain |
 | P5-06 | Atomic fair admission with separate global/host/owner execution and queue limits, reserved control capacity, cancellable queued work and owner-only status snapshots; real 20-process remote bulk overload and owner SIGKILL tests | In progress | Remote file-I/O owner pressure now has runtime evidence; frontend ingress budgets now implemented with targeted real pressure coverage; warm pool has committed real 100-alias capacity/LRU/control/exec/reload/zero-subscriber tests and owner lane-byte projection; broader exec/job/sync pressure, response allocations and active-host saturation remain |
@@ -558,3 +558,25 @@ and 12 actual race-daemon/race-agent upgrades also passed. The runtime record
 links the full logs, old/new artifact digests, before-fix reproduction and
 remaining compatibility limits. Phase5 and the Multi Agent Gate remain
 In progress; independent review and the other requirements above are not waived.
+
+
+## Shared sync preview and cancellation follow-up
+
+The broker now owns CLI/MCP push, pull and delete previews. Exact-project and
+exact-host grants are checked before transport admission; delete previews also
+require `sync.delete`. Malformed envelopes and mutating requests fail before
+SSH. Bulk admission and independent worker/output reservations survive frontend
+cancellation until the real rsync process and its SSH descendants finish.
+
+A real local rsync regression reproduces the predecessor's cancellation hang:
+the SSH descendant retained output pipes after its rsync parent exited. Group
+cancellation now terminates those descendants without closing the pooled master.
+The remote regression holds a real server response and verifies cancellation,
+other-project base-agent preservation, unchanged source/destination trees, bounded
+and redacted output, audit privacy and the same authority after SIGKILL.
+
+This is an intermediate implementation. Shared execution still needs immutable
+source/destination plans, exact approval and durable mutation outcomes. Actual
+rsync network bytes are not yet included in protocol traffic or bulk pacing.
+Mixed long exec/job/status/sync, remaining shared routes, macOS and independent
+review still prevent Phase5 and Multi Agent Gate Complete status.

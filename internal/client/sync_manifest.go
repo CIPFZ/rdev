@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -31,6 +32,13 @@ type syncManifest struct {
 }
 
 func buildSyncManifest(root string, symlinkPolicy string) (syncManifest, error) {
+	return buildSyncManifestContext(context.Background(), root, symlinkPolicy)
+}
+
+func buildSyncManifestContext(ctx context.Context, root string, symlinkPolicy string) (syncManifest, error) {
+	if err := ctx.Err(); err != nil {
+		return syncManifest{}, err
+	}
 	var rows []string
 	var rowBytes int
 	rootAbs, err := filepath.Abs(root)
@@ -42,6 +50,9 @@ func buildSyncManifest(root string, symlinkPolicy string) (syncManifest, error) 
 		return syncManifest{}, err
 	}
 	add := func(path, rel string, i fs.FileInfo) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if len(rows) >= maxSyncManifestEntries {
 			return fmt.Errorf("sync manifest exceeds %d entries", maxSyncManifestEntries)
 		}
@@ -70,7 +81,7 @@ func buildSyncManifest(root string, symlinkPolicy string) (syncManifest, error) 
 				return e
 			}
 			h := sha256.New()
-			_, copyErr := io.Copy(h, f)
+			_, copyErr := io.Copy(h, &syncManifestReader{ctx: ctx, reader: f})
 			closeErr := f.Close()
 			if copyErr != nil {
 				return copyErr
@@ -139,10 +150,14 @@ func buildSyncManifest(root string, symlinkPolicy string) (syncManifest, error) 
 // whose source changed while in flight is reported as a conflict instead of
 // pretending the advertised snapshot was actually transferred.
 func verifySyncManifest(root, policy string, expected syncManifest) error {
+	return verifySyncManifestContext(context.Background(), root, policy, expected)
+}
+
+func verifySyncManifestContext(ctx context.Context, root, policy string, expected syncManifest) error {
 	if expected.Digest == "" {
 		return nil
 	}
-	got, err := buildSyncManifest(root, policy)
+	got, err := buildSyncManifestContext(ctx, root, policy)
 	if err != nil {
 		return err
 	}
@@ -150,4 +165,16 @@ func verifySyncManifest(root, policy string, expected syncManifest) error {
 		return fmt.Errorf("sync source changed during transfer")
 	}
 	return nil
+}
+
+type syncManifestReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *syncManifestReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }

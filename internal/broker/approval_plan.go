@@ -35,6 +35,9 @@ type ApprovalPlan struct {
 }
 
 func RequiresApproval(req Request) bool {
+	if isSyncOperation(req.Operation) && req.Sync != nil && req.Sync.DryRun {
+		return false
+	}
 	if descriptor, ok := proto.LookupOperation(req.Operation); ok {
 		// Arbitrary argv, stdin and executable contents cannot be proved harmless
 		// from a client-declared risk flag. All mutating wire operations need approval.

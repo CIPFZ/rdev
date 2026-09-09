@@ -344,6 +344,25 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 		if req.Wire != nil {
 			service.Audit.Append(broker.AuditEvent{RequestRef: requestRef, OperationRef: broker.OperationReference(req), RequestDigest: approvedPlan.RequestDigest, TargetDigest: approvedPlan.TargetDigest, ApprovalID: approvedPlan.ApprovalID, PolicyDigest: decision.Digest, Owner: req.Owner.Key(), Operation: req.Operation, Decision: "allow", Result: "admitted"})
 		}
+		if req.Operation == "sync.push" || req.Operation == "sync.pull" {
+			budget := broker.SyncPreviewBudget(req)
+			if err := lease.Reserve(budget); err != nil {
+				recordResult("quota_rejected")
+				_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, Error: err.Error()})
+				endRequest()
+				continue
+			}
+			expandedBytes += budget
+			result, err := service.PreviewSync(requestCtx, req)
+			outcome, message := "completed", ""
+			if err != nil {
+				outcome, message = "dispatch_error", err.Error()
+			}
+			recordResult(outcome)
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: err == nil, Error: message, Sync: result})
+			endRequest()
+			continue
+		}
 		if req.Operation == "secret.list" {
 			entries, err := service.SecretList(req)
 			result := "completed"

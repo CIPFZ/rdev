@@ -1,0 +1,11 @@
+=== RUN   TestRealRsyncCancellationStopsSSHDescendants
+=== RUN   TestRealRsyncCancellationStopsSSHDescendants/delete-preflight-false
+    rsync_linux_test.go:100: rsync descendant kept the output pipe and operation alive
+=== RUN   TestRealRsyncCancellationStopsSSHDescendants/delete-preflight-true
+    rsync_linux_test.go:100: rsync descendant kept the output pipe and operation alive
+--- FAIL: TestRealRsyncCancellationStopsSSHDescendants (6.03s)
+    --- FAIL: TestRealRsyncCancellationStopsSSHDescendants/delete-preflight-false (3.02s)
+    --- FAIL: TestRealRsyncCancellationStopsSSHDescendants/delete-preflight-true (3.01s)
+FAIL
+FAIL	github.com/CIPFZ/rdev/internal/client	6.032s
+FAIL

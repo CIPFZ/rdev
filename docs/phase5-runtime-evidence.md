@@ -1766,3 +1766,50 @@ negatives and optional race-agent artifact selection before this committed run.
 No Phase5-wide Complete claim follows: shared sync/session, declarative secret
 delegation, mixed workloads, identity/archive retirement, broader storage/schema/
 rollback cases, macOS runtime and independent review remain unfinished.
+
+
+## Shared sync preview implementation (2026-09-09)
+
+The actual daemon/CLI/MCP/rsync/SSH test passes push, pull and delete previews
+without changes to either tree. Two projects share a client ID: only the
+separately granted project may request delete, and another host/default-denied
+project cannot obtain sync authority. Direction/host/capability substitution,
+relative paths, malformed wire envelopes and attempted mutation are rejected
+before any SSH child exists. Trap frontend executables prove the broker owns
+SSH and rsync. A registered secret in a filename is redacted from output and
+absent from audit along with source/destination paths.
+
+The test wrapper starts real OpenSSH and waits for an actual rsync server byte
+before holding its response. Closing that frontend terminates the wrapper and
+SSH descendant, releases independent worker/capture budget and bulk admission,
+and preserves the other project's original base-agent PID. The preview capture
+retains at most its configured limit and reports dropped bytes. Exact-project
+audit correlates rejected requests; SIGKILL recovery preserves delete authority.
+
+The [before-fix regression](evidence/phase5/2026-09-09/shared-sync-cancellation-before.log)
+fails twice as intended: old code leaves its SSH descendant holding output pipes
+for both regular preview and delete preflight cancellation. The corrected
+[real local process and FIFO tests](evidence/phase5/2026-09-09/shared-sync-local-processes.log)
+pass. These tests execute real rsync, with a controlled SSH child for deterministic
+pipe ownership. Context-aware manifest hashing and nonblocking regular-file opens
+also avoid a FIFO replacement preventing cancellation.
+
+[Full check and repeated real regressions](evidence/phase5/2026-09-09/shared-sync-check-runtime.log)
+pass all packages, four embedded agent consistency checks, and three each of
+sync preview, frontend boundary, routes, core secrets and remote secret import.
+[All-package race](evidence/phase5/2026-09-09/shared-sync-race.log) passed.
+Actual daemon/frontend race and committed-source validation are recorded below.
+
+This is implementing-agent review. Shared manifest-bound execution, mutation
+recovery, sustained mixed workload, rsync wire-byte accounting, remaining routes,
+macOS runtime and independent review remain incomplete. The current source
+manifest is an observational aid, not an immutable execution snapshot.
+
+
+[Actual daemon and CLI race](evidence/phase5/2026-09-09/shared-sync-actual-race.log)
+passed all three full preview scenarios (50.33 seconds), including the MCP
+frontend, real SSH cancellation and secret-filename redaction. Race daemon
+SHA-256: `2c419d35e254d1cd424b790089ab87e2008bdc7aeb73ddff8a06bc4cdbbc0c90`; race CLI
+SHA-256: `d5641fb41ba8b452f5f116528a934de575c1cf5ba22bb06ad7e47e006741e41b`.
+The optional frontend-artifact selector was added after all-package race;
+production code was unchanged. These runs precede the implementation commit.

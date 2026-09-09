@@ -1087,33 +1087,46 @@ func readAllStdin() (string, error) {
 
 // ---------- sync ----------
 
-func cmdSync(ctx context.Context, c *client.Client, args []string) error {
+func parseSyncOptions(args []string) (client.SyncOptions, error) {
 	fs, err := parseFlags(args,
 		map[string]bool{"dry-run": true, "delete": true, "confirm-delete": true},
 		map[string]bool{"exclude": true})
 	if err != nil {
-		return err
+		return client.SyncOptions{}, err
 	}
-	if len(fs.pos) < 4 {
-		return errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete] [-confirm-delete] [-symlink-policy preserve|follow|skip] [-conflict-policy overwrite|skip|fail] [-max-output-bytes N]")
+	if len(fs.pos) != 4 {
+		return client.SyncOptions{}, errors.New("usage: rdev sync <host> push|pull <local> <remote> [-exclude P]... [-dry-run] [-delete] [-confirm-delete] [-symlink-policy preserve|follow|skip] [-conflict-policy overwrite|skip|fail] [-max-output-bytes N]")
 	}
 	var maxOutputBytes int64
 	if raw, ok := fs.vals["max-output-bytes"]; ok {
 		var parseErr error
 		maxOutputBytes, parseErr = strconv.ParseInt(raw, 10, 64)
 		if parseErr != nil {
-			return proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+			return client.SyncOptions{}, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
 		}
 	}
-	res, err := c.Sync(ctx, client.SyncOptions{
+	return client.SyncOptions{
 		Host: fs.pos[0], Direction: fs.pos[1], Local: fs.pos[2], Remote: fs.pos[3],
 		Exclude: fs.repeat["exclude"], DryRun: fs.bools["dry-run"], Delete: fs.bools["delete"],
 		ConfirmDelete: fs.bools["confirm-delete"], SymlinkPolicy: fs.str("symlink-policy"), ConflictPolicy: fs.str("conflict-policy"),
 		MaxOutputBytes: maxOutputBytes,
-	})
+	}, nil
+}
+
+func cmdSync(ctx context.Context, c *client.Client, args []string) error {
+	opts, err := parseSyncOptions(args)
 	if err != nil {
 		return err
 	}
+	res, err := c.Sync(ctx, opts)
+	if err != nil {
+		return err
+	}
+	return printSyncResult(res)
+}
+
+func printSyncResult(res *client.SyncResult) error {
+	var err error
 	stdout, stderr := []byte(res.Stdout), []byte(res.Stderr)
 	if res.StdoutB64 {
 		stdout, err = base64.StdEncoding.DecodeString(res.Stdout)

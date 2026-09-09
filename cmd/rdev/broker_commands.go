@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/CIPFZ/rdev/internal/broker"
+	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/support"
 )
@@ -19,6 +21,8 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		return errors.New("broker command required")
 	}
 	switch args[0] {
+	case "sync":
+		return brokerSync(ctx, args[1:])
 	case "secret":
 		return brokerSecret(ctx, args[1:])
 	case "ping":
@@ -61,6 +65,47 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 	default:
 		return errors.New("command is not available in shared broker mode")
 	}
+}
+
+func brokerSync(ctx context.Context, args []string) error {
+	opts, err := parseSyncOptions(args)
+	if err != nil {
+		return err
+	}
+	opts, err = client.NormalizeSyncOptions(opts)
+	if err != nil {
+		return err
+	}
+	local, err := filepath.Abs(opts.Local)
+	if err != nil {
+		return err
+	}
+	if os.IsPathSeparator(opts.Local[len(opts.Local)-1]) && !os.IsPathSeparator(local[len(local)-1]) {
+		local += string(os.PathSeparator)
+	}
+	opts.Local = local
+	host := opts.Host
+	opts.Host = ""
+	if opts.Direction == "" {
+		opts.Direction = "push"
+	}
+	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
+	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	r, err := c.DoContext(ctx, broker.Request{Operation: "sync." + opts.Direction, Host: host, Sync: &opts})
+	if err != nil {
+		return err
+	}
+	if !r.OK {
+		return errors.New(r.Error)
+	}
+	if r.Sync == nil {
+		return errors.New("broker sync returned no result")
+	}
+	return printSyncResult(r.Sync)
 }
 
 func brokerPoolStatus(ctx context.Context) error {
