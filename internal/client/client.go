@@ -731,6 +731,23 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			observe.ConnectionActivityFromContext(ctx).Retry()
 		}
 		redactionSnapshot := c.Secrets.Snapshot()
+		rejectBeforeSend := func(err error) error {
+			if firstErr != nil {
+				if descriptor.Class == proto.ClassMutating {
+					c.Hosts.RecordRequestEvent(observe.RequestAmbiguous)
+					return proto.NewError(proto.CodeAmbiguousOutcome, operationID, proto.StatePossiblyExecuted)
+				}
+				return fmt.Errorf("%w (retry preparation failed: %v)", firstErr, c.redactErrWith(redactionSnapshot, err))
+			}
+			safe := c.redactSetupErrWith(redactionSnapshot, err)
+			var original, projected *proto.ErrorEnvelope
+			if errors.As(err, &original) && original.Validate() == nil && errors.As(safe, &projected) && original.OperationID != "" {
+				copy := *projected
+				copy.OperationID = original.OperationID
+				safe = &copy
+			}
+			return &BeforeDispatchError{Cause: safe}
+		}
 		leaseConn := c.leasedConnForTarget
 		if bulk {
 			leaseConn = c.leasedBulkConn
@@ -747,21 +764,23 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			firstIdentity = identity.Host
 		} else if firstIdentity != identity.Host {
 			release()
-			return nil, nil, errors.New("host identity changed while retrying request")
+			return nil, nil, rejectBeforeSend(errors.New("host identity changed while retrying request"))
 		}
 		built, buildErr := build(identity)
 		if buildErr != nil {
-			redacted := c.redactErrWith(redactionSnapshot, buildErr)
 			release()
-			return nil, nil, redacted
+			return nil, nil, rejectBeforeSend(buildErr)
 		}
 		if built == nil || built.Request == nil {
 			release()
-			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+			return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent))
+		}
+		if attempt == 0 && built.StableOperationID != "" {
+			operationID = built.StableOperationID
 		}
 		if built.CallerID != "" && connectionUsesLegacyUnary(pooled.conn) {
 			release()
-			return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+			return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent))
 		}
 		if attempt == 0 {
 			if built.StableOperationID != "" {
@@ -772,7 +791,7 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			descriptor, descriptorErr = proto.RequireOperation(operationName)
 			if descriptorErr != nil {
 				release()
-				return nil, nil, descriptorErr
+				return nil, nil, rejectBeforeSend(descriptorErr)
 			}
 			deadlineSupported := false
 			for _, feature := range descriptor.RequiredFeatures {
@@ -780,7 +799,7 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			}
 			if built.Request.DeadlineUnixMilli != 0 && !deadlineSupported {
 				release()
-				return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+				return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent))
 			}
 			// A context can shorten an approved semantic deadline, never extend
 			// it. Freeze the earliest bound for every transport attempt.
@@ -789,13 +808,13 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			}
 		} else if built.Request.Op != operationName || built.StableOperationID != "" && built.StableOperationID != operationID {
 			release()
-			return nil, nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+			return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent))
 		}
 		if negotiated, ok := pooled.conn.(negotiatedConnection); ok && negotiated.NegotiatedVersion() >= 3 {
 			for _, feature := range descriptor.RequiredFeatures {
 				if !negotiated.SupportsFeature(feature) {
 					release()
-					return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+					return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent))
 				}
 			}
 		}
@@ -806,24 +825,23 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 			negotiated, ok := pooled.conn.(negotiatedConnection)
 			if !ok || negotiated.NegotiatedVersion() < proto.TypedProtocolVersion || !negotiated.SupportsFeature(proto.FeatureJobResourceEnvelope) {
 				release()
-				return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+				return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent))
 			}
 		}
 		if built.Request.Op == proto.OpJobList && built.Request.Job != nil && built.Request.Job.FilterIDs {
 			negotiated, ok := pooled.conn.(negotiatedConnection)
 			if !ok || negotiated.NegotiatedVersion() < 3 || !negotiated.SupportsFeature(proto.FeatureJobFilterIDs) {
 				release()
-				return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+				return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent))
 			}
 		}
 		if built.Request.Op == proto.OpJobStart && built.Request.Job != nil && built.Request.Job.DurableStart {
 			negotiated, ok := pooled.conn.(negotiatedConnection)
 			if !ok || negotiated.NegotiatedVersion() < 3 || !negotiated.SupportsFeature(proto.FeatureDurableJobStart) {
 				release()
-				return nil, nil, proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent)
+				return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent))
 			}
 		}
-
 		built.Request.OperationID = operationID
 		built.Request.ClientID = c.callerID
 		if built.CallerID != "" {
@@ -1158,7 +1176,14 @@ func (c *Client) redactErrWith(snapshot *secrets.Store, err error) error {
 		return nil
 	}
 	if before, ok := err.(*BeforeDispatchError); ok {
-		return &BeforeDispatchError{Cause: c.redactSetupErrWith(snapshot, before.Cause)}
+		safe := c.redactSetupErrWith(snapshot, before.Cause)
+		var original, projected *proto.ErrorEnvelope
+		if errors.As(before.Cause, &original) && original.Validate() == nil && errors.As(safe, &projected) && original.OperationID != "" {
+			copy := *projected
+			copy.OperationID = original.OperationID
+			safe = &copy
+		}
+		return &BeforeDispatchError{Cause: safe}
 	}
 	msg := c.redactTextWith(snapshot, err.Error())
 	if msg == err.Error() {

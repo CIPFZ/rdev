@@ -55,6 +55,10 @@ func TestDurableStartRequiresNegotiatedFeatureBeforeSending(t *testing.T) {
 	}
 	_, err := c.DoProtocol(t.Context(), "h", &proto.Request{Op: proto.OpJobStart, ClientID: "a", ProjectID: "p", OperationID: "op_unsupported_durable", Job: &proto.JobParams{DurableStart: true, Spec: &proto.ExecParams{Argv: []string{"true"}}}})
 	var envelope *proto.ErrorEnvelope
+	var before *BeforeDispatchError
+	if !errors.As(err, &before) {
+		t.Fatalf("initial feature rejection lost pre-send proof: %v", err)
+	}
 	if !errors.As(err, &envelope) || envelope.Code != proto.CodeUnsupportedFeature {
 		t.Fatalf("unsupported durable agent: %v", err)
 	}
@@ -87,5 +91,31 @@ func TestDurableRetryRejectionCannotEraseFirstAttemptUncertainty(t *testing.T) {
 	var envelope *proto.ErrorEnvelope
 	if attempts != 2 || resp != nil || !errors.As(err, &envelope) || envelope.Code != proto.CodeAmbiguousOutcome || envelope.ExecutionState != proto.StatePossiblyExecuted {
 		t.Fatalf("later rejection erased uncertain first attempt: response=%v err=%v", resp, err)
+	}
+}
+
+func TestDurableReconnectFeatureRejectionPreservesUncertainty(t *testing.T) {
+	c := newTestClient()
+	defer c.Close()
+	host := transport.Host{Name: "h", Addr: "u@h"}
+	if err := c.Hosts.Add(host); err != nil {
+		t.Fatal(err)
+	}
+	dials, sent := 0, 0
+	c.dial = func(context.Context, transport.Host, AgentLookup) (remoteConnection, error) {
+		dials++
+		base := &fakeRemoteConn{host: host, handler: func(req *proto.Request) (*proto.Response, error) { sent++; return nil, io.EOF }}
+		if dials == 1 {
+			return base, nil
+		}
+		return &noDurableJobConn{base}, nil
+	}
+	_, err := c.DoProtocol(t.Context(), "h", &proto.Request{Op: proto.OpJobStart, ClientID: "a", ProjectID: "p", OperationID: "op_review_reconnect_feature", Job: &proto.JobParams{DurableStart: true, Spec: &proto.ExecParams{Argv: []string{"true"}}}})
+	var envelope *proto.ErrorEnvelope
+	if !errors.As(err, &envelope) || envelope.Code != proto.CodeAmbiguousOutcome || envelope.ExecutionState != proto.StatePossiblyExecuted || envelope.OperationID != "op_review_reconnect_feature" {
+		t.Fatalf("first attempt uncertainty lost: dials=%d sent=%d error=%+v", dials, sent, envelope)
+	}
+	if sent != 1 || dials != 2 || err == nil {
+		t.Fatalf("bad fixture dials=%d sent=%d err=%v", dials, sent, err)
 	}
 }

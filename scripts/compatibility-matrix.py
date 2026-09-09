@@ -33,7 +33,11 @@ cases=[
 ]
 result={'schema_version':1,'source_commit':current,'predecessor_commit':previous,'predecessor_kind':'Phase7 engineering baseline; no formal N-1 release claim','started_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'toolchain':subprocess.check_output([a.go,'version'],text=True).strip(),'binaries':{},'cases':[],'production_certification':'pending','boundary':'one authorized Linux SSH endpoint, private namespace per test; CLI/MCP shared read/policy subset and retained jobs; full standalone/migration/rollback/channel/approval/archive matrix remains pending'}
 for prefix,root in [('current',repo),('previous',old)]:
- for path in ['bin/rdev','bin/rdevd','cmd/rdev/agents/rdev-agent-linux-amd64']:result['binaries'][prefix+'/'+path]=digest(root/path)
+ for path in ['bin/rdev','bin/rdevd','cmd/rdev/agents/rdev-agent-linux-amd64']:
+  if prefix=='current':
+   metadata=subprocess.check_output([a.go,'version','-m',str(root/path)],text=True)
+   if 'vcs.revision='+current not in metadata or 'vcs.modified=false' not in metadata:raise SystemExit('current binary/source identity mismatch; clean rebuild required')
+  result['binaries'][prefix+'/'+path]=digest(root/path)
 for name,test,overrides in cases:
  env={**base,**overrides}
  with (out/(name+'.log')).open('w') as f:

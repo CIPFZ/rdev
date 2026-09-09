@@ -7,7 +7,7 @@ import (
 	"github.com/CIPFZ/rdev/internal/secrets"
 )
 
-// BeforeDispatchError proves that connection acquisition failed before this
+// BeforeDispatchError proves that connection acquisition or local request validation failed before this
 // operation reached the business transport. A broker may use this local type
 // to resolve its pending intent as not_sent. A reconnect error after an earlier
 // dispatch must never carry this marker, even when that reconnect was refused.
