@@ -1,32 +1,37 @@
 # Phase 5 implementation status
 
-The broker package now contains the first implementation layer for P5-01 through
-P5-16: protocol version negotiation, private Unix socket ownership, shared
-service state, owner scoping, cancellation isolation, quotas, fair scheduling,
-traffic lanes, merged job watches, detached-job registry, leases, policy and
-approval checks, rotating audit events, readiness, and validated reload/drain.
+As of 2026-09-09, Phase5 and the Multi Agent Gate remain **In progress**.
+The [acceptance record](phase5-acceptance.md) is authoritative and maps the
+remaining work to six finite closeout deliverables. The
+[runtime evidence](phase5-runtime-evidence.md) links implementation commits,
+actual commands, results and known limitations.
 
-Validation currently covers `internal/broker`, `internal/proto`,
-`internal/transport`, and `internal/client` with the Go toolchain under
-`~/sdk/go1.25.0`. The repository gate `make check` passes after generating the
-four embedded agent artifacts; it runs agent consistency checks, `go vet`, and
-the complete test suite.
-The `cmd/rdevd` entrypoint now performs hello negotiation, peer credential
-checks, owner-scoped policy checks, QoS admission, audit recording, and wire
-dispatch through the broker-owned `client.Client`; broker shutdown also closes
-the shared client pool. Persistent job re-discovery and multi-client QoS
-benchmarks remain follow-up validation for the final Phase 5 gate.
+Real Linux/OpenSSH evidence already covers:
 
-User service templates are provided under `deploy/systemd` and `deploy/launchd`;
-both rely on the private socket lock and bounded shutdown path. Policy grants,
-job ownership, audit events, and config are persisted beside the broker socket.
+- Twenty independent client processes sharing one base agent, with distinct
+  client/project identities; authenticated provisioning, expiry and rotation.
+- Owner/host-scoped policy, secrets and jobs; exact-request wire/secret approval;
+  cancellation, frontend SIGKILL and transport retry without interrupting peers.
+- Sustained weighted file-I/O queues and control p95 within twice baseline under
+  bulk load, including 512 retained secret versions; bounded ingress and leases.
+- Twenty-process shared job waits, durable event replay, pre-ACK mutation crash
+  recovery and twelve actual upgrades from two predecessor daemon/agent pairs.
+- Owner-scoped audit correlation, a 600-second/603079-call rotation/recovery
+  soak, CLI/MCP pool/queue/traffic/setup diagnostics and Linux systemd recovery.
+- Shared push/pull/delete previews, real rsync descendant cancellation and
+  complete bounded source content scans (`5e2d9dc`). Shared mutating sync still
+  requires retained source/destination plans, exact approval and durable outcomes.
 
+The remaining deliverables are: finish shared routes; verify mixed exec/job/
+status/sync QoS; complete sync traffic accounting; validate macOS launchd; obtain
+independent review; and run the final integrated gate. Full production scale,
+24-hour soak and the automated N/N-1 rollback matrix belong to Phase8 as specified
+in the original plan. They do not replace Phase5's actual upgrade/crash tests.
 
-The 2026-09-08 follow-up adds authenticated-by-default daemon startup, private
-key generation and token provisioning, live key rotation with session revocation,
-fail-closed startup/config parsing, and real process lifecycle tests. Linux
-systemd user installation and automatic restart are exercised by
-`make remote-service-smoke`; `make remote-phase5-runtime` additionally executes
-the real credential/crash test suite on the remote host without needing Go there.
-Consult `phase5-acceptance.md` for the authoritative incomplete items; source
-primitives and green unit tests alone are not completion evidence.
+Current validation uses Go 1.25.0 at
+`/data/tmp/rdev-toolchain/go/bin/go`. `make check` builds and verifies the four
+embedded agent artifacts, runs vet and tests all packages. The source scan batch
+passed committed-source check, remote sync regressions, stress, readiness and
+Linux runtime/service recovery; its all-package and real daemon/CLI race results
+are archived in the runtime evidence. Passing those checks alone does not close
+the remaining Phase5 deliverables.

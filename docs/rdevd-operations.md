@@ -600,7 +600,8 @@ Every authorized request must match an implemented local handler or a registered
 remote operation with a matching `wire.op` and nonempty host. Policy denial runs
 first; absent handlers and malformed envelopes then fail before approval use,
 state mutation or transport admission. Granting an unimplemented operation does
-not make it available. Shared sync/session and secret file-import implementation remain open.
+not make it available. Shared sync execution and session administration remain
+open; shared sync previews and secret file import are documented below.
 
 Local `status`, `pool.health`, `audit.health` and `audit_query` require an empty
 host and no wire envelope, because these queries do not filter their data by
@@ -856,5 +857,5 @@ project/host/delete denial, output redaction and limits, held-server cancellatio
 unchanged trees and SIGKILL recovery. Shared mutating sync currently fails with
 `shared sync execution requires a prepared manifest`; immutable approved plans
 and durable execution are still being implemented. Preview manifests describe
-observed local metadata and are not execution approvals. Rsync traffic is not
+observed local content and metadata and are not execution approvals. Rsync traffic is not
 yet charged to the protocol byte counters or global bulk bandwidth budget.

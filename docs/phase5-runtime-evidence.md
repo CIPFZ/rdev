@@ -1897,3 +1897,20 @@ reservation. This is not independent reviewer approval.
 Race artifact SHA-256:
 - daemon: `5c33f4f0d3586bd73a7bc5d5c73a65ab508fc4545385843da4047e06218fb021`
 - CLI: `e7798c70bf3e78cc266455dc763a1e79f40256a9a469b80dd854c146636c6f24`
+
+
+## Committed source scan validation (`5e2d9dc`)
+
+[Committed check and runtime log](evidence/phase5/2026-09-09/committed-sync-manifest-5e2d9dc.log)
+records passing `make check remote-sync-preview stress-broker smoke-rdevd
+remote-phase5-runtime` on clean main. Three complete preview scenarios and
+three large-file/content-budget/entry-budget scenarios passed using real rsync
+and SSH. The 100 twenty-client stress runs, readiness, real principal lifecycle
+and Linux systemd install/enable/start/reload/SIGKILL recovery/stop/start passed.
+Systemd observed PID `1592722 -> 1592782`. Remote daemon SHA-256:
+`9362e78d58ee85fdc118a90dc5998413eb9a13890800630ca9dd5bcf97d0e5ab`.
+
+The archived all-package and actual daemon/CLI race logs cover the same
+production implementation before commit. Source observations are now complete
+within their stated budgets; approved immutable execution and the remaining
+Phase5 gates are still unfinished.

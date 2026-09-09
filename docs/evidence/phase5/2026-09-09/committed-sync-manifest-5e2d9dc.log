@@ -1,0 +1,130 @@
+building agent linux/amd64
+building agent linux/arm64
+building agent darwin/amd64
+building agent darwin/arm64
+/data/tmp/rdev-toolchain/go/bin/go vet ./...
+/data/tmp/rdev-toolchain/go/bin/go test ./... -count=1
+ok  	github.com/CIPFZ/rdev/cmd/rdev	0.005s
+ok  	github.com/CIPFZ/rdev/cmd/rdev-agent	34.042s
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	9.636s
+ok  	github.com/CIPFZ/rdev/internal/broker	4.361s
+ok  	github.com/CIPFZ/rdev/internal/buildinfo	0.003s
+ok  	github.com/CIPFZ/rdev/internal/client	0.529s
+ok  	github.com/CIPFZ/rdev/internal/framewriter	0.041s
+ok  	github.com/CIPFZ/rdev/internal/mcpsrv	0.631s
+ok  	github.com/CIPFZ/rdev/internal/observe	0.005s
+ok  	github.com/CIPFZ/rdev/internal/proto	0.005s
+ok  	github.com/CIPFZ/rdev/internal/secrets	0.010s
+ok  	github.com/CIPFZ/rdev/internal/session	10.793s
+ok  	github.com/CIPFZ/rdev/internal/state	0.122s
+ok  	github.com/CIPFZ/rdev/internal/storage	0.030s
+ok  	github.com/CIPFZ/rdev/internal/support	0.003s
+ok  	github.com/CIPFZ/rdev/internal/synctree	0.129s
+ok  	github.com/CIPFZ/rdev/internal/transport	2.337s
+ok       rdev-agent-linux-amd64 ae88c3c5fb88
+ok       rdev-agent-linux-arm64 2b5060f1e076
+ok       rdev-agent-darwin-amd64 2d7b15b735ec
+ok       rdev-agent-darwin-arm64 76e6b91235ac
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerSyncPreview$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerSyncPreview
+    remote_sync_test.go:328: actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending
+--- PASS: TestRemoteBrokerSyncPreview (3.26s)
+=== RUN   TestRemoteBrokerSyncPreview
+    remote_sync_test.go:328: actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending
+--- PASS: TestRemoteBrokerSyncPreview (3.03s)
+=== RUN   TestRemoteBrokerSyncPreview
+    remote_sync_test.go:328: actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending
+--- PASS: TestRemoteBrokerSyncPreview (3.10s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	9.401s
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE='' RDEV_TEST_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' /data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run '^TestRemoteBrokerSyncManifest$' -count=3 -timeout=3m -v
+=== RUN   TestRemoteBrokerSyncManifest
+    remote_sync_manifest_test.go:84: actual daemon/rsync/SSH: full 5 MiB source digest detects same-size/same-mtime mutation; sparse source beyond 8 GiB and 8200-entry source fail bounded shared scan; destination remains empty
+--- PASS: TestRemoteBrokerSyncManifest (1.93s)
+=== RUN   TestRemoteBrokerSyncManifest
+    remote_sync_manifest_test.go:84: actual daemon/rsync/SSH: full 5 MiB source digest detects same-size/same-mtime mutation; sparse source beyond 8 GiB and 8200-entry source fail bounded shared scan; destination remains empty
+--- PASS: TestRemoteBrokerSyncManifest (1.94s)
+=== RUN   TestRemoteBrokerSyncManifest
+    remote_sync_manifest_test.go:84: actual daemon/rsync/SSH: full 5 MiB source digest detects same-size/same-mtime mutation; sparse source beyond 8 GiB and 8200-entry source fail bounded shared scan; destination remains empty
+--- PASS: TestRemoteBrokerSyncManifest (1.94s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	5.817s
+/data/tmp/rdev-toolchain/go/bin/go test ./cmd/rdevd -run TestUnixBrokerTwentyClients -count=100 -timeout=5m
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	0.387s
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+RDEV_REMOTE_RUNTIME=1 RDEV_REMOTE_SERVICE=1 RDEV_REMOTE_SSH='' RDEV_SSH_CONFIG='/data/tmp/rdev-validation/ssh/config' RDEV_GO='/data/tmp/rdev-toolchain/go/bin/go' sh scripts/remote-rdevd-smoke.sh
+remote validation source: 5e2d9dc
+rdevd artifact sha256: 9362e78d58ee85fdc118a90dc5998413eb9a13890800630ca9dd5bcf97d0e5ab
+rdevd authenticated readiness/permissions/single-instance/shutdown smoke: ok
+=== RUN   TestDaemonRuntimeLifecycle
+=== RUN   TestDaemonRuntimeLifecycle/principal_provision_expire_rotate
+    runtime_integration_test.go:241: real daemon: provisioning, principal/project binding, default deny, expiry, atomic config/key reload, established-session revocation, restart passed
+=== RUN   TestDaemonRuntimeLifecycle/single_instance_crash_signal
+    runtime_integration_test.go:256: real UID 65534 process denied access to root-owned broker socket
+    runtime_integration_test.go:283: real daemon: private socket, duplicate-start readiness, SIGKILL stale-socket recovery and SIGTERM cleanup passed
+=== RUN   TestDaemonRuntimeLifecycle/audit_owner_query_restart
+    runtime_integration_test.go:345: real daemon: colliding owner display names isolated, decision/result timestamps queried before and after restart, untrusted text excluded
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_config
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_policy
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_events
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_events
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_events
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_secrets
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_secrets
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_secrets
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_secrets
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_secrets
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_continuity
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/null_continuity
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_continuity
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/bad_hosts
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/public_hosts
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_host_field
+=== RUN   TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_hosts
+--- PASS: TestDaemonRuntimeLifecycle (2.38s)
+    --- PASS: TestDaemonRuntimeLifecycle/principal_provision_expire_rotate (2.02s)
+    --- PASS: TestDaemonRuntimeLifecycle/single_instance_crash_signal (0.06s)
+    --- PASS: TestDaemonRuntimeLifecycle/audit_owner_query_restart (0.06s)
+    --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed (0.24s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/missing_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/weak_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_key (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_config (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_config (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_config_field (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_policy (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_jobs (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_events (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_events (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_events (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_secrets (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_secrets (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_secrets (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_secrets (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/symlink_secrets (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_continuity (0.00s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/null_continuity (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_continuity (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/bad_hosts (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/public_hosts (0.02s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/unknown_host_field (0.01s)
+        --- PASS: TestDaemonRuntimeLifecycle/startup_fail_closed/duplicate_hosts (0.01s)
+PASS
+Created symlink /root/.config/systemd/user/rdevd-phase5-service-1592700.service → /tmp/rdev-remote-smoke.MWrwfx/service/rdevd-phase5-service-1592700.service.
+Created symlink /root/.config/systemd/user/default.target.wants/rdevd-phase5-service-1592700.service → /tmp/rdev-remote-smoke.MWrwfx/service/rdevd-phase5-service-1592700.service.
+systemd user install/enable/start/reload/SIGKILL recovery/stop/start: ok (pid 1592722 -> 1592782)
