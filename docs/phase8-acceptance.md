@@ -1,31 +1,38 @@
 # Phase8 acceptance
 
-Status: **In progress — not Production Certified**. Baseline `e73a38b` matched
-`origin/main` after fetch, with a clean workspace. Phase5/6/7 evidence remains
-valid for unchanged behavior; new acceptance must bind the final Phase8 source.
-macOS runtime is explicitly deferred, and all original Tier 1 targets remain
-required. Cross-builds and isolated signing keys are never production evidence.
+Status: **In progress — not Phase8 Complete or Production Certified**.
+The frozen product, runtime tests and local release artifacts bind
+`047a0f53bb39b637b55c5aedec99c28ff0a0f8da`. Later workflow/closure changes are
+recorded separately; CI builds have their own commit stamps and are not the same
+bytes as this local candidate. The handoff baseline was `e73a38b`, clean and equal
+to `origin/main` after fetch. No original platform target or gate is waived.
 
-| Requirement | Current engineering / acceptance boundary |
+| Requirement | Accepted engineering evidence | Remaining acceptance |
+|---|---|---|
+| P8-01 | Strict SSHSIG manifest/trust policy, exact six-binary and metadata binding, linked-dependency notices, online source/binary vulnerability audits, two independent clean builds with six equal digests, full-bundle test signing and eight tamper refusals | Official authorized signer/root and corresponding final release identity; test root is not official |
+| P8-02 | Namespace inode lock, bounded staging, durable journal, real hello/state readiness and verified rollback implementation; subprocess lock/SIGKILL window tests; actual predecessor upgrade retains original supervisors and once-only effects | Full real-agent upgrade/automatic and explicit rollback/fault-window matrix; unit fixture agents do not certify production rollback |
+| P8-03 | Shared administrator verification, signed test-root CLI/broker/agent runtime, channel/pin/rollback policy negatives, low-sensitivity audit, typed rejection and uncertainty semantics | Full historical channel/rollback combinations and official identity deployment remain unverified |
+| P8-04 | Local check/race, actual ten-target fuzz, real IPv4/IPv6/ProxyJump and isolated auth/host-key negatives; hosted runs actually executed | Hosted SSH step failed on 563/047; diagnostic rerun pending. Full declared DNS/storage/half-close/failure matrix remains incomplete |
+| P8-05 | Persistent supervisor, fixed storage/resource budgets, actual real-SSH short engineering fault/idle probes; first frozen 100-instance/20-client run stopped after 25.48s with sync not_sent and no staging; bounded workload admission correction under verification | Passing final short-run result, continuous 24h and full scale fairness/Fleet/in-flight/GC/metric coverage; no physical-100 topology supplied |
+| P8-06 | Actual Phase7 predecessor clean build: retained-supervisor upgrade, old CLI/MCP→new broker/agent and new CLI/MCP→old broker/agent shared read/policy cases passed | Formal N-1 release identity; full standalone/state rollback/approval/archive/channel matrix |
+
+| Production Gate | Status and evidence boundary |
 |---|---|
-| P8-01 | SSHSIG release manifest, shared runtime verifier, exact metadata/build binding, third-party notice collection and independent-build entry implemented; final clean build/audit/reproducibility and independent review pending. Official signer/root not supplied. |
-| P8-02 | Remote inode lock, bounded staging, journal, real hello/features/state health, atomic switch and verified rollback implemented; final real crash/upgrade drills and review pending. Legacy non-lease writers require maintenance. |
-| P8-03 | Administrator stable/beta/dev policy, signer validity/revocation, version pin, host restrictions and exact rollback authorization implemented; final frontend/audit/support validation pending. |
-| P8-04 | Isolated IPv4/IPv6/ProxyJump, actual fuzz and read-only CI workflow implemented; final clean runtime and hosted run pending. |
-| P8-05 | Real isolated SSH scale/mixed-load supervisor implemented and under review. Short smoke tests are fixture evidence. Final 100-target/20-process run and continuous 24h acceptance not run. |
-| P8-06 | Explicit source/schema/protocol matrix in preparation; historical upgrade fixtures retained. Full N/N-1 and state rollback matrix not yet accepted. |
+| 1. High/Medium findings closed | Passed for independently reviewed product source 047a0f5; no unresolved confirmed High/Medium and no agent-made risk acceptance. Workflow-only delta independently reviewed. |
+| 2. All declared Tier 1 runtime | Pending. Linux amd64/OpenSSH/XFS and actual IPv4/IPv6/ProxyJump exercised. Linux arm64 and Darwin runtime not run; macOS remains explicitly deferred. Cross-builds do not pass these targets. |
+| 3. Official signature, SBOM, provenance, audits, notices | Blocked on authorized official signing identity/root. Local exact-byte audits/notices/SBOM/provenance and isolated test signatures passed. |
+| 4. Real continuous 24h within budgets | Pending; no completed 24h evidence. Starting or supervising a run is not passing it. |
+| 5. Complete upgrade/rollback/crash/network/migration drills | Partial. Actual retained-job upgrade, broker/network/mutation recovery passed; full real rollback and historical state matrix still pending. |
 
-Production Gates remain pending: independent High/Medium finding closure; actual
-Tier 1 runtime; official artifact identity/audit/notices; continuous 24h within
-budgets; and complete upgrade/rollback/crash/network/migration drills. No finding
-has been accepted as a risk by the agent. No release or deployment is authorized.
-
-The available environment is Linux amd64 / OpenSSH 9.3p2, Go 1.26.8, Docker and
-sshd, plus the existing authorized `service-deploy` Linux SSH target. `/tmp` has
-sufficient space for isolated artifacts; `/data` had only about 5.4 GiB free.
-No formal signing identity, hosted-run API authorization, arm64/Darwin machine or
-100-machine topology has been supplied. A one-machine isolated-instance test
-reports its shared kernel/user/storage/network fault domain explicitly.
+The available environment is Linux amd64 / OpenSSH 9.3p2 / XFS, Go 1.26.8,
+16 CPUs and about 32 GiB RAM, with an authorized Linux amd64 SSH endpoint.
+The isolated-instance topology shares one kernel/filesystem/network fault domain;
+physical machine count is unverified. A non-root SSH preflight also passed on
+this Linux system; it does not certify the Ubuntu hosted runner. A GitHub runner
+actually executed workflows, but anonymous API/log access is rate-limited or
+requires authentication. No formal signer, arm64/Darwin runtime or authorized
+100-machine topology has been supplied. No production release/deployment,
+repository permission/secret change or cloud purchase was performed.
 
 ## Contracts and operation
 
@@ -167,7 +174,7 @@ retire redaction history, or recreate namespaces to prolong the test. Fixed
 ledger limits and workload budgets remain visible; exhausted quota is not
 reported as a memory leak or silently bypassed. Strict mixed-load SLO retains
 the existing 2× control p95 threshold and runs without competing build/fuzz/load.
-No final 24h run has yet started.
+No completed 24h run is claimed. The current run identity and exact observed elapsed time are recorded with the final evidence below.
 
 
 ## Compatibility evidence boundary

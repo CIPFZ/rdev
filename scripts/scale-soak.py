@@ -8,7 +8,9 @@ The result states exact coverage; running 24h alone cannot pass Production Gate.
 Use start/status/cancel/cleanup; never restart a stopped run to add elapsed time.
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -191,9 +193,42 @@ def connect(root, owner, token):
 def checked(sock, request):
     response = rpc(sock, request)
     if not response.get("ok") or ("wire" in response and not response["wire"].get("ok")):
-        code = response.get("wire", {}).get("error", {}).get("code", "broker-denied")
-        raise RuntimeError("operation " + request["operation"] + " rejected: " + code)
+        envelope = response.get("error_envelope") or response.get("wire", {}).get("error") or {}
+        code = envelope.get("code", "broker-denied")
+        # Match a fixed product constant; never retain arbitrary peer diagnostics.
+        if response.get("error") == "broker ingress limit reached":
+            code = "broker-ingress-limit"
+        mutation = response.get("mutation") or {}
+        state = mutation.get("state") or envelope.get("execution_state", "unknown")
+        raise RuntimeError("operation " + request["operation"] + " rejected: " + code + "; state=" + state)
     return response
+
+
+@contextlib.contextmanager
+def large_response_admission(root, stats):
+    """Test workload budget: serialize retained sync and job wait reservations.
+
+    One sync reserves 16+8+4 MiB; job wait reserves 8 MiB. Two syncs plus
+    one wait already exhaust the product's global 64 MiB before request bytes.
+    All 20 clients and the daily mutation count remain; this is explicitly
+    bounded workload admission, not saturated sync-throughput certification.
+    Kernel flock releases on process death; no mutation is retried here.
+    """
+    started = time.monotonic()
+    with (root / "large-response.lock").open("a+b") as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() - started >= BOUNDS["request_deadline_seconds"]:
+                    raise RuntimeError("workload large-response admission deadline")
+                time.sleep(.02)
+        stats["workload_admission_wait_seconds"] = stats.get("workload_admission_wait_seconds", 0) + time.monotonic() - started
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def approved_wire(root, sock, owner, host, wire, operation_id):
@@ -299,7 +334,8 @@ def mixed_cycle(root, spec, index, cycle, sock, owner, host, target, stats):
         started = call("job_start", {"job": {"spec": {"argv": ["python3", "-c", log_program, str(job_marker)]}, "resources": {"wall_timeout_sec": 60, "fds": 128}}}, mutation=True)
         job_id = started["wire"]["job"]["info"]["id"]
         call("job_status", {"job": {"id": job_id}})
-        call("job_wait", {"job": {"id": job_id, "wait_timeout_sec": 10}})
+        with large_response_admission(root, stats):
+            call("job_wait", {"job": {"id": job_id, "wait_timeout_sec": 10}})
         info = call("job_status", {"job": {"id": job_id}})["wire"]["job"]["info"]
         ledger = info["stdout_ledger"]
         if ledger["original_bytes"] < 128 << 10 or not 0 < ledger["retained_bytes"] <= BOUNDS["job_log_bytes"] or ledger["dropped_bytes"] <= 0:
@@ -316,9 +352,10 @@ def mixed_cycle(root, spec, index, cycle, sock, owner, host, target, stats):
             source.write_bytes((f"{index}:{cycle}:".encode() + bytes(range(256))) * 4096)
             destination = business / f"sync-{index}"
             options = {"direction": "push", "local": str(source), "remote": str(destination)}
-            prepare = call("sync.push", sync=dict(options, prepare=True, dry_run=True))
-            options["plan_id"] = prepare["sync"]["plan_id"]
-            call("sync.push", sync=options, mutation=True)
+            with large_response_admission(root, stats):
+                prepare = call("sync.push", sync=dict(options, prepare=True, dry_run=True))
+                options["plan_id"] = prepare["sync"]["plan_id"]
+                call("sync.push", sync=options, mutation=True)
             if sha(source) != sha(destination):
                 raise RuntimeError("retained sync byte identity changed")
         stats["cycles"] += 1
@@ -1104,6 +1141,7 @@ def main():
     parser.add_argument("action", choices=("start", "status", "cancel", "cleanup"))
     parser.add_argument("--run", type=Path, required=True, help="new private absolute /tmp directory for start")
     parser.add_argument("--artifacts", type=Path, help="directory containing rdevd and agents/rdev-agent-linux-ARCH")
+    parser.add_argument("--artifact-source", help="explicit clean artifact commit; requires identical cmd/internal/go.mod/go.sum/Makefile inputs")
     parser.add_argument("--go", default=os.environ.get("RDEV_GO", "go"), help="Go tool used to inspect immutable binary build metadata")
     parser.add_argument("--seconds", type=int, default=180)
     parser.add_argument("--targets", type=int, default=100)
@@ -1135,6 +1173,11 @@ def main():
             parser.error("start requires --artifacts and a new direct /tmp child")
         repo = Path(__file__).resolve().parent.parent
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+        artifact_commit = commit
+        if args.artifact_source:
+            artifact_commit = subprocess.check_output(["git", "rev-parse", args.artifact_source + "^{commit}"], cwd=repo, text=True).strip()
+            if subprocess.run(["git", "diff", "--quiet", artifact_commit, "HEAD", "--", "cmd", "internal", "go.mod", "go.sum", "Makefile", ":(exclude)**/*_test.go"], cwd=repo).returncode:
+                parser.error("artifact source differs in product/build inputs")
         dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=repo))
         if args.allow_dirty_smoke and args.seconds > 600:
             parser.error("--allow-dirty-smoke is always limited to 600 seconds, including clean checkouts")
@@ -1156,12 +1199,14 @@ def main():
         for binary in [root / "rdevd", *sorted((root / "agents").iterdir())]:
             metadata = command([args.go, "version", "-m", binary], capture_output=True).stdout.decode()
             build_metadata[str(binary.relative_to(root))] = metadata
-            if not args.allow_dirty_smoke and ("vcs.revision=" + commit not in metadata or "vcs.modified=false" not in metadata):
+            if not args.allow_dirty_smoke and ("vcs.revision=" + artifact_commit not in metadata or "vcs.modified=false" not in metadata):
                 parser.error("binary/source identity mismatch; rebuild clean source before starting a long probe")
         write(root / "build-metadata.json", build_metadata)
         artifacts = {str(path.relative_to(root)): sha(path) for path in [root / "harness.py", root / "rdevd", *sorted((root / "agents").iterdir())]}
         spec = {"schema": 1, "kind": "real-ssh-scale", "run_id": run_id, "source_commit": commit, "source_dirty": dirty, "allow_dirty_smoke": args.allow_dirty_smoke, "artifact_build_metadata": "build-metadata.json", "seconds": args.seconds, "targets": args.targets, "clients": args.clients, "shared_host_instances": 1, "physical_machine_count": "unverified", "fault_domain": "one shared Linux kernel and filesystem", "namespace": str(namespace), "artifacts": artifacts, "workload": args.workload, "predeclared_bounds": BOUNDS, "bounds_basis": "conservative 16-CPU/32-GiB shared Linux instance; observed managed CPU <=12 cores (75% of 16) per sampling interval; fixed 20-minute cycles budget 5040 ordinary mutations plus 40 logger starts/removals and six 100-target Fleet plans/24h=5680, below existing 8192, no direct record deletion/reset; not production throughput/SLO", "production_gate": "not-run", "missing_coverage": MISSING}
         spec["broker_crash"] = args.broker_crash
+        spec["artifact_source_commit"] = artifact_commit
+        spec["workload_admission"] = {"large_response_concurrency": 1, "scope": "retained sync prepare+execute and job_wait; all 20 clients and daily mutation count retained", "basis": "28 MiB per sync plus 8 MiB per wait compete for unchanged global64MiB/owner32MiB ingress; control and ordinary work retain headroom", "saturated_sync_throughput_certification": False}
         spec["faults"] = args.faults
         spec["idle_smoke"] = args.idle_smoke
         write(root / "run.json", spec)

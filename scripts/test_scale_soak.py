@@ -17,6 +17,40 @@ spec.loader.exec_module(harness)
 
 
 class SupervisorContracts(unittest.TestCase):
+    def test_quota_diagnostic_preserves_state_without_peer_payload(self):
+        response = {"ok": False, "error": "broker ingress limit reached", "mutation": {"state": "not_sent"}}
+        with mock.patch.object(harness, "rpc", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "broker-ingress-limit; state=not_sent"):
+                harness.checked(None, {"operation": "sync.push"})
+        response["error"] = "private-peer-payload"
+        with mock.patch.object(harness, "rpc", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "broker-denied; state=not_sent") as caught:
+                harness.checked(None, {"operation": "sync.push"})
+            self.assertNotIn("private-peer", str(caught.exception))
+
+    def test_large_response_admission_is_cross_process_and_crash_released(self):
+        import fcntl
+        import select
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            program = "import importlib.util,sys,time;from pathlib import Path;s=importlib.util.spec_from_file_location('h',sys.argv[1]);h=importlib.util.module_from_spec(s);s.loader.exec_module(h)\nwith h.large_response_admission(Path(sys.argv[2]),{}):\n print('held',flush=True);time.sleep(30)\n"
+            child = subprocess.Popen([sys.executable, "-c", program, str(Path(harness.__file__)), directory], stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 3)[0])
+                self.assertEqual(child.stdout.readline(), "held\n")
+                with (Path(directory) / "large-response.lock").open("a+b") as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                child.kill()
+                child.wait(timeout=3)
+                stats = {}
+                with harness.large_response_admission(Path(directory), stats):
+                    self.assertLess(stats["workload_admission_wait_seconds"], 1)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+                child.stdout.close()
+
     def test_cpu_sampling_separates_shared_host_and_pid_identity(self):
         import os
         hz = os.sysconf("SC_CLK_TCK")

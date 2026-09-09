@@ -44,13 +44,9 @@ jobs:
         run: |
           make GO=go all daemon
           make GO=go check
-      - name: Race instrumentation
-        run: go test -race ./... -count=1 -timeout=20m
-      - name: Coverage-guided fuzz smoke
-        run: RDEV_GO=go RDEV_FUZZ_TIME=10s sh scripts/fuzz-smoke.sh
-      - name: Harness supervision regressions
-        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Real IPv4, IPv6 and ProxyJump runtime
+        env:
+          RDEV_TEST_SAFE_DIAGNOSTICS: '1'
         run: python3 scripts/isolated-ssh.py --go "$(command -v go)" --out "$RUNNER_TEMP/rdev-evidence/ssh"
       - name: Summarize SSH failures without test payloads
         if: failure()
@@ -58,7 +54,7 @@ jobs:
           python3 - <<'PY'
           import json, os, pathlib, re
           root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rdev-evidence" / "ssh"
-          summary = {"failed_tests": [], "source_locations": [], "checks": {}}
+          summary = {"failed_tests": [], "source_locations": [], "failure_codes": [], "checks": {}}
           result = root / "result.json"
           if result.exists():
               data = json.loads(result.read_text())
@@ -68,12 +64,20 @@ jobs:
               content = log.read_text(errors="replace")
               summary["failed_tests"] += re.findall(r"--- FAIL: ([A-Za-z0-9_/]+)", content)
               summary["source_locations"] += re.findall(r"^\s*([A-Za-z0-9_]+_test\.go:[0-9]+):", content, re.M)
+              summary["failure_codes"] += re.findall(r"RDEV_SAFE_FAILURE code=[a-zA-Z0-9_.]+ state=[a-zA-Z0-9_]+ stages=[a-z_,]*", content)
           summary["source_locations"] = sorted(set(summary["source_locations"]))
+          summary["failure_codes"] = sorted(set(summary["failure_codes"]))
           message = json.dumps(summary, sort_keys=True)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
               output.write("SSH diagnostic locations (no request or credential payloads):\n\n```json\n" + message + "\n```\n")
           print("::error title=SSH diagnostic locations::" + message)
           PY
+      - name: Race instrumentation
+        run: go test -race ./... -count=1 -timeout=20m
+      - name: Coverage-guided fuzz smoke
+        run: RDEV_GO=go RDEV_FUZZ_TIME=10s sh scripts/fuzz-smoke.sh
+      - name: Harness supervision regressions
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Online release audit and artifact binding
         env:
           RDEV_RELEASE_OUT: ${{ runner.temp }}/rdev-evidence/release

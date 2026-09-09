@@ -27,6 +27,20 @@ func policyRuntimeRequest(t *testing.T, w *runtimeWire, req broker.Request) brok
 	if len(response.PolicyDigest) != 64 {
 		t.Fatalf("decision has no policy snapshot: %+v", response)
 	}
+	if !response.OK && os.Getenv("RDEV_TEST_SAFE_DIAGNOSTICS") == "1" {
+		// Fixed vocabulary only: no request, owner, token, path or peer text.
+		code, state := "untyped", "unknown"
+		if e := response.ErrorEnvelope; e != nil && e.Validate() == nil {
+			code, state = string(e.Code), string(e.ExecutionState)
+		}
+		stages := []string{}
+		for _, stage := range []string{"release", "policy", "probe", "platform", "bootstrap", "upload", "install", "handshake", "protocol", "permission", "timeout", "ingress", "host key", "connection"} {
+			if strings.Contains(strings.ToLower(response.Error), stage) {
+				stages = append(stages, strings.ReplaceAll(stage, " ", "_"))
+			}
+		}
+		t.Logf("RDEV_SAFE_FAILURE code=%s state=%s stages=%s", code, state, strings.Join(stages, ","))
+	}
 	return response
 }
 
