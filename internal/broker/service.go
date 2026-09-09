@@ -332,7 +332,8 @@ func (s *Service) PoolHealth() PoolHealth {
 	h.Goroutines = runtime.NumGoroutine()
 	h.ObserverMetricSeries, h.ObserverMetricSeriesBound = s.client.Hosts.SecuritySnapshot().Cardinality()
 	h.BaseTransports, h.BulkTransports = s.client.PoolTransportCounts()
-	h.DialAdmission = s.client.DialAdmission()
+	dialAdmission := s.client.DialAdmission()
+	h.DialAdmission = &dialAdmission
 	return h
 }
 

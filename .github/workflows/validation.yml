@@ -58,6 +58,11 @@ jobs:
         run: |
           make GO=go release-gate
           make GO=go verify-release
+      - name: Independent clean build reproducibility
+        env:
+          RDEV_GO: go
+          RDEV_REPRO_OUT: ${{ runner.temp }}/rdev-evidence/repro
+        run: sh scripts/reproducible-build.sh
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -78,5 +83,12 @@ jobs:
             ${{ runner.temp }}/rdev-evidence/ssh/v4.log
             ${{ runner.temp }}/rdev-evidence/ssh/v6.log
             ${{ runner.temp }}/rdev-evidence/release/
+            ${{ runner.temp }}/rdev-evidence/repro/result.json
+            ${{ runner.temp }}/rdev-evidence/repro/build-environment.json
+            ${{ runner.temp }}/rdev-evidence/repro/module-verify.txt
+            ${{ runner.temp }}/rdev-evidence/repro/first.log
+            ${{ runner.temp }}/rdev-evidence/repro/second.log
+            ${{ runner.temp }}/rdev-evidence/repro/first-toolchain.txt
+            ${{ runner.temp }}/rdev-evidence/repro/second-toolchain.txt
           retention-days: 14
           if-no-files-found: error

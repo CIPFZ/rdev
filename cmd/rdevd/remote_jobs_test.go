@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 
@@ -140,8 +139,9 @@ func TestRemoteBrokerJobRecovery(t *testing.T) {
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	response := call(a, &proto.Request{Op: proto.OpJobRm, Job: &proto.JobParams{ID: infoA.ID}})
-	if response.OK || !strings.Contains(response.Error, "not persisted") {
+	const removalOperationID = "op_job_recovery_delete_failure"
+	response := call(a, &proto.Request{Op: proto.OpJobRm, OperationID: removalOperationID, Job: &proto.JobParams{ID: infoA.ID}})
+	if response.OK || response.Mutation == nil || response.Mutation.State != "ambiguous" || response.Mutation.OperationID != removalOperationID || response.ErrorEnvelope == nil || response.ErrorEnvelope.Validate() != nil || response.ErrorEnvelope.Code != proto.CodeAmbiguousOutcome || response.ErrorEnvelope.ExecutionState != proto.StatePossiblyExecuted || response.ErrorEnvelope.OperationID != removalOperationID {
 		t.Fatal("remote deletion durability failure was acknowledged")
 	}
 	if err := os.Remove(path); err != nil {

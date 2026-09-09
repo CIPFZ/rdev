@@ -291,7 +291,7 @@ def main():
         parser.error("--out must be outside the repository")
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.umask(0o077)
-    report = {"schema": 1, "kind": "isolated-loopback-ssh", "started_unix": time.time(), "status": "running", "physical_hosts": 1, "sshd_instances": 3, "targets": 2, "fault_domain": "one shared Linux kernel and filesystem", "runtime": "not-run", "checks": {}}
+    report = {"schema": 1, "kind": "isolated-loopback-ssh", "started_unix": time.time(), "status": "running", "shared_host_instances": 1, "physical_machine_count": "unverified", "sshd_instances": 3, "targets": 2, "fault_domain": "one shared Linux kernel and filesystem", "runtime": "not-run", "checks": {}}
     # sshd StrictModes examines ancestors, so a private leaf below an arbitrary
     # world-writable TMPDIR is insufficient. The account home is its boundary.
     fixture = Path(tempfile.mkdtemp(prefix=".rdev-p8-ssh-", dir=Path.home()))

@@ -54,20 +54,22 @@ type EvictionStat struct {
 // PoolHealth is global administrative information; ordinary status never
 // includes it. ReservedHosts includes transports still being closed.
 type PoolHealth struct {
-	DialAdmission             client.DialAdmissionSnapshot `json:"dial_admission"`
-	Goroutines                int                          `json:"goroutines"`
-	ObserverMetricSeries      int                          `json:"observer_metric_series"`
-	ObserverMetricSeriesBound int                          `json:"observer_metric_series_bound"`
-	ClosingBulk               int                          `json:"closing_bulk"`
-	Limit                     int                          `json:"limit"`
-	ReservedHosts             int                          `json:"reserved_hosts"`
-	ActiveHosts               int                          `json:"active_hosts"`
-	ActiveLeases              int                          `json:"active_leases"`
-	ClosingHosts              int                          `json:"closing_hosts"`
-	Queued                    int                          `json:"queued"`
-	BaseTransports            int                          `json:"base_transports"`
-	BulkTransports            int                          `json:"bulk_transports"`
-	Evictions                 map[string]EvictionStat      `json:"evictions"`
+	// Older protocol-1 brokers do not report these measurements. Preserve
+	// absence instead of projecting fabricated zero-valued telemetry to MCP.
+	DialAdmission             *client.DialAdmissionSnapshot `json:"dial_admission,omitempty"`
+	Goroutines                int                           `json:"goroutines,omitempty"`
+	ObserverMetricSeries      int                           `json:"observer_metric_series,omitempty"`
+	ObserverMetricSeriesBound int                           `json:"observer_metric_series_bound,omitempty"`
+	ClosingBulk               int                           `json:"closing_bulk"`
+	Limit                     int                           `json:"limit"`
+	ReservedHosts             int                           `json:"reserved_hosts"`
+	ActiveHosts               int                           `json:"active_hosts"`
+	ActiveLeases              int                           `json:"active_leases"`
+	ClosingHosts              int                           `json:"closing_hosts"`
+	Queued                    int                           `json:"queued"`
+	BaseTransports            int                           `json:"base_transports"`
+	BulkTransports            int                           `json:"bulk_transports"`
+	Evictions                 map[string]EvictionStat       `json:"evictions"`
 }
 
 func NewHostPool(limit int, detach func(string) func()) *HostPool {
