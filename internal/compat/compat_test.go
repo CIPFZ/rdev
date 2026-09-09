@@ -2,10 +2,55 @@ package compat
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
+
+func TestPublishedPolicyCompatibilityUsesActualReader(t *testing.T) {
+	var policyFormat Format
+	for _, f := range Current().Formats {
+		if f.Name == "broker_policy" {
+			policyFormat = f
+		}
+	}
+	if policyFormat.Versioning == "" || policyFormat.Current != 0 {
+		t.Fatal("policy must be described as unversioned")
+	}
+	path := filepath.Join(t.TempDir(), "policy")
+	owner := broker.Owner{ClientID: "client", ProjectID: "project"}
+	valid, err := json.Marshal(map[string]map[string]bool{owner.Key(): {"future.operation": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, valid, 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := broker.NewPolicy()
+	if err := p.Load(path); err != nil {
+		t.Fatalf("legacy unknown grant strings must remain readable: %v", err)
+	}
+	if !p.Decide(owner.Key(), "future.operation").Allow {
+		t.Fatal("reader discarded stored grant")
+	}
+	if err := broker.ValidateRoute(broker.Request{Owner: owner, Operation: "future.operation"}); err == nil {
+		t.Fatal("unknown grant made an unsupported route executable")
+	}
+	for _, invalid := range []string{`null`, `{"o":null}`, `{"o":{"exec":null}}`, `{"o":{"exec":1}}`, `{"o":{"exec":true,"exec":false}}`, `{"o":{"exec":true},"o":{"exec":false}}`} {
+		if err := os.WriteFile(path, []byte(invalid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Load(path); err == nil {
+			t.Fatalf("policy reader accepted %s", invalid)
+		}
+		if !p.Decide(owner.Key(), "future.operation").Allow {
+			t.Fatal("invalid policy replaced prior state")
+		}
+	}
+}
 
 func TestPublishedProtocolRangesNegotiateAndReject(t *testing.T) {
 	c := Current()
