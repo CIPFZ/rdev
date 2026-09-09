@@ -324,8 +324,27 @@ func sbom(m Manifest) object       { return artifactcontract.SBOM(localEvidence(
 func provenance(m Manifest) object { return artifactcontract.Provenance(localEvidence(m)) }
 
 func Verify(dir string) error {
+	raw, err := artifactcontract.ReadFile(dir, "manifest.json", artifactcontract.MaxDocumentBytes)
+	if err != nil {
+		return err
+	}
+	return verifyManifest(dir, raw)
+}
+
+// verifyExpected never selects a second, unsigned manifest for audit semantics.
+func verifyExpected(dir string, expected artifactcontract.File) error {
+	if expected.Name != "manifest.json" || expected.Size > artifactcontract.MaxDocumentBytes {
+		return errors.New("invalid signed audit manifest")
+	}
+	raw, err := artifactcontract.ReadExpected(dir, expected)
+	if err != nil {
+		return err
+	}
+	return verifyManifest(dir, raw)
+}
+func verifyManifest(dir string, raw []byte) error {
 	var m Manifest
-	if err := ReadJSON(filepath.Join(dir, "manifest.json"), &m); err != nil {
+	if err := artifactcontract.DecodeEvidence(raw, &m); err != nil {
 		return err
 	}
 	if m.SchemaVersion != 1 || len(m.Artifacts) != 6 {

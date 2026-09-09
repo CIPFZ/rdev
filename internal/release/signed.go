@@ -47,6 +47,9 @@ func PrepareSigned(dir, version, channel, signer string, issued, expires time.Ti
 	if _, err := artifactcontract.CheckBinding(dir, m); err != nil {
 		return err
 	}
+	if err := verifyExpected(dir, m.Metadata[0]); err != nil {
+		return err
+	}
 	// Refuse overwriting an already prepared/signed identity; create a fresh
 	// output directory to issue a different candidate.
 	path := filepath.Join(dir, artifactcontract.ManifestName)
@@ -72,7 +75,7 @@ func Sign(ctx context.Context, dir, key string) error {
 	if err != nil {
 		return err
 	}
-	if err = Verify(dir); err != nil {
+	if err = verifyExpected(dir, m.Metadata[0]); err != nil {
 		return err
 	}
 	for i, b := range m.Binaries {
@@ -140,8 +143,9 @@ func VerifySigned(ctx context.Context, dir, policyPath string) error {
 	if err != nil {
 		return err
 	}
-	if _, _, err = artifactcontract.VerifyBundle(ctx, dir, p, time.Now()); err != nil {
+	m, _, err := artifactcontract.VerifyBundle(ctx, dir, p, time.Now())
+	if err != nil {
 		return err
 	}
-	return Verify(dir)
+	return verifyExpected(dir, m.Metadata[0])
 }
