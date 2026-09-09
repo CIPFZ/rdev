@@ -34,6 +34,8 @@ BOUNDS = {"rss_bytes": 12 << 30, "fds": 32768, "processes": 2500, "disk_bytes": 
 LATENCY_MS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000]
 MISSING = ["saturated owner/lane fairness and quota SLO", "Fleet threshold/cancel/subset-retry fault stages", "in-flight mutation crash/ambiguity fault stages", "automatic retention GC removal proof", "CPU final ticks for processes exiting between samples", "dial/reconnect/backoff/queue distribution acceptance thresholds", "metric collectors beyond fixed observe.Registry counters", "production topology and cross-machine network", "strict control latency SLO", "all Production Gates"]
 CPU_PREVIOUS = None
+DIAGNOSTIC_CODES = frozenset("internal.failure object.not_found process.invalid_state process.start_failed protocol.frame_too_large protocol.invalid_event protocol.invalid_frame protocol.unknown_operation protocol.unsupported_feature release.channel_denied release.platform_unsupported release.policy_required release.untrusted release.version_denied request.canceled request.deadline_exceeded request.invalid request.operation_id_conflict resource.limit_exceeded resource.queue_full resource.slow_consumer resource.watcher_limit state.incompatible transport.ambiguous_outcome transport.unavailable".split())
+DIAGNOSTIC_STATES = frozenset("prepared not_sent dispatched ambiguous completed possibly_executed committed failed".split())
 
 
 def write(path, value):
@@ -194,12 +196,18 @@ def checked(sock, request):
     response = rpc(sock, request)
     if not response.get("ok") or ("wire" in response and not response["wire"].get("ok")):
         envelope = response.get("error_envelope") or response.get("wire", {}).get("error") or {}
-        code = envelope.get("code", "broker-denied")
+        code = envelope.get("code") if isinstance(envelope, dict) else None
+        if not isinstance(code, str) or code not in DIAGNOSTIC_CODES:
+            code = "broker-denied"
         # Match a fixed product constant; never retain arbitrary peer diagnostics.
         if response.get("error") == "broker ingress limit reached":
             code = "broker-ingress-limit"
         mutation = response.get("mutation") or {}
-        state = mutation.get("state") or envelope.get("execution_state", "unknown")
+        state = mutation.get("state") if isinstance(mutation, dict) else None
+        if not state and isinstance(envelope, dict):
+            state = envelope.get("execution_state")
+        if not isinstance(state, str) or state not in DIAGNOSTIC_STATES:
+            state = "unknown"
         raise RuntimeError("operation " + request["operation"] + " rejected: " + code + "; state=" + state)
     return response
 

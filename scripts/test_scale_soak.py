@@ -27,6 +27,11 @@ class SupervisorContracts(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "broker-denied; state=not_sent") as caught:
                 harness.checked(None, {"operation": "sync.push"})
             self.assertNotIn("private-peer", str(caught.exception))
+        response.update(error_envelope={"code": "private-peer-code"}, mutation={"state": "private-peer-state"})
+        with mock.patch.object(harness, "rpc", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "broker-denied; state=unknown") as caught:
+                harness.checked(None, {"operation": "sync.push"})
+            self.assertNotIn("private-peer", str(caught.exception))
 
     def test_large_response_admission_is_cross_process_and_crash_released(self):
         import fcntl
