@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+  "predecessor_commit": "e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e",
+  "predecessor_kind": "Phase7 engineering baseline; no formal N-1 release claim",
+  "started_at": "2026-09-09T12:36:05.623990+00:00",
+  "toolchain": "go version go1.26.8 linux/amd64",
+  "binaries": {
+    "current/bin/rdev": "58ebeba7185e2bca652e5cc1564b9e7ca8b1d86f10081d158381362bfa8ac39b",
+    "current/bin/rdevd": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4",
+    "current/cmd/rdev/agents/rdev-agent-linux-amd64": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+    "previous/bin/rdev": "b6580d0fa3d42b58e3ff005839469cddc862f3d6c7611e588ff8fc9504c0ed73",
+    "previous/bin/rdevd": "ee1be4affb604842c1c18cc27adb8233fbd1aaa4fb5ed9a733087661bdec22ef",
+    "previous/cmd/rdev/agents/rdev-agent-linux-amd64": "85ac6b04fb4b7bae37dc9d0ebff8a2d710e5138e9aa3205ed96bea7bb23aefee"
+  },
+  "cases": [
+    {
+      "name": "job-upgrade-retained-supervisors",
+      "test": "TestRemoteBrokerJobUpgrade",
+      "status": "passed"
+    },
+    {
+      "name": "old-cli-mcp-new-broker-new-agent",
+      "test": "TestRemoteBrokerFrontendBoundary",
+      "status": "passed"
+    },
+    {
+      "name": "new-cli-mcp-old-broker-old-agent",
+      "test": "TestRemoteBrokerFrontendBoundary",
+      "status": "passed"
+    }
+  ],
+  "production_certification": "pending",
+  "boundary": "one authorized Linux SSH endpoint, private namespace per test; CLI/MCP shared read/policy subset and retained jobs; full standalone/migration/rollback/channel/approval/archive matrix remains pending",
+  "completed_at": "2026-09-09T12:36:14.827089+00:00",
+  "current_contract": {
+    "release": "0.1.0-dev.0",
+    "protocols": [
+      {
+        "name": "client_agent",
+        "encoding": "ID-correlated NDJSON (not JSON-RPC)",
+        "range": {
+          "min": 2,
+          "max": 3
+        },
+        "features": [
+          "job_resource_envelope",
+          "sync_plan_v1",
+          "job_filter_ids",
+          "durable_job_start",
+          "operation_id",
+          "deduplication",
+          "error_envelope",
+          "cancel",
+          "deadline",
+          "streaming",
+          "stream_credit",
+          "truncation_metadata"
+        ],
+        "previous": "standalone protocol 2 unary fallback for supported operations; no v3 cancellation, streaming or deduplication guarantees; new job_start requires job_resource_envelope and rejects older peers that cannot enforce runtime budgets",
+        "unsupported": "no intersecting range: reject before business requests; legacy missing min_version means exactly the advertised version; v3 missing required operation features is rejected"
+      },
+      {
+        "name": "client_broker",
+        "encoding": "hello followed by ID-correlated NDJSON (not JSON-RPC)",
+        "range": {
+          "min": 1,
+          "max": 1
+        },
+        "previous": "no protocol 0 compatibility; earlier releases with protocol 1 may connect but unsupported routes fail closed",
+        "unsupported": "invalid/disjoint hello range: reject before authentication/dispatch; no private SSH fallback"
+      },
+      {
+        "name": "broker_agent",
+        "encoding": "ID-correlated NDJSON (not JSON-RPC)",
+        "range": {
+          "min": 3,
+          "max": 3
+        },
+        "features": [
+          "job_resource_envelope",
+          "sync_plan_v1",
+          "job_filter_ids",
+          "durable_job_start",
+          "operation_id",
+          "deduplication",
+          "error_envelope",
+          "cancel",
+          "deadline",
+          "streaming",
+          "stream_credit",
+          "truncation_metadata"
+        ],
+        "previous": "protocol 2 explicitly rejected for shared requests because it cannot preserve principal identity; existing protocol 3 agents may serve only operations whose required features they advertise",
+        "unsupported": "shared requests reject a legacy peer before business dispatch; new job_start requires job_resource_envelope"
+      }
+    ],
+    "formats": [
+      {
+        "name": "release_manifest",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "release_policy",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "agent_upgrade",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "host_config",
+        "current": null,
+        "minimum": null
+      },
+      {
+        "name": "broker_config",
+        "current": null,
+        "minimum": null
+      },
+      {
+        "name": "broker_policy",
+        "current": null,
+        "minimum": null
+      },
+      {
+        "name": "project_trust",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "agent_state",
+        "current": 1,
+        "minimum": null
+      },
+      {
+        "name": "fleet_inventory",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "broker_fleet",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "broker_jobs",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "broker_mutations",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "broker_job_events",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "broker_secrets",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "broker_audit_continuity",
+        "current": 1,
+        "minimum": 1
+      },
+      {
+        "name": "broker_audit",
+        "current": 1,
+        "minimum": null
+      }
+    ]
+  },
+  "unverified_combinations": [
+    "formal N/N-1 releases on every Tier1 OS/architecture",
+    "complete standalone CLI/MCP previous/current matrix",
+    "legacy writer drain and full migration/rollback crash windows with real release binaries",
+    "Fleet approval/HostID/attempt and secret archive/sync/audit state rollback matrix",
+    "stable/beta/dev/pin/explicit signed rollback against formal predecessor"
+  ]
+}

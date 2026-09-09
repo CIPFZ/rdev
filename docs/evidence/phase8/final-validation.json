@@ -1,0 +1,1426 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-09T13:19:06.761253+00:00",
+  "phase8_status": "in-progress",
+  "production_certified": false,
+  "handoff_commit": "e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e",
+  "product_source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+  "source_binding": "Release/signature/reproducibility and scale use frozen 047 release bytes. Runtime race uses separately recorded 047 race builds; Secrets helper builds an ordinary CLI. Subsequent harness, test-only diagnostics, workflow and documentation revisions are separate; hosted rebuilds have different commit stamps.",
+  "environment": {
+    "recorded_at": "2026-09-09T12:25:37.665270+00:00",
+    "local": {
+      "os": "Linux",
+      "arch": "x86_64",
+      "kernel": "6.6.119-49.27.tl4.x86_64",
+      "cpu_count": 16,
+      "openssh": "OpenSSH_9.3p2, OpenSSL 3.0.12 24 Oct 2023",
+      "filesystem": "xfs",
+      "shared_host_instances": 1,
+      "physical_machine_count": "unverified"
+    },
+    "toolchain": "go version go1.26.8 linux/amd64",
+    "remote": "{\"os\": \"Linux\", \"arch\": \"x86_64\", \"kernel\": \"6.6.119-49.27.tl4.x86_64\", \"cpu_count\": 8}"
+  },
+  "local_validation": {
+    "schema_version": 1,
+    "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "steps": [
+      {
+        "name": "check",
+        "command": [
+          "make",
+          "GO=/data/tmp/rdev-toolchain/go/bin/go",
+          "all",
+          "daemon",
+          "check"
+        ],
+        "started_at": "2026-09-09T12:32:36.522992+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:33:21.188159+00:00"
+      },
+      {
+        "name": "race",
+        "command": [
+          "/data/tmp/rdev-toolchain/go/bin/go",
+          "test",
+          "-race",
+          "./...",
+          "-count=1",
+          "-timeout=20m"
+        ],
+        "started_at": "2026-09-09T12:33:21.188480+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:35:17.333062+00:00"
+      },
+      {
+        "name": "python",
+        "command": [
+          "python3",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts",
+          "-p",
+          "test_*.py"
+        ],
+        "started_at": "2026-09-09T12:35:17.333409+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:35:23.704289+00:00"
+      },
+      {
+        "name": "release-gate",
+        "command": [
+          "make",
+          "GO=/data/tmp/rdev-toolchain/go/bin/go",
+          "release-gate"
+        ],
+        "started_at": "2026-09-09T12:35:23.704606+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:35:38.341276+00:00"
+      },
+      {
+        "name": "verify-release",
+        "command": [
+          "make",
+          "GO=/data/tmp/rdev-toolchain/go/bin/go",
+          "verify-release"
+        ],
+        "started_at": "2026-09-09T12:35:38.341796+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:35:38.764667+00:00"
+      }
+    ]
+  },
+  "fuzz": {
+    "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "validated_parser_source_commit": "56351b738f1f1aaa89aa4d788858af078b82de30",
+    "evidence_reused": true,
+    "scope": "all ten fuzz targets, parser code and fuzz-smoke script unchanged between these commits; new broker telemetry projection verified separately through official SDK regression",
+    "steps": [
+      {
+        "name": "fuzz",
+        "command": [
+          "sh",
+          "scripts/fuzz-smoke.sh"
+        ],
+        "started_at": "2026-09-09T12:23:52.165234+00:00",
+        "exit_code": 1,
+        "status": "failed",
+        "ended_at": "2026-09-09T12:23:57.452763+00:00"
+      },
+      {
+        "name": "fuzz-recheck",
+        "command": [
+          "sh",
+          "scripts/fuzz-smoke.sh"
+        ],
+        "started_at": "2026-09-09T12:24:32.930153+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:26:31.570859+00:00"
+      }
+    ],
+    "failure_note": "First 5s run returned context deadline exceeded at 5.03s after 169798 executions, without crash/corpus; independent Go1.26.8 source review identified a matching parent/child context deadline coordination window. Exact scheduling not proven; original failed result preserved. Full 10s-per-target recheck passed."
+  },
+  "supply_chain": {
+    "schema_version": 1,
+    "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "identity": {
+      "kind": "isolated-test-root",
+      "identity": "phase8-isolated-test",
+      "fingerprint": "SHA256:ELvU6fTePjTgUfl26r/iADXyWlO/39RyTcIl2zEIlrc",
+      "official_release_identity": false
+    },
+    "started_at": "2026-09-09T12:36:02.121723+00:00",
+    "checks": [
+      {
+        "name": "prepare-signed",
+        "exit_code": 0,
+        "status": "passed"
+      },
+      {
+        "name": "sign",
+        "exit_code": 0,
+        "status": "passed"
+      },
+      {
+        "name": "verify-signed",
+        "exit_code": 0,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-rdev",
+        "exit_code": 1,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-manifest-json",
+        "exit_code": 1,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-sbom-cdx-json",
+        "exit_code": 1,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-provenance-intoto-json",
+        "exit_code": 1,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-release-json-sig",
+        "exit_code": 1,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-channel",
+        "exit_code": 1,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-signer",
+        "exit_code": 1,
+        "status": "passed"
+      },
+      {
+        "name": "tamper-platform",
+        "exit_code": 1,
+        "status": "passed"
+      }
+    ],
+    "completed_at": "2026-09-09T12:36:03.916224+00:00",
+    "status": "passed",
+    "artifacts": {
+      "THIRD_PARTY_NOTICES.txt": "2621014ca426b9607f54e1f710bb0639e759190b1a6a4e2010b57fe6991761cf",
+      "govulncheck-binary-rdev-agent-darwin-amd64.json": "37b1128b1a7d9277e02d5a12875d7b858af918a1fc4d01b08e8829bb01fbe408",
+      "govulncheck-binary-rdev-agent-darwin-arm64.json": "37b1128b1a7d9277e02d5a12875d7b858af918a1fc4d01b08e8829bb01fbe408",
+      "govulncheck-binary-rdev-agent-linux-amd64.json": "37b1128b1a7d9277e02d5a12875d7b858af918a1fc4d01b08e8829bb01fbe408",
+      "govulncheck-binary-rdev-agent-linux-arm64.json": "37b1128b1a7d9277e02d5a12875d7b858af918a1fc4d01b08e8829bb01fbe408",
+      "govulncheck-binary-rdev.json": "1d6c27d2dab38bb12b494051660f1040964fcad1185d7c0e1945bd98e21f0fcc",
+      "govulncheck-binary-rdevd.json": "37b1128b1a7d9277e02d5a12875d7b858af918a1fc4d01b08e8829bb01fbe408",
+      "govulncheck-source-darwin-amd64.json": "ccd73351a772a6f70632ca33d5dd6e4954b04ddb6109bc91c5f6ccd7f710388a",
+      "govulncheck-source-darwin-arm64.json": "ccd73351a772a6f70632ca33d5dd6e4954b04ddb6109bc91c5f6ccd7f710388a",
+      "govulncheck-source-linux-amd64.json": "e8f49cb3ad3878c22db70adb3e52e86c81a2f23d9baa5e20d116222d321d5128",
+      "govulncheck-source-linux-arm64.json": "4f84502a80ae4b52ab181049ef2a765b77830c559d9af5ebddbadb66518941ff",
+      "manifest.json": "ed37bd8640a5be27932bf1d318caa061a94a75109573e724140c99c83bf14737",
+      "module-verify.txt": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd",
+      "modules.json": "18e389740d94a7b7e9411c770914bf6fd7a52458fb40bfa39f532f0bcd6bed77",
+      "provenance.intoto.json": "c1af23b11f561982ad69986b8205ec16f9839bb4f19cfe24519f19bef953a791",
+      "rdev": "58ebeba7185e2bca652e5cc1564b9e7ca8b1d86f10081d158381362bfa8ac39b",
+      "rdev-agent-darwin-amd64": "a30f065c5a849a12bf2e35ea8df713dbb06c41a94de1dd0bde4d9fe89e02c15c",
+      "rdev-agent-darwin-arm64": "4c41393476dda4779f51ed7f4765c92d0a70e228bb5730658ebbfc7fe2b18f94",
+      "rdev-agent-linux-amd64": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+      "rdev-agent-linux-arm64": "a078a65b0f415d86910789bb4ff3ecf11afedb48e7ef5dd2e68c29826c74ec0e",
+      "rdevd": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4",
+      "release.json": "16e50d727bf8e12d0a98dfb93ba6919f9c517f7c75477cd49cd46d4011ee175a",
+      "release.json.sig": "f5629554aad7abf72b83756d7885b0e3a9a4702393a8bcdc9f1c2537ae9bb49c",
+      "sbom.cdx.json": "57aebfe8a4f2e19616c1e56cbab822b9b66a6149b68e201dfaa7db27f6bd9ecb",
+      "source.json": "6dfc40fec0271259fd00d7623c9cd3dce231c22a3f0d33c098cf4f5773ce29f4",
+      "tools.txt": "bee9d0c01649c022dc5a7640b8a85ed6069f5dd957acbf5ad8872c1488c4e07b"
+    }
+  },
+  "reproducibility": {
+    "schema_version": 1,
+    "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "version": "0.1.0-dev.0",
+    "cgo_enabled": 0,
+    "started_at": "2026-09-09T12:32:37Z",
+    "build_environment": {
+      "CC": "gcc",
+      "CGO_ENABLED": "0",
+      "GOAMD64": "v1",
+      "GOARCH": "amd64",
+      "GOOS": "linux",
+      "GOROOT": "/data/tmp/rdev-gomodcache/golang.org/toolchain@v0.0.1-go1.26.8.linux-amd64",
+      "GOTOOLCHAIN": "auto",
+      "GOVERSION": "go1.26.8"
+    },
+    "separate_checkouts": true,
+    "separate_compiler_caches": true,
+    "shared_verified_module_cache": true,
+    "completed_at": "2026-09-09T12:33:38.616826+00:00",
+    "artifacts": [
+      {
+        "path": "bin/rdev",
+        "first_sha256": "58ebeba7185e2bca652e5cc1564b9e7ca8b1d86f10081d158381362bfa8ac39b",
+        "second_sha256": "58ebeba7185e2bca652e5cc1564b9e7ca8b1d86f10081d158381362bfa8ac39b",
+        "equal": true,
+        "release_sha256": "58ebeba7185e2bca652e5cc1564b9e7ca8b1d86f10081d158381362bfa8ac39b",
+        "release_equal": true
+      },
+      {
+        "path": "bin/rdevd",
+        "first_sha256": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4",
+        "second_sha256": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4",
+        "equal": true,
+        "release_sha256": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4",
+        "release_equal": true
+      },
+      {
+        "path": "cmd/rdev/agents/rdev-agent-linux-amd64",
+        "first_sha256": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+        "second_sha256": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+        "equal": true,
+        "release_sha256": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+        "release_equal": true
+      },
+      {
+        "path": "cmd/rdev/agents/rdev-agent-linux-arm64",
+        "first_sha256": "a078a65b0f415d86910789bb4ff3ecf11afedb48e7ef5dd2e68c29826c74ec0e",
+        "second_sha256": "a078a65b0f415d86910789bb4ff3ecf11afedb48e7ef5dd2e68c29826c74ec0e",
+        "equal": true,
+        "release_sha256": "a078a65b0f415d86910789bb4ff3ecf11afedb48e7ef5dd2e68c29826c74ec0e",
+        "release_equal": true
+      },
+      {
+        "path": "cmd/rdev/agents/rdev-agent-darwin-amd64",
+        "first_sha256": "a30f065c5a849a12bf2e35ea8df713dbb06c41a94de1dd0bde4d9fe89e02c15c",
+        "second_sha256": "a30f065c5a849a12bf2e35ea8df713dbb06c41a94de1dd0bde4d9fe89e02c15c",
+        "equal": true,
+        "release_sha256": "a30f065c5a849a12bf2e35ea8df713dbb06c41a94de1dd0bde4d9fe89e02c15c",
+        "release_equal": true
+      },
+      {
+        "path": "cmd/rdev/agents/rdev-agent-darwin-arm64",
+        "first_sha256": "4c41393476dda4779f51ed7f4765c92d0a70e228bb5730658ebbfc7fe2b18f94",
+        "second_sha256": "4c41393476dda4779f51ed7f4765c92d0a70e228bb5730658ebbfc7fe2b18f94",
+        "equal": true,
+        "release_sha256": "4c41393476dda4779f51ed7f4765c92d0a70e228bb5730658ebbfc7fe2b18f94",
+        "release_equal": true
+      }
+    ],
+    "result": "passed",
+    "boundary": "local reproducibility on this OS/toolchain; no cross-toolchain or hosted builder claim",
+    "release_comparison_at": "2026-09-09T12:36:03.339488+00:00"
+  },
+  "runtime": {
+    "schema_version": 1,
+    "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "trust": "isolated SSHSIG test root, official=false",
+    "artifacts": "release/ exact signed bytes; Secrets helper may build its ordinary CLI",
+    "race": "no runtime race in this group; final full repository race is separate",
+    "steps": [
+      {
+        "name": "signed-remote-runtime",
+        "command": [
+          "/data/tmp/rdev-toolchain/go/bin/go",
+          "test",
+          "./cmd/rdevd",
+          "-run",
+          "^TestRemote(BrokerFrontendBoundary|BrokerJobRecovery|BrokerPreparedSync|BrokerRetryCancellation|BrokerMutationCrashRecovery|FleetFrontendsAndRetry|FleetCrashRecovery|FleetPauseCancelAndCanary|Phase6FrontendContracts|SupportAndStateFrontends|BrokerApprovalIsolation|BrokerPolicyIsolation|BrokerSecrets|BrokerSecretImport|BrokerAuditContinuity|BrokerLeaseLifecycle|BrokerQoSWithSecrets|BrokerIngressIsolation)$",
+          "-count=1",
+          "-timeout=15m",
+          "-v"
+        ],
+        "started_at": "2026-09-09T12:36:15.087675+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:40:06.218275+00:00"
+      },
+      {
+        "name": "isolated-ssh",
+        "command": [
+          "python3",
+          "scripts/isolated-ssh.py",
+          "--go",
+          "/data/tmp/rdev-toolchain/go/bin/go",
+          "--out",
+          "/tmp/rdev-p8-ssh-047a0f5"
+        ],
+        "started_at": "2026-09-09T12:40:06.218469+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:41:49.106309+00:00"
+      }
+    ]
+  },
+  "runtime_race": {
+    "schema_version": 1,
+    "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "instrumentation": {
+      "harness": "race",
+      "cli": "race",
+      "daemon": "race",
+      "remote_agents": "uninstrumented exact signed release bytes",
+      "release_root": "isolated-test-only"
+    },
+    "binaries": {
+      "race/rdev": "420e2a56391fd6c76c67019c9ceb6ef2b7e32c13d005e747bcfcf29e74f64ae3",
+      "race/rdevd": "7433ff7684be7c4bad984f6e3254aa45edcc0a49513da8aa3f50b95c0aef9115"
+    },
+    "steps": [
+      {
+        "name": "remote-race",
+        "command": [
+          "/data/tmp/rdev-toolchain/go/bin/go",
+          "test",
+          "-race",
+          "./cmd/rdevd",
+          "-run",
+          "^TestRemote(FleetFrontendsAndRetry|FleetCrashRecovery|FleetPauseCancelAndCanary|Phase6FrontendContracts|BrokerPreparedSync|BrokerMutationCrashRecovery|BrokerJobRecovery|BrokerRetryCancellation|BrokerFrontendBoundary|SupportAndStateFrontends)$",
+          "-count=1",
+          "-timeout=10m",
+          "-v"
+        ],
+        "started_at": "2026-09-09T12:40:54.584802+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:46:06.926965+00:00"
+      },
+      {
+        "name": "mixed-slo",
+        "command": [
+          "/data/tmp/rdev-toolchain/go/bin/go",
+          "test",
+          "-race",
+          "./cmd/rdevd",
+          "-run",
+          "^TestRemote(BrokerMixedWorkload|FleetMixedWorkload)$",
+          "-count=1",
+          "-timeout=10m",
+          "-v"
+        ],
+        "started_at": "2026-09-09T12:46:16.999945+00:00",
+        "exit_code": 0,
+        "status": "passed",
+        "ended_at": "2026-09-09T12:47:46.357352+00:00"
+      }
+    ],
+    "race_reports": []
+  },
+  "runtime_summaries": {
+    "signed-remote-runtime-summary": {
+      "top_level_passed": 18,
+      "skipped": 0,
+      "failed": 0,
+      "sha256": "b080684c9f2a132519102069247bf1c409c90363830c617b5c425a9740c3c7c5"
+    },
+    "remote-race-summary": {
+      "top_level_passed": 10,
+      "skipped": 0,
+      "failed": 0,
+      "sha256": "cdbcb4381e68b4cdf4aaf3e1a1412175bb05276c889fae894b6e4616d524ce8e"
+    },
+    "mixed-slo-summary": {
+      "top_level_passed": 2,
+      "skipped": 0,
+      "failed": 0,
+      "sha256": "fc111d76fea83d3b77e4af6cf8b0c56ec5b66a731d64940b42881a4ecdbc2a84",
+      "metrics": {
+        "bulk_bytes_per_second": 2097152,
+        "cli_mcp_exact_sync_traffic": true,
+        "control.ping": {
+          "baseline_p95_ms": 2.841362,
+          "bulk_p95_ms": 3.037669,
+          "ratio": 1.069089049547365,
+          "samples": 515
+        },
+        "control.status": {
+          "baseline_p95_ms": 1.27712,
+          "bulk_p95_ms": 1.352993,
+          "ratio": 1.0594094525181657,
+          "samples": 516
+        },
+        "exec-0_cancellation_completions": 14,
+        "exec-0_loaded_completions": 13,
+        "exec-1_cancellation_completions": 14,
+        "exec-1_loaded_completions": 13,
+        "idle_bulk_reclaimed": true,
+        "job-control.job_status": {
+          "baseline_p95_ms": 4.065954,
+          "bulk_p95_ms": 4.168897,
+          "ratio": 1.025318289385468,
+          "samples": 329
+        },
+        "job-control.ping": {
+          "baseline_p95_ms": 2.968058,
+          "bulk_p95_ms": 3.104433,
+          "ratio": 1.0459475522378607,
+          "samples": 328
+        },
+        "job-control.status": {
+          "baseline_p95_ms": 1.324771,
+          "bulk_p95_ms": 1.459324,
+          "ratio": 1.10156698780393,
+          "samples": 329
+        },
+        "loaded_seconds": 13.727799835,
+        "measurement_processes": 7,
+        "mixed_sync_sigkill_isolated": true,
+        "peak_owner_active": 2,
+        "peak_owner_queued": 1,
+        "peak_sync_reservation_bytes": 25165824,
+        "same_base_agent": true,
+        "source_bytes_each": 12582912,
+        "sync-a_payload_bytes": 24117248,
+        "sync-b_payload_bytes": 25165824,
+        "wait_cancellation_completions": 14,
+        "wait_loaded_completions": 14
+      }
+    }
+  },
+  "runtime_boundaries": [
+    "One authorized external Linux amd64 SSH machine; namespace isolation does not create physical machines.",
+    "Secrets runtime helper builds an ordinary CLI; runtime race group instruments local CLI/daemon/harness, not exact release remote agents.",
+    "Strict mixed SLO ran separately from heavy builds/fuzz/scale; original 2x control p95 threshold retained."
+  ],
+  "isolated_ssh": {
+    "schema": 1,
+    "kind": "isolated-loopback-ssh",
+    "started_unix": 1788957606.2622123,
+    "status": "passed",
+    "shared_host_instances": 1,
+    "physical_machine_count": "unverified",
+    "sshd_instances": 3,
+    "targets": 2,
+    "fault_domain": "one shared Linux kernel and filesystem",
+    "runtime": "passed",
+    "checks": {
+      "target-v4": "passed",
+      "target-v6": "passed",
+      "authentication-denied": "passed",
+      "host-key-denied": "passed",
+      "target-v4-runtime": "passed",
+      "target-v6-runtime": "passed",
+      "jump-forwarding-log": "passed",
+      "jump-stopped-fresh-connections-fail": "passed"
+    },
+    "release_trust": "isolated administrator unsigned-dev opt-in; not trusted release certification",
+    "ended_unix": 1788957708.9735005,
+    "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "source_dirty": false,
+    "artifacts": {
+      "rdev-agent-darwin-amd64": "a30f065c5a849a12bf2e35ea8df713dbb06c41a94de1dd0bde4d9fe89e02c15c",
+      "rdev-agent-darwin-arm64": "4c41393476dda4779f51ed7f4765c92d0a70e228bb5730658ebbfc7fe2b18f94",
+      "rdev-agent-linux-amd64": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+      "rdev-agent-linux-arm64": "a078a65b0f415d86910789bb4ff3ecf11afedb48e7ef5dd2e68c29826c74ec0e"
+    }
+  },
+  "isolated_ssh_cleanup": {
+    "checked_unix": 1788957776.8929079,
+    "identity_bound_remaining_pids": []
+  },
+  "scale_short": {
+    "run_id": "d2af4afefe934435b92360d7cf1133ea",
+    "source_commit": "a0ed8d5eaa7a879a7383d2ec7e5ec4c14cc58794",
+    "artifact_source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "status": "workload-scope-passed",
+    "targets": 100,
+    "targets_visited": 100,
+    "clients": 20,
+    "shared_host_instances": 1,
+    "physical_machine_count": "unverified",
+    "fault_domain": "one shared Linux kernel and filesystem",
+    "elapsed_seconds": 305.30911640194245,
+    "predeclared_bounds": {
+      "disk_bytes": 8589934592,
+      "fds": 32768,
+      "goroutines": 4096,
+      "idle_goroutine_growth": 128,
+      "idle_interval_seconds": 3600,
+      "idle_rss_growth_bytes": 268435456,
+      "idle_seconds": 330,
+      "job_log_bytes": 4096,
+      "managed_observed_cpu_cores": 12,
+      "max_sample_gap_seconds": 45,
+      "mutation_cycle_seconds": 1200,
+      "mutation_operations": 8192,
+      "processes": 2500,
+      "request_deadline_seconds": 30,
+      "rss_bytes": 12884901888,
+      "sample_seconds": 5,
+      "warm_hosts": 16
+    },
+    "bounds_basis": "conservative 16-CPU/32-GiB shared Linux instance; observed managed CPU <=12 cores (75% of 16) per sampling interval; fixed 20-minute cycles budget 5040 ordinary mutations plus 40 logger starts/removals and six 100-target Fleet plans/24h=5680, below existing 8192, no direct record deletion/reset; not production throughput/SLO",
+    "artifacts": {
+      "agents/rdev-agent-linux-amd64": "30a309c85c3ce5ef2442ba83bd56d1cd05d4f8a60d14a2f7d913c448b99e1de3",
+      "harness.py": "8baf92800fbb1489fa8db64b0f15fe6d93699c8991dde1ee9b1961646e842387",
+      "rdevd": "87b173650cb98b09e17ba519c32f1df3a9a58201cfdc0c14cb8839b9b2a07aa4"
+    },
+    "completed_fleet_targets": 100,
+    "completed_ordinary_mutations": 120,
+    "marker_proofs": 160,
+    "final_storage_records": {
+      "broker_ambiguous_records": 0,
+      "broker_mutation_records": 220,
+      "job_start_tombstones": 140,
+      "max_owner_mutation_records": 100,
+      "retained_job_directories": 100,
+      "sync_outcomes": 20
+    },
+    "remaining_managed_processes": [],
+    "missing_coverage": [
+      "saturated owner/lane fairness and quota SLO",
+      "Fleet threshold/cancel/subset-retry fault stages",
+      "in-flight mutation crash/ambiguity fault stages",
+      "automatic retention GC removal proof",
+      "CPU final ticks for processes exiting between samples",
+      "dial/reconnect/backoff/queue distribution acceptance thresholds",
+      "metric collectors beyond fixed observe.Registry counters",
+      "production topology and cross-machine network",
+      "strict control latency SLO",
+      "all Production Gates",
+      "330-second periodic idle resource regression windows were not run"
+    ],
+    "workload_admission": {
+      "basis": "28 MiB per sync plus 8 MiB per wait compete for unchanged global64MiB/owner32MiB ingress; control and ordinary work retain headroom",
+      "large_response_concurrency": 1,
+      "saturated_sync_throughput_certification": false,
+      "scope": "retained sync prepare+execute and job_wait; all 20 clients and daily mutation count retained"
+    },
+    "started_at": "2026-09-09T12:58:14.079859+00:00",
+    "ended_at": "2026-09-09T13:03:46.273773+00:00",
+    "sample_count": 50,
+    "max_sample_gap_seconds": 40.16772389411926,
+    "sample_interval_seconds": 5,
+    "peaks": {
+      "rss_bytes": 4276420608,
+      "fds": 2956,
+      "processes": 492,
+      "disk_bytes": 453361375,
+      "goroutines": 157,
+      "managed_observed_cpu_cores": 0.8428134815086521
+    },
+    "clients_summary": {
+      "independent_processes": 20,
+      "completed_cycles_each": 1,
+      "ping_calls": 4341,
+      "unexpected_errors": 0,
+      "ordinary_markers": 60
+    },
+    "fault_events": [
+      {
+        "phase": "observer-process-SIGKILL",
+        "result": "independent wait deadline and detached job preserved",
+        "time_unix": 1788958770.066361
+      },
+      {
+        "phase": "partial-sshd-path-stop",
+        "result": "recovered",
+        "started_unix": 1788958789.0817273,
+        "ended_unix": 1788958817.0880034
+      },
+      {
+        "phase": "broker-SIGKILL-after-completed-mutations",
+        "result": "recovered",
+        "started_unix": 1788958848.1579883,
+        "ended_unix": 1788958859.609596
+      },
+      {
+        "phase": "all-sshd-path-stop",
+        "result": "recovered",
+        "started_unix": 1788958875.8498485,
+        "ended_unix": 1788958905.9740105
+      },
+      {
+        "phase": "client-SIGKILL-quiesced-cycle",
+        "result": "restored counters, principal and next cycle without replay",
+        "time_unix": 1788958907.0307655
+      },
+      {
+        "phase": "agent-SIGKILL-serve-only",
+        "result": "reconnected",
+        "time_unix": 1788958907.234968
+      }
+    ],
+    "idle_samples": [
+      {
+        "time_unix": 1788959004.5459154,
+        "rss_bytes": 3541721088,
+        "fds": 2649,
+        "processes": 434,
+        "base_transports": 16,
+        "goroutines": 73
+      },
+      {
+        "time_unix": 1788959009.701128,
+        "rss_bytes": 3319631872,
+        "fds": 2320,
+        "processes": 434,
+        "base_transports": 0,
+        "goroutines": 9
+      },
+      {
+        "time_unix": 1788959014.8518806,
+        "rss_bytes": 3319832576,
+        "fds": 2313,
+        "processes": 402,
+        "base_transports": 0,
+        "goroutines": 9
+      },
+      {
+        "time_unix": 1788959020.0033882,
+        "rss_bytes": 3319889920,
+        "fds": 2313,
+        "processes": 402,
+        "base_transports": 0,
+        "goroutines": 9
+      },
+      {
+        "time_unix": 1788959025.1533446,
+        "rss_bytes": 3319943168,
+        "fds": 2313,
+        "processes": 402,
+        "base_transports": 0,
+        "goroutines": 9
+      }
+    ],
+    "evidence": [
+      {
+        "path": "/tmp/rdev-p8-scale-a0ed8d5/run.json",
+        "sha256": "125b06b530032fcc2d270c4b88439b73718897af7c148619e6aa009acee31f3b"
+      },
+      {
+        "path": "/tmp/rdev-p8-scale-a0ed8d5/status.json",
+        "sha256": "c81a900aba54971607209c6cc73d94dd53521bccb1626c33c32400b961eccf34"
+      },
+      {
+        "path": "/tmp/rdev-p8-scale-a0ed8d5/samples.jsonl",
+        "sha256": "9c57a75828a982c41616cd17ec7745a2a43ff33a64716386220dd8ee66b2180a"
+      },
+      {
+        "path": "/tmp/rdev-p8-scale-a0ed8d5/fleet-results.json",
+        "sha256": "67e9c4dcbb8dd044db1e793accf6585564a62597eba470dd134c7255ac9648b0"
+      }
+    ],
+    "independent_acceptance": {
+      "reviewer": "review_scale_final",
+      "status": "accepted-workload-scope",
+      "evidence": {
+        "path": "/tmp/rdev-review-scale-a0-result.json",
+        "sha256": "d89d9f21f992ef009ff1f5e6d0d25b9013937c2063591f52c2cd00e9e3f25b9c"
+      }
+    }
+  },
+  "failed_runs": [
+    {
+      "run_id": "90a8c3e846274e78bb5416bd68090510",
+      "path": "/tmp/rdev-p8-scale-047a0f5",
+      "kind": "real-100-target-20-client-short",
+      "status": "failed",
+      "elapsed_seconds": 25.4807,
+      "reason": "sync rejected, broker operation not_sent and no agent staging; original helper omitted reason. Independent reservation accounting strongly supports ingress quota; original error text not proven.",
+      "correction": "one bounded workload admission slot for retained sync and job_wait, preserving all clients, operations and product limits",
+      "evidence_preserved": true
+    },
+    {
+      "run_id": "73e0aaf1fa6545fb9c50d84e390a8358",
+      "path": "/tmp/rdev-p8-soak-d13086a",
+      "kind": "actual-24h-attempt",
+      "status": "failed",
+      "elapsed_seconds": 10.146597465965897,
+      "reason": "harness requested logger wall_timeout_sec=86400 above product 3600 hard maximum; first job_start refused resource.limit_exceeded/not_sent",
+      "remaining_managed_processes": [],
+      "evidence_preserved": true,
+      "spliced_into_later_run": false
+    }
+  ],
+  "soak": {
+    "status": "not-running",
+    "continuous_24h_passed": false,
+    "reason": "first actual long-duration attempt failed; bounded logger correction and new short validation required",
+    "correction": "Accepted bounded periodic logger fixture: max2350s/wall3500s, narrowed to next scheduled generation deadline minus45s after maintenance delays; 7080 retained mutations maximum. New short/24h execution still pending."
+  },
+  "compatibility_matrix": "compatibility-matrix.json",
+  "production_gates": [
+    {
+      "id": 1,
+      "status": "passed-reviewed-product-scope",
+      "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+      "unresolved_confirmed_high_medium": 0,
+      "agent_risk_acceptance": false
+    },
+    {
+      "id": 2,
+      "status": "pending",
+      "reason": "Linux arm64 and Darwin runtime unverified; macOS user-deferred; original Tier1 targets unchanged"
+    },
+    {
+      "id": 3,
+      "status": "blocked",
+      "reason": "authorized official signer/root and matching release identity absent; isolated test identity only"
+    },
+    {
+      "id": 4,
+      "status": "pending",
+      "reason": "no completed actual continuous 24h; full scale acceptance coverage remains incomplete"
+    },
+    {
+      "id": 5,
+      "status": "partial",
+      "reason": "actual predecessor upgrade/crash/network recovery subset passed; full real automatic/explicit rollback and historical migration/state matrix pending"
+    }
+  ],
+  "pending_engineering_coverage": [
+    "Full real-agent upgrade and automatic/explicit rollback persistent-fault-window matrix",
+    "Declared DNS, half-close, storage-full/read-only and response-loss integration matrix",
+    "Saturated owner/lane fairness, all Fleet threshold/cancel/subset-retry and in-flight ambiguity stages at scale",
+    "Automatic retention GC proof, dial distribution thresholds, complete metric collector and exiting-process CPU accounting",
+    "Full formal N/N-1 standalone/shared/channel/approval/archive/state rollback combinations"
+  ],
+  "external_requirements": [
+    "Authorized official release signer and administrator trust root (no authorization to create/enable one)",
+    "Linux arm64 and Darwin Tier1 runtime; macOS remains deferred",
+    "Formal N-1 release identity and supported historic artifacts",
+    "Authorized cross-machine production topology and resource budget",
+    "Actual continuous 24h after correctness checks; starting does not pass"
+  ],
+  "raw_evidence": [
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/validation.json",
+      "sha256": "a16fdbc7ff62de3f4d8a2bcf9b5fa3682da5209cddbbf1044e60cab89c0e7658"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/signed-validation.json",
+      "sha256": "6113246cc85f116f37ffa5449fd4b22688266f8080435eab0bd63d427ac21579"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/reproducibility.json",
+      "sha256": "8c22532e9a5a4a1490b02d49e2a9366df811de462cbf6afeec09afea2554cf6b"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/runtime-validation.json",
+      "sha256": "eda8818a0351051375e48920c9a56400fe51c168a9b6e9acd59914af18833ba9"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/runtime-race.json",
+      "sha256": "578cec2ebc9fa2085972acc1f28e3ffdef4074f71fd155921da577b81024c58d"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/mixed-slo.log",
+      "sha256": "fc111d76fea83d3b77e4af6cf8b0c56ec5b66a731d64940b42881a4ecdbc2a84"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/signed-remote-runtime.log",
+      "sha256": "b080684c9f2a132519102069247bf1c409c90363830c617b5c425a9740c3c7c5"
+    },
+    {
+      "path": "/tmp/rdev-p8-final-047a0f5/remote-race.log",
+      "sha256": "cdbcb4381e68b4cdf4aaf3e1a1412175bb05276c889fae894b6e4616d524ce8e"
+    }
+  ],
+  "independent_review": {
+    "product_source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+    "scopes": [
+      {
+        "reviewer": "review_supply",
+        "scope": "supply chain/signatures/channel/trust/permissions",
+        "status": "accepted"
+      },
+      {
+        "reviewer": "review_install_entry_accept",
+        "scope": "install transactions/state/CLI/MCP/compat/CI",
+        "status": "accepted"
+      },
+      {
+        "reviewer": "review_scale_final",
+        "scope": "scale/dial/resource/state/supervision",
+        "status": "accepted"
+      }
+    ],
+    "final_harness_document_delta": "Harness accepted by root and independent review_supply after actual ACL regression and 15 scale regressions; final runtime and evidence closure pending.",
+    "supply_chain_recheck": {
+      "reviewer": "review_supply",
+      "scope": "047 exact signed/repro/runtime bytes; no official identity claim",
+      "status": "accepted",
+      "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+      "evidence": {
+        "path": "/tmp/rdev-review-supply-final047.json",
+        "sha256": "2e356a8c6be4d194d06c73abfa3a11a141d67e08daa95d0f31c1a9beb84511b1"
+      },
+      "actual_checks": [
+        "26 signed-bundle files independently rehashed",
+        "12 binaries from two clean checkouts rehashed and matched all six release binaries",
+        "six actual binary VCS identities clean/full047/go1.26.8",
+        "actual verify-signed executed successfully",
+        "18 signed-runtime top-level passes and zero skips; log digest matched"
+      ]
+    },
+    "harness_corrections": {
+      "scope": [
+        "trusted CI policy location with original ACL refusal preserved",
+        "periodic loggers, delayed-generation timing, retained identities and daily storage budget",
+        "same-principal bounded credential refresh",
+        "fixed public hosted artifact digest binding"
+      ],
+      "authors": [
+        "review_install_entry_accept",
+        "review_scale_final",
+        "root"
+      ],
+      "independent_acceptance": "review_supply cross-reviewed all deltas; root reviewed and reran scale tests",
+      "tests": {
+        "scale_python": 15,
+        "actual_acl_regression": "passed; real setfacl and production LoadPolicy",
+        "workflow_digest_calculation": "passed against actual047 release/repro; local-only"
+      },
+      "status": "accepted-engineering-not-production-certified"
+    }
+  },
+  "hosted_ci": {
+    "status": "failed-latest-observed-run",
+    "runs": [
+      {
+        "run_id": 34350597391,
+        "source_commit": "56351b738f1f1aaa89aa4d788858af078b82de30",
+        "url": "https://github.com/CIPFZ/rdev/actions/runs/34350597391/job/102462636260",
+        "checked_at": "2026-09-09T12:30:36.737515+00:00",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:22:07Z",
+            "completed-at": "2026-09-09T12:22:08Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/1"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:22:08Z",
+            "completed-at": "2026-09-09T12:22:09Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/2"
+          },
+          {
+            "name": "Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:22:09Z",
+            "completed-at": "2026-09-09T12:22:09Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/3"
+          },
+          {
+            "name": "Install local SSH fixture dependencies",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:22:09Z",
+            "completed-at": "2026-09-09T12:22:16Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/4"
+          },
+          {
+            "name": "Bind runner and tool identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:22:16Z",
+            "completed-at": "2026-09-09T12:22:16Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/5"
+          },
+          {
+            "name": "Build, vet, test, and check embedded agents",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:22:16Z",
+            "completed-at": "2026-09-09T12:24:05Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/6"
+          },
+          {
+            "name": "Race instrumentation",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:24:05Z",
+            "completed-at": "2026-09-09T12:26:34Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/7"
+          },
+          {
+            "name": "Coverage-guided fuzz smoke",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:26:34Z",
+            "completed-at": "2026-09-09T12:29:07Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/8"
+          },
+          {
+            "name": "Harness supervision regressions",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:29:07Z",
+            "completed-at": "2026-09-09T12:29:13Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/9"
+          },
+          {
+            "name": "Real IPv4, IPv6 and ProxyJump runtime",
+            "conclusion": "failure",
+            "started-at": "2026-09-09T12:29:13Z",
+            "completed-at": "2026-09-09T12:30:02Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/10"
+          },
+          {
+            "name": "Online release audit and artifact binding",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:30:02Z",
+            "completed-at": "2026-09-09T12:30:02Z",
+            "log-url": ""
+          },
+          {
+            "name": "Preserve evidence",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:30:02Z",
+            "completed-at": "2026-09-09T12:30:03Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/12"
+          },
+          {
+            "name": "Post Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:30:03Z",
+            "completed-at": "2026-09-09T12:30:03Z",
+            "log-url": ""
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:30:03Z",
+            "completed-at": "2026-09-09T12:30:03Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/24"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:30:03Z",
+            "completed-at": "2026-09-09T12:30:03Z",
+            "log-url": "/CIPFZ/rdev/commit/56351b738f1f1aaa89aa4d788858af078b82de30/checks/102462636260/logs/25"
+          }
+        ]
+      },
+      {
+        "run_id": 34351638389,
+        "source_commit": "047a0f53bb39b637b55c5aedec99c28ff0a0f8da",
+        "url": "https://github.com/CIPFZ/rdev/actions/runs/34351638389",
+        "checked_at": "2026-09-09T12:41:17.812150+00:00",
+        "status": "failed",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:32:48Z",
+            "completed-at": "2026-09-09T12:32:50Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:32:50Z",
+            "completed-at": "2026-09-09T12:32:51Z"
+          },
+          {
+            "name": "Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:32:51Z",
+            "completed-at": "2026-09-09T12:33:02Z"
+          },
+          {
+            "name": "Install local SSH fixture dependencies",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:33:02Z",
+            "completed-at": "2026-09-09T12:33:13Z"
+          },
+          {
+            "name": "Bind runner and tool identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:33:13Z",
+            "completed-at": "2026-09-09T12:33:13Z"
+          },
+          {
+            "name": "Build, vet, test, and check embedded agents",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:33:13Z",
+            "completed-at": "2026-09-09T12:34:56Z"
+          },
+          {
+            "name": "Race instrumentation",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:34:56Z",
+            "completed-at": "2026-09-09T12:37:22Z"
+          },
+          {
+            "name": "Coverage-guided fuzz smoke",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:37:22Z",
+            "completed-at": "2026-09-09T12:39:52Z"
+          },
+          {
+            "name": "Harness supervision regressions",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:39:52Z",
+            "completed-at": "2026-09-09T12:39:58Z"
+          },
+          {
+            "name": "Real IPv4, IPv6 and ProxyJump runtime",
+            "conclusion": "failure",
+            "started-at": "2026-09-09T12:39:58Z",
+            "completed-at": "2026-09-09T12:40:47Z"
+          },
+          {
+            "name": "Online release audit and artifact binding",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:40:47Z",
+            "completed-at": "2026-09-09T12:40:47Z"
+          },
+          {
+            "name": "Independent clean build reproducibility",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:40:47Z",
+            "completed-at": "2026-09-09T12:40:47Z"
+          },
+          {
+            "name": "Preserve evidence",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:40:47Z",
+            "completed-at": "2026-09-09T12:40:48Z"
+          },
+          {
+            "name": "Post Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:40:48Z",
+            "completed-at": "2026-09-09T12:40:48Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:40:48Z",
+            "completed-at": "2026-09-09T12:40:48Z"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:40:48Z",
+            "completed-at": "2026-09-09T12:40:48Z"
+          }
+        ]
+      },
+      {
+        "run_id": 34352551674,
+        "source_commit": "f0ad07263ba954c512934ff02111588343fab44c",
+        "url": "https://github.com/CIPFZ/rdev/actions/runs/34352551674",
+        "checked_at": "2026-09-09T12:50:35.571370+00:00",
+        "status": "failed",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:42:09Z",
+            "completed-at": "2026-09-09T12:42:10Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:42:10Z",
+            "completed-at": "2026-09-09T12:42:12Z"
+          },
+          {
+            "name": "Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:42:12Z",
+            "completed-at": "2026-09-09T12:42:19Z"
+          },
+          {
+            "name": "Install local SSH fixture dependencies",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:42:19Z",
+            "completed-at": "2026-09-09T12:42:31Z"
+          },
+          {
+            "name": "Bind runner and tool identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:42:31Z",
+            "completed-at": "2026-09-09T12:42:31Z"
+          },
+          {
+            "name": "Build, vet, test, and check embedded agents",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:42:31Z",
+            "completed-at": "2026-09-09T12:44:11Z"
+          },
+          {
+            "name": "Race instrumentation",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:44:11Z",
+            "completed-at": "2026-09-09T12:46:24Z"
+          },
+          {
+            "name": "Coverage-guided fuzz smoke",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:46:24Z",
+            "completed-at": "2026-09-09T12:48:51Z"
+          },
+          {
+            "name": "Harness supervision regressions",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:48:51Z",
+            "completed-at": "2026-09-09T12:48:57Z"
+          },
+          {
+            "name": "Real IPv4, IPv6 and ProxyJump runtime",
+            "conclusion": "failure",
+            "started-at": "2026-09-09T12:48:57Z",
+            "completed-at": "2026-09-09T12:49:45Z"
+          },
+          {
+            "name": "Summarize SSH failures without test payloads",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:49:45Z",
+            "completed-at": "2026-09-09T12:49:45Z"
+          },
+          {
+            "name": "Online release audit and artifact binding",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:49:45Z",
+            "completed-at": "2026-09-09T12:49:45Z"
+          },
+          {
+            "name": "Independent clean build reproducibility",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:49:45Z",
+            "completed-at": "2026-09-09T12:49:45Z"
+          },
+          {
+            "name": "Preserve evidence",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:49:45Z",
+            "completed-at": "2026-09-09T12:49:46Z"
+          },
+          {
+            "name": "Post Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T12:49:46Z",
+            "completed-at": "2026-09-09T12:49:46Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:49:46Z",
+            "completed-at": "2026-09-09T12:49:46Z"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:49:46Z",
+            "completed-at": "2026-09-09T12:49:46Z"
+          }
+        ]
+      },
+      {
+        "run_id": 34354138813,
+        "source_commit": "a0ed8d5eaa7a879a7383d2ec7e5ec4c14cc58794",
+        "url": "https://github.com/CIPFZ/rdev/actions/runs/34354138813",
+        "checked_at": "2026-09-09T13:04:48.021594+00:00",
+        "status": "failed",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:58:05Z",
+            "completed-at": "2026-09-09T12:58:07Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:58:07Z",
+            "completed-at": "2026-09-09T12:58:08Z"
+          },
+          {
+            "name": "Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:58:08Z",
+            "completed-at": "2026-09-09T12:58:16Z"
+          },
+          {
+            "name": "Install local SSH fixture dependencies",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:58:16Z",
+            "completed-at": "2026-09-09T12:58:29Z"
+          },
+          {
+            "name": "Bind runner and tool identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:58:29Z",
+            "completed-at": "2026-09-09T12:58:29Z"
+          },
+          {
+            "name": "Build, vet, test, and check embedded agents",
+            "conclusion": "success",
+            "started-at": "2026-09-09T12:58:29Z",
+            "completed-at": "2026-09-09T13:00:07Z"
+          },
+          {
+            "name": "Real IPv4, IPv6 and ProxyJump runtime",
+            "conclusion": "failure",
+            "started-at": "2026-09-09T13:00:07Z",
+            "completed-at": "2026-09-09T13:00:55Z"
+          },
+          {
+            "name": "Summarize SSH failures without test payloads",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:00:55Z",
+            "completed-at": "2026-09-09T13:00:55Z"
+          },
+          {
+            "name": "Race instrumentation",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:00:55Z",
+            "completed-at": "2026-09-09T13:00:55Z"
+          },
+          {
+            "name": "Coverage-guided fuzz smoke",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:00:55Z",
+            "completed-at": "2026-09-09T13:00:55Z"
+          },
+          {
+            "name": "Harness supervision regressions",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:00:55Z",
+            "completed-at": "2026-09-09T13:00:55Z"
+          },
+          {
+            "name": "Online release audit and artifact binding",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:00:55Z",
+            "completed-at": "2026-09-09T13:00:55Z"
+          },
+          {
+            "name": "Independent clean build reproducibility",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:00:55Z",
+            "completed-at": "2026-09-09T13:00:55Z"
+          },
+          {
+            "name": "Preserve evidence",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:00:55Z",
+            "completed-at": "2026-09-09T13:00:56Z"
+          },
+          {
+            "name": "Post Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:00:56Z",
+            "completed-at": "2026-09-09T13:00:56Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:00:56Z",
+            "completed-at": "2026-09-09T13:00:56Z"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:00:56Z",
+            "completed-at": "2026-09-09T13:00:56Z"
+          }
+        ]
+      },
+      {
+        "run_id": 34355470510,
+        "source_commit": "ca4a2c1aad0b745bfceafc63a0b5c4efe5dbddaf",
+        "url": "https://github.com/CIPFZ/rdev/actions/runs/34355470510",
+        "checked_at": "2026-09-09T13:14:04.671796+00:00",
+        "status": "failed",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:11:04Z",
+            "completed-at": "2026-09-09T13:11:05Z"
+          },
+          {
+            "name": "Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:11:05Z",
+            "completed-at": "2026-09-09T13:11:07Z"
+          },
+          {
+            "name": "Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:11:07Z",
+            "completed-at": "2026-09-09T13:11:10Z"
+          },
+          {
+            "name": "Install local SSH fixture dependencies",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:11:10Z",
+            "completed-at": "2026-09-09T13:11:22Z"
+          },
+          {
+            "name": "Bind runner and tool identities",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:11:22Z",
+            "completed-at": "2026-09-09T13:11:22Z"
+          },
+          {
+            "name": "Build, vet, test, and check embedded agents",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:11:22Z",
+            "completed-at": "2026-09-09T13:12:59Z"
+          },
+          {
+            "name": "Real IPv4, IPv6 and ProxyJump runtime",
+            "conclusion": "failure",
+            "started-at": "2026-09-09T13:12:59Z",
+            "completed-at": "2026-09-09T13:13:06Z"
+          },
+          {
+            "name": "Summarize SSH failures without test payloads",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:13:06Z",
+            "completed-at": "2026-09-09T13:13:06Z"
+          },
+          {
+            "name": "Race instrumentation",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:13:06Z",
+            "completed-at": "2026-09-09T13:13:06Z"
+          },
+          {
+            "name": "Coverage-guided fuzz smoke",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:13:06Z",
+            "completed-at": "2026-09-09T13:13:06Z"
+          },
+          {
+            "name": "Harness supervision regressions",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:13:06Z",
+            "completed-at": "2026-09-09T13:13:06Z"
+          },
+          {
+            "name": "Online release audit and artifact binding",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:13:06Z",
+            "completed-at": "2026-09-09T13:13:06Z"
+          },
+          {
+            "name": "Independent clean build reproducibility",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:13:06Z",
+            "completed-at": "2026-09-09T13:13:06Z"
+          },
+          {
+            "name": "Preserve evidence",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:13:06Z",
+            "completed-at": "2026-09-09T13:13:07Z"
+          },
+          {
+            "name": "Post Run actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+            "conclusion": "skipped",
+            "started-at": "2026-09-09T13:13:07Z",
+            "completed-at": "2026-09-09T13:13:07Z"
+          },
+          {
+            "name": "Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:13:07Z",
+            "completed-at": "2026-09-09T13:13:07Z"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success",
+            "started-at": "2026-09-09T13:13:07Z",
+            "completed-at": "2026-09-09T13:13:07Z"
+          }
+        ]
+      }
+    ],
+    "latest_observed_failure": "ca4a2c1 real LoadPolicy preflight rejected unsupported extended ACL before business SSH; test policy location correction pending. Product trust validation remains unchanged.",
+    "artifact_binding": "047 local signed/repro bytes are not hosted artifacts. Failed runs skipped hosted release audit/repro. Public run/step metadata observed; artifact payload retrieval not available without authentication."
+  }
+}

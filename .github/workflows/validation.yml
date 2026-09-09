@@ -93,6 +93,30 @@ jobs:
           RDEV_GO: go
           RDEV_REPRO_OUT: ${{ runner.temp }}/rdev-evidence/repro
         run: sh scripts/reproducible-build.sh
+      - name: Record exact hosted artifact identities
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rdev-evidence"
+          release = root / "release"
+          manifest = json.loads((release / "manifest.json").read_text())
+          repro = json.loads((root / "repro" / "result.json").read_text())
+          source = os.environ["GITHUB_SHA"]
+          assert re.fullmatch(r"[0-9a-f]{40}", source)
+          assert manifest["source"]["commit"] == source and manifest["source"]["dirty"] is False
+          names = ["rdev", "rdevd", "rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64"]
+          assert len(manifest["artifacts"]) == 6 and {a["name"] for a in manifest["artifacts"]} == set(names)
+          actual = {name: hashlib.sha256((release / name).read_bytes()).hexdigest() for name in names}
+          assert all(actual[a["name"]] == a["sha256"] for a in manifest["artifacts"])
+          assert repro["source_commit"] == source and repro["result"] == "passed" and len(repro["artifacts"]) == 6
+          assert {pathlib.PurePosixPath(a["path"]).name for a in repro["artifacts"]} == set(names)
+          assert all(a["first_sha256"] == a["second_sha256"] == actual[pathlib.PurePosixPath(a["path"]).name] for a in repro["artifacts"])
+          metadata = ["manifest.json", "sbom.cdx.json", "provenance.intoto.json", "THIRD_PARTY_NOTICES.txt"]
+          summary = {"source_commit": source, "run_id": int(os.environ["GITHUB_RUN_ID"]), "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "official_signature": False, "reproducible_release_bytes": True, "artifacts": actual, "metadata": {name: hashlib.sha256((release / name).read_bytes()).hexdigest() for name in metadata}}
+          message = json.dumps(summary, sort_keys=True)
+          (root / "artifact-identity.json").write_text(message + "\n")
+          print("::notice title=Hosted artifact identities::" + message)
+          PY
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -105,6 +129,7 @@ jobs:
             ${{ runner.temp }}/rdev-evidence/toolchain.txt
             ${{ runner.temp }}/rdev-evidence/openssh.txt
             ${{ runner.temp }}/rdev-evidence/run.txt
+            ${{ runner.temp }}/rdev-evidence/artifact-identity.json
             ${{ runner.temp }}/rdev-evidence/ssh/result.json
             ${{ runner.temp }}/rdev-evidence/ssh/release-policy-preflight.log
             ${{ runner.temp }}/rdev-evidence/ssh/recovery.json

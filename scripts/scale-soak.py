@@ -31,6 +31,10 @@ BOUNDS = {"rss_bytes": 12 << 30, "fds": 32768, "processes": 2500, "disk_bytes": 
           "mutation_operations": 8192, "warm_hosts": 16, "mutation_cycle_seconds": 1200,
           "goroutines": 4096, "idle_rss_growth_bytes": 256 << 20, "idle_goroutine_growth": 128,
           "idle_interval_seconds": 3600, "idle_seconds": 330, "job_log_bytes": 4 << 10}
+LOGGER_EVERY_CYCLES = 2
+LOGGER_DURATION_SECONDS = 2350
+LOGGER_WALL_SECONDS = 3500
+TOKEN_REFRESH_SECONDS = 12 * 3600
 LATENCY_MS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000]
 MISSING = ["saturated owner/lane fairness and quota SLO", "Fleet threshold/cancel/subset-retry fault stages", "in-flight mutation crash/ambiguity fault stages", "automatic retention GC removal proof", "CPU final ticks for processes exiting between samples", "dial/reconnect/backoff/queue distribution acceptance thresholds", "metric collectors beyond fixed observe.Registry counters", "production topology and cross-machine network", "strict control latency SLO", "all Production Gates"]
 CPU_PREVIOUS = None
@@ -239,6 +243,95 @@ def large_response_admission(root, stats):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def workload_budget(seconds, clients, targets):
+    cycles = (seconds + BOUNDS["mutation_cycle_seconds"] - 1) // BOUNDS["mutation_cycle_seconds"]
+    generations = (cycles + LOGGER_EVERY_CYCLES - 1) // LOGGER_EVERY_CYCLES
+    ordinary = clients * (3 * cycles + (cycles + 1) // 2)
+    loggers = 2 * clients * generations  # every start and removal keeps its identity
+    fleet = targets * ((seconds + 4 * 3600 - 1) // (4 * 3600))
+    return {"cycles_per_client_max": cycles, "logger_generations_per_client_max": generations,
+            "ordinary_mutations_max": ordinary, "logger_mutations_max": loggers,
+            "fleet_mutations_max": fleet, "total_mutations_max": ordinary + loggers + fleet,
+            "ordinary_owner_mutations_max": 3 * cycles + (cycles + 1) // 2 + 2 * generations,
+            "admin_owner_mutations_max": fleet}
+
+
+def logger_duration(seconds, elapsed, next_generation_in_seconds):
+    # Every logger is a bounded job. Leave real time for final status/removal;
+    # a 24-hour probe never asks the product for a 24-hour job envelope.
+    # Maintenance delays the current cycle without moving its next scheduled
+    # generation. Shorten this logger rather than overlapping that generation.
+    duration = min(LOGGER_DURATION_SECONDS, int(seconds - elapsed - 45),
+                   int(next_generation_in_seconds - 45))
+    if duration < 8:
+        raise RuntimeError("insufficient remaining run time or generation interval for a bounded logger")
+    return duration
+
+
+def issue_credential(root, owner):
+    issued_monotonic, issued_unix = time.monotonic(), time.time()
+    token = command([root / "rdevd", "principal-token", "-key-file", root / "principal.key",
+                     "-client-id", owner["client_id"], "-project-id", owner["project_id"],
+                     "-ttl", "24h"], capture_output=True).stdout.decode().strip()
+    # The product maximum is 24h. Refresh the same owner at half that lifetime,
+    # measured from actual issue time, including time spent before run startup.
+    return {"owner": owner, "token": token, "issued_monotonic": issued_monotonic,
+            "issued_unix": issued_unix, "refresh_monotonic": issued_monotonic + TOKEN_REFRESH_SECONDS}
+
+
+def finish_logger(root, sock, owner, index, stats):
+    logger = stats.get("logger")
+    if not logger:
+        return
+    matching = [item for item in stats.get("logger_history", []) if item["id"] == logger["id"]]
+    if len(matching) != 1 or matching[0].get("removed"):
+        raise RuntimeError("logger history identity is missing, duplicated or already retired")
+    query = {"id": "logger-final-status", "owner": owner, "host": logger["host"], "operation": "job_status",
+             "wire": {"op": "job_status", "job": {"id": logger["id"]}}}
+    info = checked(sock, query)["wire"]["job"]["info"]
+    ledger = info["stdout_ledger"]
+    if (info["state"] != "exited" or info.get("exit_code", 0) != 0 or ledger["original_bytes"] <= BOUNDS["job_log_bytes"]
+            or not 0 < ledger["retained_bytes"] <= BOUNDS["job_log_bytes"]
+            or ledger["dropped_bytes"] <= 0 or Path(logger["marker"]).read_bytes() != b"x"):
+        raise RuntimeError("bounded logger did not finish with exact marker and rolling ledger")
+    approved_wire(root, sock, owner, logger["host"], {"op": "job_rm", "job": {"id": logger["id"]}}, logger["remove_operation_id"])
+    logger.update(removed=True, ledger=ledger, observed_exited_unix=time.time())
+    matching[0].update(logger)  # JSON reload does not retain object aliasing
+    stats["mutations"] += 1
+    stats["marker_proofs"] += 1
+    stats["log_rotation_proofs"] += 1
+    stats["operations"]["job_status"] = stats["operations"].get("job_status", 0) + 1
+    stats["operations"]["job_rm"] = stats["operations"].get("job_rm", 0) + 1
+    stats["logger"] = None
+    stats["updated_unix"], stats["updated_monotonic"] = time.time(), time.monotonic()
+    write(root / f"worker-{index}.json", stats)
+
+
+def start_logger(root, spec, sock, owner, host, index, cycle, business, prefix, stats, *, scheduled_cycle_monotonic):
+    finish_logger(root, sock, owner, index, stats)
+    generation = cycle // LOGGER_EVERY_CYCLES
+    if generation >= spec["mutation_budget"]["logger_generations_per_client_max"]:
+        raise RuntimeError("predeclared logger generation budget exhausted")
+    logger_marker = business / f"logger-{index}-{generation}"
+    barrier = json.loads((root / "start-barrier").read_text())
+    now = time.monotonic()
+    next_generation = scheduled_cycle_monotonic + LOGGER_EVERY_CYCLES * BOUNDS["mutation_cycle_seconds"]
+    duration = logger_duration(spec["seconds"], now - barrier["started_monotonic"], next_generation - now)
+    program = "import os,sys,time\nwith open(sys.argv[1],'ab') as marker: marker.write(b'x')\nend=time.monotonic()+float(sys.argv[2])\nwhile time.monotonic()<end:\n os.write(1,b'rdev-log'*128+b'\\n');time.sleep(1)\n"
+    logger = approved_wire(root, sock, owner, host, {"op": "job_start", "job": {"spec": {"argv": ["python3", "-c", program, str(logger_marker), str(duration)]}, "resources": {"wall_timeout_sec": LOGGER_WALL_SECONDS, "fds": 128}}}, prefix + "periodic_logger")
+    record = {"id": logger["wire"]["job"]["info"]["id"], "host": host, "marker": str(logger_marker),
+              "generation": generation, "duration_seconds": duration, "wall_timeout_seconds": LOGGER_WALL_SECONDS,
+              "scheduled_cycle_monotonic": scheduled_cycle_monotonic, "next_generation_monotonic": next_generation,
+              "duration_calculated_monotonic": now,
+              "start_operation_id": prefix + "periodic_logger", "remove_operation_id": prefix + "logger_remove",
+              "started_unix": time.time(), "removed": False}
+    stats["logger"] = record
+    stats.setdefault("logger_history", []).append(record)
+    stats["mutations"] += 1
+    stats["operations"]["job_start"] = stats["operations"].get("job_start", 0) + 1
+    write(root / f"worker-{index}.json", stats)
+
+
 def approved_wire(root, sock, owner, host, wire, operation_id):
     wire = dict(wire, operation_id=operation_id)
     admin = json.loads((root / "credential-admin.json").read_text())
@@ -299,7 +392,7 @@ def check_idle(samples, baseline=None, full=False):
     return tail
 
 
-def mixed_cycle(root, spec, index, cycle, sock, owner, host, target, stats):
+def mixed_cycle(root, spec, index, cycle, sock, owner, host, target, stats, *, scheduled_cycle_monotonic):
     business = Path(spec["namespace"]) / f"business-{target}"
     prefix = "op_scale_" + spec["run_id"][:12] + f"_{index}_{cycle}_"
     admin = json.loads((root / "credential-admin.json").read_text())
@@ -325,14 +418,9 @@ def mixed_cycle(root, spec, index, cycle, sock, owner, host, target, stats):
         write(root / f"worker-{index}.json", stats)
         return result
     try:
-        if cycle == 0:
-            logger_marker = business / f"logger-{index}"
-            duration = max(8, spec["seconds"] - 45 - index)
-            program = "import os,sys,time\nwith open(sys.argv[1],'ab') as marker: marker.write(b'x')\nend=time.monotonic()+float(sys.argv[2])\nwhile time.monotonic()<end:\n os.write(1,b'rdev-log'*128+b'\\n');time.sleep(1)\n"
-            logger = approved_wire(root, sock, owner, host, {"op": "job_start", "job": {"spec": {"argv": ["python3", "-c", program, str(logger_marker), str(duration)]}, "resources": {"wall_timeout_sec": min(86400, spec["seconds"]), "fds": 128}}}, prefix + "continuous_logger")
-            stats["logger"] = {"id": logger["wire"]["job"]["info"]["id"], "host": host, "marker": str(logger_marker)}
-            stats["mutations"] += 1
-            stats["operations"]["job_start"] = stats["operations"].get("job_start", 0) + 1
+        if cycle % LOGGER_EVERY_CYCLES == 0:
+            start_logger(root, spec, sock, owner, host, index, cycle, business, prefix, stats,
+                         scheduled_cycle_monotonic=scheduled_cycle_monotonic)
         exec_marker = business / f"exec-{index}-{cycle}"
         call("exec", {"exec": {"argv": ["sh", "-c", 'printf x >> "$1"; printf bounded-exec', "rdev-scale", str(exec_marker)], "timeout_sec": 10, "max_output_bytes": 4096}}, mutation=True)
         if exec_marker.read_bytes() != b"x":
@@ -507,7 +595,8 @@ def worker(root, index):
             if spec["workload"] == "mixed" and not fault and time.monotonic() >= next_cycle:
                 stats["cycle_in_progress"] = True
                 write(saved, stats)
-                mixed_cycle(root, spec, index, stats["cycles"], sock, credential["owner"], f"target-{target:03d}", target, stats)
+                mixed_cycle(root, spec, index, stats["cycles"], sock, credential["owner"], f"target-{target:03d}", target, stats,
+                            scheduled_cycle_monotonic=next_cycle)
                 stats["cycle_in_progress"] = False
                 next_cycle += BOUNDS["mutation_cycle_seconds"]
         except (OSError, RuntimeError, ValueError, KeyError) as error:
@@ -807,8 +896,7 @@ def supervise(root):
         grants = {}
         for index in [*range(spec["clients"]), "admin"]:
             owner = {"client_id": f"client-{index % 10}", "project_id": f"project-{index // 10}"} if index != "admin" else {"client_id": "scale-administrator", "project_id": "operations"}
-            token = command([root / "rdevd", "principal-token", "-key-file", root / "principal.key", "-client-id", owner["client_id"], "-project-id", owner["project_id"], "-ttl", "24h"], capture_output=True).stdout.decode().strip()
-            write(root / f"credential-{index}.json", {"owner": owner, "token": token})
+            write(root / f"credential-{index}.json", issue_credential(root, owner))
             operations = ["status", "ping", "exec", "job_start", "job_status", "job_wait", "job_logs", "job_rm", "sync.push", "mutation.status"] if index != "admin" else ["pool.health", "approval.create", "policy.grant", "fleet.inventory.list", "fleet.inventory.import", "fleet.plan", "fleet.approve", "fleet.execute", "fleet.status"]
             grants[owner["client_id"] + "\x00" + owner["project_id"]] = dict.fromkeys(operations, True)
         write(root / "broker.sock.policy", grants)
@@ -838,10 +926,11 @@ def supervise(root):
             if time.monotonic() >= deadline:
                 raise RuntimeError("client start barrier timeout")
             time.sleep(.05)
-        start = last = refreshed = time.monotonic()
+        refresh_at = min(json.loads((root / f"credential-{i}.json").read_text())["refresh_monotonic"] for i in [*range(spec["clients"]), "admin"])
+        start = last = time.monotonic()
         progress_watch = {i: {"count": 0, "at": start} for i in range(spec["clients"])}
         report.update(status="running", started_unix=time.time())
-        write(root / "start-barrier", {"started_unix": report["started_unix"]})
+        write(root / "start-barrier", {"started_unix": report["started_unix"], "started_monotonic": start})
         if spec["workload"] == "mixed":
             fleet_thread = threading.Thread(target=fleet_loop, args=(root, spec, report, fleet_control), daemon=True)
             fleet_thread.start()
@@ -852,15 +941,15 @@ def supervise(root):
             now = time.monotonic()
             if report.get("fleet_error"):
                 raise RuntimeError(report["fleet_error"])
-            if now - refreshed >= 12 * 3600:
+            if now >= refresh_at:
                 # Issued tokens have a strict 24-hour maximum. Renew the same
                 # owners before expiry; no policy, broker or namespace reset.
                 for index in [*range(spec["clients"]), "admin"]:
                     credential = json.loads((root / f"credential-{index}.json").read_text())
                     owner = credential["owner"]
-                    credential["token"] = command([root / "rdevd", "principal-token", "-key-file", root / "principal.key", "-client-id", owner["client_id"], "-project-id", owner["project_id"], "-ttl", "24h"], capture_output=True).stdout.decode().strip()
-                    write(root / f"credential-{index}.json", credential)
-                refreshed = now
+                    write(root / f"credential-{index}.json", issue_credential(root, owner))
+                refresh_at = min(json.loads((root / f"credential-{i}.json").read_text())["refresh_monotonic"] for i in [*range(spec["clients"]), "admin"])
+                report.setdefault("credential_refresh_events", []).append({"time_unix": time.time(), "owners": spec["clients"] + 1, "same_principals": True, "ttl_seconds": 86400})
             if now - last > BOUNDS["max_sample_gap_seconds"]:
                 raise RuntimeError("observation gap exceeds fixed budget")
             if spec["workload"] == "mixed" and not cancellation_done and now - start >= 20:
@@ -1031,21 +1120,12 @@ def supervise(root):
             for index, entry in enumerate(stats):
                 if spec["workload"] != "mixed":
                     continue
-                logger = entry["logger"]
                 credential = json.loads((root / f"credential-{index}.json").read_text())
                 channel = connect(root, credential["owner"], credential["token"])
                 try:
-                    query = {"id": "final-logger", "owner": credential["owner"], "host": logger["host"], "operation": "job_status", "wire": {"op": "job_status", "job": {"id": logger["id"]}}}
-                    info = checked(channel, query)["wire"]["job"]["info"]
-                    ledger = info["stdout_ledger"]
-                    if info["state"] != "exited" or ledger["original_bytes"] <= BOUNDS["job_log_bytes"] or ledger["retained_bytes"] > BOUNDS["job_log_bytes"] or ledger["dropped_bytes"] <= 0 or Path(logger["marker"]).read_bytes() != b"x":
-                        raise RuntimeError("continuous logger lost progress, duplicated, or exceeded its rolling budget")
-                    approved_wire(root, channel, credential["owner"], logger["host"], {"op": "job_rm", "job": {"id": logger["id"]}}, "op_scale_" + spec["run_id"][:12] + f"_{index}_logger_remove")
-                    entry["mutations"] += 1
-                    entry["marker_proofs"] += 1
-                    entry["log_rotation_proofs"] += 1
-                    entry["logger_ledger"] = ledger
-                    write(root / f"worker-{index}.json", entry)
+                    finish_logger(root, channel, credential["owner"], index, entry)
+                    if not entry.get("logger_history") or any(not logger["removed"] or Path(logger["marker"]).read_bytes() != b"x" for logger in entry["logger_history"]):
+                        raise RuntimeError("periodic logger identity or retained marker proof is incomplete")
                 finally:
                     channel.close()
             final_storage = sample(root, namespace)["storage_records"]
@@ -1179,6 +1259,10 @@ def main():
             parser.error("--idle-smoke requires --allow-dirty-smoke --seconds 600 and separate fault runs")
         if args.artifacts is None or root.parent != Path("/tmp"):
             parser.error("start requires --artifacts and a new direct /tmp child")
+        mutation_budget = workload_budget(args.seconds, args.clients, args.targets)
+        if (mutation_budget["total_mutations_max"] > BOUNDS["mutation_operations"]
+                or max(mutation_budget["ordinary_owner_mutations_max"], mutation_budget["admin_owner_mutations_max"]) > 1024):
+            parser.error("predeclared workload exceeds existing global/owner mutation retention limits")
         repo = Path(__file__).resolve().parent.parent
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
         artifact_commit = commit
@@ -1211,7 +1295,9 @@ def main():
                 parser.error("binary/source identity mismatch; rebuild clean source before starting a long probe")
         write(root / "build-metadata.json", build_metadata)
         artifacts = {str(path.relative_to(root)): sha(path) for path in [root / "harness.py", root / "rdevd", *sorted((root / "agents").iterdir())]}
-        spec = {"schema": 1, "kind": "real-ssh-scale", "run_id": run_id, "source_commit": commit, "source_dirty": dirty, "allow_dirty_smoke": args.allow_dirty_smoke, "artifact_build_metadata": "build-metadata.json", "seconds": args.seconds, "targets": args.targets, "clients": args.clients, "shared_host_instances": 1, "physical_machine_count": "unverified", "fault_domain": "one shared Linux kernel and filesystem", "namespace": str(namespace), "artifacts": artifacts, "workload": args.workload, "predeclared_bounds": BOUNDS, "bounds_basis": "conservative 16-CPU/32-GiB shared Linux instance; observed managed CPU <=12 cores (75% of 16) per sampling interval; fixed 20-minute cycles budget 5040 ordinary mutations plus 40 logger starts/removals and six 100-target Fleet plans/24h=5680, below existing 8192, no direct record deletion/reset; not production throughput/SLO", "production_gate": "not-run", "missing_coverage": MISSING}
+        spec = {"schema": 1, "kind": "real-ssh-scale", "run_id": run_id, "source_commit": commit, "source_dirty": dirty, "allow_dirty_smoke": args.allow_dirty_smoke, "artifact_build_metadata": "build-metadata.json", "seconds": args.seconds, "targets": args.targets, "clients": args.clients, "shared_host_instances": 1, "physical_machine_count": "unverified", "fault_domain": "one shared Linux kernel and filesystem", "namespace": str(namespace), "artifacts": artifacts, "workload": args.workload, "predeclared_bounds": BOUNDS, "mutation_budget": mutation_budget, "bounds_basis": "conservative 16-CPU/32-GiB shared Linux instance; observed managed CPU <=12 cores (75% of 16) per sampling interval; preflight computes retained mutation ceilings for every ordinary operation, periodic logger start/removal and Fleet target: 86400s/20clients/100targets=5040+1440+600=7080, below existing global8192/owner1024; no direct record deletion/reset; not production throughput/SLO", "production_gate": "not-run", "missing_coverage": MISSING}
+        spec["logger_policy"] = {"kind": "periodic bounded detached jobs", "every_mutation_cycles": LOGGER_EVERY_CYCLES, "nominal_generation_interval_seconds": LOGGER_EVERY_CYCLES * BOUNDS["mutation_cycle_seconds"], "duration_seconds_max": LOGGER_DURATION_SECONDS, "wall_timeout_seconds": LOGGER_WALL_SECONDS, "duration_deadlines": "earlier of run end and next generation's original worker schedule, minus45s; maintenance shortens this generation without changing mutation cadence", "gaps": "nominal 50 seconds plus scheduling, maintenance and final-run margin; not a continuous 24h job", "retained_evidence": "unique generation marker, start/removal operation IDs, job-start tombstones and broker mutation ledger; no namespace reset"}
+        spec["credential_policy"] = {"ttl_seconds": 86400, "refresh_after_issue_seconds": TOKEN_REFRESH_SECONDS, "same_principals": True, "public_evidence": "renewal time/count only; tokens remain in private credential files"}
         spec["broker_crash"] = args.broker_crash
         spec["artifact_source_commit"] = artifact_commit
         spec["workload_admission"] = {"large_response_concurrency": 1, "scope": "retained sync prepare+execute and job_wait; all 20 clients and daily mutation count retained", "basis": "28 MiB per sync plus 8 MiB per wait compete for unchanged global64MiB/owner32MiB ingress; control and ordinary work retain headroom", "saturated_sync_throughput_certification": False}

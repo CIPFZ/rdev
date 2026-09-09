@@ -12,8 +12,8 @@ to `origin/main` after fetch. No original platform target or gate is waived.
 | P8-01 | Strict SSHSIG manifest/trust policy, exact six-binary and metadata binding, linked-dependency notices, online source/binary vulnerability audits, two independent clean builds with six equal digests, full-bundle test signing and eight tamper refusals | Official authorized signer/root and corresponding final release identity; test root is not official |
 | P8-02 | Namespace inode lock, bounded staging, durable journal, real hello/state readiness and verified rollback implementation; subprocess lock/SIGKILL window tests; actual predecessor upgrade retains original supervisors and once-only effects | Full real-agent upgrade/automatic and explicit rollback/fault-window matrix; unit fixture agents do not certify production rollback |
 | P8-03 | Shared administrator verification, signed test-root CLI/broker/agent runtime, channel/pin/rollback policy negatives, low-sensitivity audit, typed rejection and uncertainty semantics | Full historical channel/rollback combinations and official identity deployment remain unverified |
-| P8-04 | Local check/race, actual ten-target fuzz, real IPv4/IPv6/ProxyJump and isolated auth/host-key negatives; hosted runs actually executed | Hosted SSH step failed on 563/047; diagnostic rerun pending. Full declared DNS/storage/half-close/failure matrix remains incomplete |
-| P8-05 | Persistent supervisor, fixed storage/resource budgets, actual real-SSH short engineering fault/idle probes; first frozen 100-instance/20-client run stopped after 25.48s with sync not_sent and no staging; bounded workload admission correction under verification | Passing final short-run result, continuous 24h and full scale fairness/Fleet/in-flight/GC/metric coverage; no physical-100 topology supplied |
+| P8-04 | Local check/race, actual ten-target fuzz, real IPv4/IPv6/ProxyJump and isolated auth/host-key negatives; hosted runs actually executed | ca4a2c1 policy readiness confirmed an unsupported extended ACL; isolated policy location correction and hosted rerun pending. Full declared DNS/storage/half-close/failure matrix remains incomplete |
+| P8-05 | Actual 100 independent sshd/agent targets and 20 clients: 305.309s bounded mixed workload passed with six fault stages, 220 completed mutations and 160 exact markers; immutable 047 bytes | First actual 24h attempt failed after 10.147s because the fixture requested a job wall limit above 3600s. Corrected long-run workload, continuous 24h and full fairness/Fleet/in-flight/GC/metric coverage pending; no physical-100 topology supplied |
 | P8-06 | Actual Phase7 predecessor clean build: retained-supervisor upgrade, old CLI/MCP→new broker/agent and new CLI/MCP→old broker/agent shared read/policy cases passed | Formal N-1 release identity; full standalone/state rollback/approval/archive/channel matrix |
 
 | Production Gate | Status and evidence boundary |
@@ -174,7 +174,82 @@ retire redaction history, or recreate namespaces to prolong the test. Fixed
 ledger limits and workload budgets remain visible; exhausted quota is not
 reported as a memory leak or silently bypassed. Strict mixed-load SLO retains
 the existing 2× control p95 threshold and runs without competing build/fuzz/load.
-No completed 24h run is claimed. The current run identity and exact observed elapsed time are recorded with the final evidence below.
+No completed 24h run is claimed. The current run identity and exact observed elapsed time are recorded with the evidence below.
+
+## Recorded validation
+
+[Bounded machine-readable evidence](evidence/phase8/final-validation.json) binds
+commands, UTC times, source and artifact digests, runtime instrumentation, actual
+CI run identities, failed attempts and pending gates. The
+[compatibility matrix](evidence/phase8/compatibility-matrix.json) records the exact
+predecessor binaries and the limited combinations actually exercised. Large logs,
+time series, artifacts and private test state remain outside Git.
+
+The 047 candidate passed `make all daemon check`, full-repository race, online
+source and six-binary vulnerability audits, release verification, two clean
+build comparisons and actual test-root signing with eight tamper refusals.
+Actual signed SSH runtime passed 18 top-level groups without skips. The separate
+runtime-race group instruments the local CLI, daemon and harness; remote agents
+remain the exact uninstrumented release bytes, and the Secrets helper builds an
+ordinary CLI. Strict mixed-load control ping/status p95 ratios were 1.069/1.059
+against the unchanged 2× bound. Ten real fuzz targets passed a 10-second-per-target
+rerun; the earlier 5-second frame-fuzz deadline failure remains recorded.
+
+The 100/20 short run `d2af4afefe934435b92360d7cf1133ea` used harness `a0ed8d5`
+and product bytes `047a0f5`, from 2026-09-09 12:58:14.080 UTC to 13:03:46.274 UTC
+including setup and teardown. It completed 305.309 seconds of measured workload,
+4,341 pings, 220 durable completed mutations and 160 exact one-byte markers.
+Observer kill, partial/all SSH-path interruption, broker kill, quiesced client
+kill and serving-agent kill recovered. Peak RSS was 4,276,420,608 bytes, FD 2,956,
+processes 492, managed disk 453,361,375 bytes and broker goroutines 157, within
+predeclared budgets. Five final idle samples showed base transports 16→0 and
+goroutines 73→9; this short window does not prove hourly/24h resource stability.
+Cleanup reported no remaining identity-bound managed process. The 100 targets
+share one Linux kernel/filesystem and are not 100 physical machines.
+
+The initial 100/20 attempt remains failed: its sync was `not_sent`; independent
+reservation accounting strongly supports ingress quota, but the original helper
+did not preserve the error reason. The successful rerun admits one retained-sync
+or job-wait reservation at a time, keeping the existing 64 MiB global / 32 MiB
+owner limits and all 20 clients. This workload admission does not certify FIFO
+fairness or saturated sync throughput. The failed 24h attempt
+`73e0aaf1fa6545fb9c50d84e390a8358` is separate, stopped after 10.147 seconds, and
+is never resumed or spliced into a later run. Its rejected logger requested
+86400 seconds against the product's 3600-second hard limit; no product limit is
+raised to accommodate the fixture.
+
+The revised workload uses a new detached logger every two 20-minute cycles,
+at most 2350 seconds of logging under a 3500-second wall envelope. Each generation
+has a distinct marker and start/removal operation IDs. There are nominal logging
+gaps of 50 seconds plus scheduling/maintenance; this is not one continuous 24h
+job. The predeclared 100/20 daily mutation ceiling becomes 7080: 5040 ordinary,
+1440 logger starts/removals and 600 Fleet targets, below global 8192 and per-owner
+1024 limits. Same-principal credentials renew after 12 hours from actual issue
+time, without changing policy, broker state or namespaces. This corrected
+long-run workload still needs real execution; its parameters do not validate
+the failed attempt retroactively.
+
+To execute a new accepted harness against the frozen candidate, use an unused
+private run directory. `--artifact-source` requires a clean checkout, identical
+product build inputs and matching embedded VCS identities; it does not ignore a
+product change:
+
+```sh
+python3 scripts/scale-soak.py start --run /tmp/phase8-short-NEW \
+  --artifacts /tmp/rdev-p8-final-047a0f5/scale-artifacts \
+  --artifact-source 047a0f53bb39b637b55c5aedec99c28ff0a0f8da \
+  --go /data/tmp/rdev-toolchain/go/bin/go \
+  --seconds 300 --targets 100 --clients 20 --workload mixed --broker-crash --faults
+# Only after the short correctness/capacity check passes, start a separate run
+# with --seconds 86400. An existing run must be queried, never restarted.
+python3 scripts/scale-soak.py status --run /tmp/phase8-soak-NEW
+python3 scripts/scale-soak.py cancel --run /tmp/phase8-soak-NEW
+```
+
+`cancel` terminates only recorded process identities and preserves state.
+`cleanup` is an explicit destructive fixture removal after all identities are
+confirmed stopped; archive required evidence before invoking it. Never clean
+deduplication/ambiguous/history state during a measured run.
 
 
 ## Compatibility evidence boundary

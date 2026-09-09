@@ -2,6 +2,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import socket
 import subprocess
@@ -17,6 +18,147 @@ spec.loader.exec_module(harness)
 
 
 class SupervisorContracts(unittest.TestCase):
+    def test_day_budget_counts_all_periodic_logger_start_and_remove_records(self):
+        budget = harness.workload_budget(86400, 20, 100)
+        self.assertEqual(budget["cycles_per_client_max"], 72)
+        self.assertEqual(budget["logger_generations_per_client_max"], 36)
+        self.assertEqual(budget["ordinary_mutations_max"], 5040)
+        self.assertEqual(budget["logger_mutations_max"], 1440)
+        self.assertEqual(budget["fleet_mutations_max"], 600)
+        self.assertEqual(budget["total_mutations_max"], 7080)
+        self.assertEqual(budget["ordinary_owner_mutations_max"], 324)
+        self.assertEqual(budget["admin_owner_mutations_max"], 600)
+        self.assertEqual(harness.workload_budget(300, 20, 100)["total_mutations_max"], 220)
+        self.assertEqual(harness.logger_duration(86400, 0, 2400), 2350)
+        self.assertEqual(harness.logger_duration(300, 20, 2400), 235)
+        with self.assertRaisesRegex(RuntimeError, "remaining run time"):
+            harness.logger_duration(300, 248, 2400)
+        with self.assertRaisesRegex(RuntimeError, "generation interval"):
+            harness.logger_duration(86400, 7530, 52)
+
+    def test_mutation_budget_is_rejected_before_creating_a_run(self):
+        argv = ["scale-soak.py", "start", "--run", "/tmp/rdev-budget-must-not-create", "--artifacts", "/unused", "--seconds", "86400"]
+        for budget in ({"total_mutations_max": 8193, "ordinary_owner_mutations_max": 324, "admin_owner_mutations_max": 600},
+                       {"total_mutations_max": 7080, "ordinary_owner_mutations_max": 1025, "admin_owner_mutations_max": 600}):
+            with self.subTest(budget=budget), mock.patch.object(sys, "argv", argv), mock.patch.object(harness, "workload_budget", return_value=budget), mock.patch.object(Path, "mkdir") as mkdir, contextlib.redirect_stderr(io.StringIO()) as error:
+                with self.assertRaises(SystemExit) as rejected:
+                    harness.main()
+                self.assertEqual(rejected.exception.code, 2)
+                self.assertIn("existing global/owner mutation retention limits", error.getvalue())
+                mkdir.assert_not_called()
+
+    def logger_fixture(self, root):
+        marker = root / "logger-0-0"
+        marker.write_bytes(b"x")
+        record = {"id": "job-old", "host": "target-000", "marker": str(marker), "generation": 0,
+                  "start_operation_id": "old-start", "remove_operation_id": "old-remove", "removed": False}
+        stats = {"logger": record, "logger_history": [record], "mutations": 1, "operations": {"job_start": 1},
+                 "marker_proofs": 0, "log_rotation_proofs": 0}
+        # Worker recovery/finalization reloads JSON; these are distinct dicts.
+        stats = json.loads(json.dumps(stats))
+        ledger = {"original_bytes": 8192, "retained_bytes": 4096, "dropped_bytes": 4096}
+        return stats, {"state": "exited", "stdout_ledger": ledger}
+
+    def test_logger_rotation_retains_identities_and_uses_bounded_product_envelope(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            harness.write(root / "start-barrier", {"started_monotonic": 100})
+            stats, info = self.logger_fixture(root)
+            run = {"seconds": 86400, "mutation_budget": harness.workload_budget(86400, 20, 100)}
+            with mock.patch.object(harness, "checked", return_value={"wire": {"job": {"info": info}}}), mock.patch.object(harness, "approved_wire", side_effect=[{}, {"wire": {"job": {"info": {"id": "job-new"}}}}]) as mutate, mock.patch.object(harness.time, "monotonic", return_value=2500):
+                harness.start_logger(root, run, None, {"client_id": "owner"}, "target-001", 0, 2, root, "new-", stats, scheduled_cycle_monotonic=2500)
+            self.assertEqual([call.args[4]["op"] for call in mutate.call_args_list], ["job_rm", "job_start"])
+            self.assertEqual(mutate.call_args_list[0].args[5], "old-remove")
+            envelope = mutate.call_args_list[1].args[4]["job"]
+            self.assertEqual(envelope["resources"]["wall_timeout_sec"], 3500)
+            self.assertLessEqual(envelope["resources"]["wall_timeout_sec"], 3600)
+            self.assertEqual(envelope["spec"]["argv"][-1], "2350")
+            saved = json.loads((root / "worker-0.json").read_text())
+            self.assertEqual(len(saved["logger_history"]), 2)
+            old, new = saved["logger_history"]
+            self.assertTrue(old["removed"])
+            self.assertEqual(old["start_operation_id"], "old-start")
+            self.assertEqual(old["remove_operation_id"], "old-remove")
+            self.assertEqual(old["ledger"], info["stdout_ledger"])
+            self.assertEqual(Path(old["marker"]).read_bytes(), b"x")
+            self.assertFalse(new["removed"])
+            self.assertEqual(new["generation"], 1)
+            self.assertEqual(new["id"], "job-new")
+            self.assertEqual(saved["mutations"], 3)
+            self.assertEqual(saved["marker_proofs"], 1)
+            self.assertEqual(saved["log_rotation_proofs"], 1)
+
+    def test_maintenance_delayed_logger_exits_before_original_next_generation(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            harness.write(root / "start-barrier", {"started_monotonic": 0})
+            run = {"seconds": 86400, "mutation_budget": harness.workload_budget(86400, 20, 100)}
+            stats = {"logger": None, "logger_history": [], "mutations": 0, "operations": {}, "marker_proofs": 0, "log_rotation_proofs": 0}
+            clock = {"now": 7530}  # cycle6 scheduled7210; hourly maintenance delayed admission.
+            deadlines, operations = {}, []
+            def mutation(root, sock, owner, host, wire, operation_id):
+                operations.append(wire["op"])
+                if wire["op"] == "job_start":
+                    argv = wire["job"]["spec"]["argv"]
+                    Path(argv[3]).write_bytes(b"x")
+                    job_id = "job-" + operation_id
+                    deadlines[job_id] = clock["now"] + float(argv[4])
+                    return {"wire": {"job": {"info": {"id": job_id}}}}
+                return {}
+            def status(sock, request):
+                job_id = request["wire"]["job"]["id"]
+                state = "exited" if clock["now"] >= deadlines[job_id] else "running"
+                return {"wire": {"job": {"info": {"state": state, "stdout_ledger": {"original_bytes": 8192, "retained_bytes": 4096, "dropped_bytes": 4096}}}}}
+            with mock.patch.object(harness.time, "monotonic", side_effect=lambda: clock["now"]), mock.patch.object(harness, "approved_wire", side_effect=mutation), mock.patch.object(harness, "checked", side_effect=status):
+                harness.start_logger(root, run, None, {}, "target-000", 0, 6, root, "generation3-", stats, scheduled_cycle_monotonic=7210)
+                first = dict(stats["logger"])
+                self.assertEqual(first["duration_seconds"], 2035)
+                self.assertEqual(first["next_generation_monotonic"], 9610)
+                self.assertLess(deadlines[first["id"]], 9610)
+                # Reload like worker recovery: elapsed maintenance never rebases the schedule.
+                stats = json.loads((root / "worker-0.json").read_text())
+                clock["now"] = 9610
+                harness.start_logger(root, run, None, {}, "target-001", 0, 8, root, "generation4-", stats, scheduled_cycle_monotonic=9610)
+            self.assertEqual(operations, ["job_start", "job_rm", "job_start"])
+            self.assertTrue(stats["logger_history"][0]["removed"])
+            self.assertEqual(stats["logger"]["scheduled_cycle_monotonic"], 9610)
+            self.assertEqual(stats["logger"]["duration_seconds"], 2350)
+            self.assertEqual(stats["mutations"], 3)
+
+    def test_unfinished_failed_or_ambiguous_logger_never_starts_another_generation(self):
+        for condition in ("running", "failed-exit", "duplicate-history", "ambiguous-removal"):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory(dir="/tmp") as directory:
+                root = Path(directory)
+                stats, info = self.logger_fixture(root)
+                if condition == "running":
+                    info["state"] = "running"
+                elif condition == "failed-exit":
+                    info["exit_code"] = 137
+                elif condition == "duplicate-history":
+                    stats["logger_history"].append(dict(stats["logger"]))
+                run = {"seconds": 86400, "mutation_budget": harness.workload_budget(86400, 20, 100)}
+                with mock.patch.object(harness, "checked", return_value={"wire": {"job": {"info": info}}}), mock.patch.object(harness, "approved_wire", side_effect=RuntimeError("transport.ambiguous_outcome")) as mutate:
+                    with self.assertRaises(RuntimeError):
+                        harness.start_logger(root, run, None, {}, "target-001", 0, 2, root, "new-", stats, scheduled_cycle_monotonic=2500)
+                self.assertEqual(mutate.call_count, 1 if condition == "ambiguous-removal" else 0)
+                self.assertFalse(stats["logger_history"][0]["removed"])
+                self.assertEqual(stats["mutations"], 1)
+                self.assertFalse((root / "worker-0.json").exists())
+
+    def test_credentials_renew_same_owner_with_product_max_ttl_from_issue_time(self):
+        owner = {"client_id": "scale-0", "project_id": "project-0"}
+        with mock.patch.object(harness.time, "monotonic", side_effect=[100, 43300]), mock.patch.object(harness.time, "time", side_effect=[1000, 44200]), mock.patch.object(harness, "command", return_value=mock.Mock(stdout=b"private-test-token\n")) as issue:
+            first = harness.issue_credential(Path("/private/run"), owner)
+            second = harness.issue_credential(Path("/private/run"), first["owner"])
+        self.assertEqual(first["refresh_monotonic"], 43300)
+        self.assertEqual(second["refresh_monotonic"], 86500)
+        self.assertEqual(first["owner"], second["owner"])
+        for call in issue.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[argv.index("-ttl") + 1], "24h")
+            self.assertEqual(argv[argv.index("-client-id") + 1], owner["client_id"])
+            self.assertEqual(argv[argv.index("-project-id") + 1], owner["project_id"])
+
     def test_quota_diagnostic_preserves_state_without_peer_payload(self):
         response = {"ok": False, "error": "broker ingress limit reached", "mutation": {"state": "not_sent"}}
         with mock.patch.object(harness, "rpc", return_value=response):
