@@ -52,6 +52,28 @@ jobs:
         run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Real IPv4, IPv6 and ProxyJump runtime
         run: python3 scripts/isolated-ssh.py --go "$(command -v go)" --out "$RUNNER_TEMP/rdev-evidence/ssh"
+      - name: Summarize SSH failures without test payloads
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rdev-evidence" / "ssh"
+          summary = {"failed_tests": [], "source_locations": [], "checks": {}}
+          result = root / "result.json"
+          if result.exists():
+              data = json.loads(result.read_text())
+              summary["checks"] = data.get("checks", {})
+              summary["status"] = data.get("status")
+          for log in root.glob("*-runtime.log"):
+              content = log.read_text(errors="replace")
+              summary["failed_tests"] += re.findall(r"--- FAIL: ([A-Za-z0-9_/]+)", content)
+              summary["source_locations"] += re.findall(r"^\s*([A-Za-z0-9_]+_test\.go:[0-9]+):", content, re.M)
+          summary["source_locations"] = sorted(set(summary["source_locations"]))
+          message = json.dumps(summary, sort_keys=True)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write("SSH diagnostic locations (no request or credential payloads):\n\n```json\n" + message + "\n```\n")
+          print("::error title=SSH diagnostic locations::" + message)
+          PY
       - name: Online release audit and artifact binding
         env:
           RDEV_RELEASE_OUT: ${{ runner.temp }}/rdev-evidence/release
