@@ -1,8 +1,8 @@
 # Phase8 acceptance
 
 Status: **In progress — not Phase8 Complete or Production Certified**.
-The frozen product, runtime tests and local release artifacts bind
-`047a0f53bb39b637b55c5aedec99c28ff0a0f8da`. Later workflow/closure changes are
+The frozen product and local release artifacts bind
+`047a0f53bb39b637b55c5aedec99c28ff0a0f8da`. Additional runtime test, harness and workflow changes are
 recorded separately; CI builds have their own commit stamps and are not the same
 bytes as this local candidate. The handoff baseline was `e73a38b`, clean and equal
 to `origin/main` after fetch. No original platform target or gate is waived.
@@ -10,26 +10,26 @@ to `origin/main` after fetch. No original platform target or gate is waived.
 | Requirement | Accepted engineering evidence | Remaining acceptance |
 |---|---|---|
 | P8-01 | Strict SSHSIG manifest/trust policy, exact six-binary and metadata binding, linked-dependency notices, online source/binary vulnerability audits, two independent clean builds with six equal digests, full-bundle test signing and eight tamper refusals | Official authorized signer/root and corresponding final release identity; test root is not official |
-| P8-02 | Namespace inode lock, bounded staging, durable journal, real hello/state readiness and verified rollback implementation; subprocess lock/SIGKILL window tests; actual predecessor upgrade retains original supervisors and once-only effects | Full real-agent upgrade/automatic and explicit rollback/fault-window matrix; unit fixture agents do not certify production rollback |
-| P8-03 | Shared administrator verification, signed test-root CLI/broker/agent runtime, channel/pin/rollback policy negatives, low-sensitivity audit, typed rejection and uncertainty semantics | Full historical channel/rollback combinations and official identity deployment remain unverified |
-| P8-04 | Local check/race, actual ten-target fuzz, real IPv4/IPv6/ProxyJump and isolated auth/host-key negatives; complete hosted 0bc1d93 run passed with actual source/run/artifact and two-clean-build identity binding | Full declared DNS/storage/half-close/failure matrix remains incomplete |
+| P8-02 | Namespace inode lock/staging/journal; nine actual 047/e73 installer groups, eleven SIGKILL barriers, seventeen record-recovery subcases; real test-root signed SSH upgrade/authorized rollback, state refusal and retained supervisors | Complete historical state/channel and platform combinations; official identity remains Gate 3 |
+| P8-03 | Shared administrator verification, signed test-root CLI/broker/agent runtime, actual exact force/target/digest rollback and refusals, low-sensitivity audit and typed uncertainty | Full historical channel/rollback combinations and official identity deployment remain unverified |
+| P8-04 | Local check/race, actual ten-target fuzz, real IPv4/IPv6/ProxyJump; actual DNS/master-loss and private tmpfs ENOSPC/EROFS added to hosted validation | Latest completed hosted run is recorded below; SSH application-stream delay/EOF/partial-frame tests added, packet-level fault coverage remains partial |
 | P8-05 | Actual 100 independent sshd/agent targets and 20 clients: corrected 0bc1d93 mixed short run passed 308.664s, six fault stages, 220 completed mutations and 160 exact markers; immutable 047 bytes | New actual 24h run started, not passed. Full fairness/Fleet/in-flight/GC/metric coverage and physical-100 topology remain pending; failed earlier attempts are preserved separately |
-| P8-06 | Actual Phase7 predecessor clean build: retained-supervisor upgrade, old CLI/MCP→new broker/agent and new CLI/MCP→old broker/agent shared read/policy cases passed | Formal N-1 release identity; full standalone/state rollback/approval/archive/channel matrix |
+| P8-06 | Eight actual source-defined cases: shared/standalone CLI/MCP, explicit legacy artifact refusal, retained jobs and Fleet approval/HostID/attempt/audit; an additional historical secret/sync outcome case is recorded separately below | Formal N-1 release identity; full signed-channel, migration and historical agent/state rollback matrix |
 
 | Production Gate | Status and evidence boundary |
 |---|---|
-| 1. High/Medium findings closed | Passed for independently reviewed product source 047a0f5; no unresolved confirmed High/Medium and no agent-made risk acceptance. Harness/CI deltas independently accepted at 0bc1d93. |
+| 1. High/Medium findings closed | Passed for independently reviewed product source 047a0f5; no unresolved confirmed High/Medium and no agent-made risk acceptance. Subsequent harness/CI deltas are independently reviewed with their exact source bindings in the evidence. |
 | 2. All declared Tier 1 runtime | Pending. Linux amd64/OpenSSH/XFS and actual IPv4/IPv6/ProxyJump exercised. Linux arm64 and Darwin runtime not run; macOS remains explicitly deferred. Cross-builds do not pass these targets. |
 | 3. Official signature, SBOM, provenance, audits, notices | Blocked on authorized official signing identity/root. Local exact-byte audits/notices/SBOM/provenance and isolated test signatures passed. |
 | 4. Real continuous 24h within budgets | Pending; run 5f68aaab657347af8bf3dc6a69589416 started at 2026-09-09 13:29:12.940 UTC. No completed 24h evidence; starting or supervising is not passing. |
-| 5. Complete upgrade/rollback/crash/network/migration drills | Partial. Actual retained-job upgrade, broker/network/mutation recovery passed; full real rollback and historical state matrix still pending. |
+| 5. Complete upgrade/rollback/crash/network/migration drills | Partial. Actual test-root signed SSH rollback, record/crash barriers, retained jobs and Fleet/audit recovery passed; complete historical state/migration/channel and platform matrix remains pending. |
 
 The available environment is Linux amd64 / OpenSSH 9.3p2 / XFS, Go 1.26.8,
 16 CPUs and about 32 GiB RAM, with an authorized Linux amd64 SSH endpoint.
 The isolated-instance topology shares one kernel/filesystem/network fault domain;
 physical machine count is unverified. A non-root SSH preflight also passed on
-this Linux system; it does not certify the Ubuntu hosted runner. A GitHub runner
-actually passed the complete bd98346 and 0bc1d93 workflows. Anonymous API/log access remains
+this Linux system; it does not certify the Ubuntu hosted runner. Actual hosted workflow identities and execution results are recorded below.
+Anonymous API/log access remains
 rate-limited or requires authentication; public run/step metadata is available.
 No formal signer, arm64/Darwin runtime or authorized
 100-machine topology has been supplied. No production release/deployment,
@@ -68,7 +68,9 @@ cannot pass a policy/root to rdevd; rdevd reads its own administrator environmen
 A rejected shared request never falls back to private SSH.
 
 Policy roots are administrator-provisioned Ed25519 OpenSSH public keys with
-identity, channels, validity and revocation state. SSHSIG verifies publisher
+identity, channels, validity and revocation state. The `public_key` value contains
+exactly `ssh-ed25519 BASE64_KEY`, without options, a display comment or a newline.
+SSHSIG verifies publisher
 identity; SSH host keys verify the connection target. Neither replaces the other.
 Multiple roots support overlap during rotation; revoke/remove old roots and
 refresh `valid_until` through the same trusted administration path. Verification
@@ -150,6 +152,10 @@ RDEV_GO=/data/tmp/rdev-toolchain/go/bin/go sh scripts/fuzz-smoke.sh
 python3 scripts/isolated-ssh.py --go /data/tmp/rdev-toolchain/go/bin/go --out /tmp/phase8-ssh-NEW
 RDEV_RELEASE_OUT=/tmp/phase8-release-NEW make GO=/data/tmp/rdev-toolchain/go/bin/go release-gate
 RDEV_GO=/data/tmp/rdev-toolchain/go/bin/go RDEV_REPRO_OUT=/tmp/phase8-repro-NEW sh scripts/reproducible-build.sh
+# Clean source and its complete unsigned dev.0 release from release-gate:
+python3 scripts/prepare-signed-test-releases.py --go /data/tmp/rdev-toolchain/go/bin/go \
+  --out /tmp/phase8-test-signatures-NEW --frozen /tmp/phase8-release-NEW
+# The generated ROLE-policy.json files feed the signed ProxyJump command below.
 ```
 
 Prepare/sign/verify a frozen audited candidate, using a separately authorized
@@ -179,152 +185,201 @@ No completed 24h run is claimed. The current run identity and exact observed ela
 
 ## Recorded validation
 
-[Bounded machine-readable evidence](evidence/phase8/final-validation.json) binds
-commands, UTC times, source and artifact digests, runtime instrumentation, actual
-CI run identities, failed attempts and pending gates. The
-[compatibility matrix](evidence/phase8/compatibility-matrix.json) records the exact
-predecessor binaries and the limited combinations actually exercised. Large logs,
-time series, artifacts and private test state remain outside Git.
+[Bounded evidence](evidence/phase8/final-validation.json) records exact commands,
+UTC times, sources, binary/metadata digests, instrumentation, independent reviews,
+failed attempts and pending gates. The [compatibility matrix](evidence/phase8/compatibility-matrix.json)
+separates actual component combinations from test release-protocol cases. Raw
+logs, samples, artifacts and private state remain outside Git.
 
-The 047 candidate passed `make all daemon check`, full-repository race, online
-source and six-binary vulnerability audits, release verification, two clean
-build comparisons and actual test-root signing with eight tamper refusals.
-Actual signed SSH runtime passed 18 top-level groups without skips. The separate
-runtime-race group instruments the local CLI, daemon and harness; remote agents
-remain the exact uninstrumented release bytes, and the Secrets helper builds an
-ordinary CLI. Strict mixed-load control ping/status p95 ratios were 1.069/1.059
-against the unchanged 2× bound. Ten real fuzz targets passed a 10-second-per-target
-rerun; the earlier 5-second frame-fuzz deadline failure remains recorded.
+The frozen 047 candidate passed `make all daemon check`, whole-repository race,
+online source/six-binary vulnerability audits, release verification, two clean
+build comparisons, and actual test-root signing with eight tamper refusals.
+Signed SSH runtime passed 18 top-level groups without skips. The earlier runtime
+race group instruments local CLI, daemon and harness; remote agents remain
+uninstrumented release bytes, and the Secrets helper builds an ordinary CLI.
+Strict mixed-load control ping/status p95 ratios were 1.069/1.059 against the
+unchanged 2× bound. Ten real fuzz targets passed the 10-second-per-target rerun;
+the earlier frame-fuzz deadline failure remains recorded.
 
-The 100/20 short run `d2af4afefe934435b92360d7cf1133ea` used harness `a0ed8d5`
-and product bytes `047a0f5`, from 2026-09-09 12:58:14.080 UTC to 13:03:46.274 UTC
-including final idle and teardown. It completed 305.309 seconds of measured workload,
-4,341 pings, 220 durable completed mutations and 160 exact one-byte markers.
-Observer kill, partial/all SSH-path interruption, broker kill, quiesced client
-kill and serving-agent kill recovered. Peak RSS was 4,276,420,608 bytes, FD 2,956,
-processes 492, managed disk 453,361,375 bytes and broker goroutines 157, within
-predeclared budgets. Five final idle samples showed base transports 16→0 and
-goroutines 73→9; this short window does not prove hourly/24h resource stability.
-Cleanup reported no remaining identity-bound managed process. The 100 targets
-share one Linux kernel/filesystem and are not 100 physical machines.
-These are separate sshd processes/ports and agent install/state/business
-directories under one OS account; they are not containers or VMs.
+The ec8c201 extension changes tests, harnesses and CI; product inputs still match
+047. Independent non-author reviewers accepted exact source blobs and actual
+results. Its local evidence includes:
 
-The initial 100/20 attempt remains failed: its sync was `not_sent`; independent
-reservation accounting strongly supports ingress quota, but the original helper
-did not preserve the error reason. The successful rerun admits one retained-sync
-or job-wait reservation at a time, keeping the existing 64 MiB global / 32 MiB
-owner limits and all 20 clients. This workload admission does not certify FIFO
-fairness or saturated sync throughput. The failed 24h attempt
-`73e0aaf1fa6545fb9c50d84e390a8358` is separate, stopped after 10.147 seconds, and
-is never resumed or spliced into a later run. Its rejected logger requested
-86400 seconds against the product's 3600-second hard limit; no product limit is
-raised to accommodate the fixture.
+| Actual verification | Result and boundary |
+|---|---|
+| Real installer and recovery | Nine groups passed using clean 047/e73 native agents. Eleven named SIGKILL barriers plus seventeen disk-state reconstruction subcases cover decision/journal gaps, same-byte trust activation and partial/unsafe scratch. Active inode, predecessor and recovery evidence remain intact. Reconstruction is not extra SIGKILL or physical power-loss evidence. |
+| Disk faults | Four kernel-enforced ENOSPC/EROFS first/replacement cases passed in private tmpfs/bind mounts; failed staging preserved active/state bytes and retry committed. No business filesystem was mounted. |
+| DNS and ControlMaster | Actual resolver failure, master SIGKILL, changed serving PID, retained detached supervisor and completed mutation, exact marker and other-project denial passed, including IPv4/IPv6 ProxyJump. |
+| SSH stream faults | Barrier-delayed terminal, application-stream one-way EOF and partial terminal passed on the authorized endpoint and both ProxyJump targets. Independent control progresses while bulk is held. Restart retains completed/ambiguous outcomes and single marker `x`; duplicate mutation is refused. This is not TCP packet-loss certification. |
+| Signed SSH upgrade/rollback | Clean ec8c201 test source passed both ProxyJump targets without skips. Actual 563/dev.0 → 047/dev.1 → 563/dev.0 test releases exercise force/target/digest authorization, four incorrect/missing grant combinations, future/corrupt state refusal, version-reuse refusal and exact-byte reconcile. Job/mutation/marker and forward-recovery bytes remain intact. |
+| Harness regressions | All 28 Python tests passed, including nine new offline-report regressions. The new stream runtime also passed with a race-instrumented local Go harness; its actual CLI/broker/agents remain uninstrumented 047 bytes. |
 
-The revised workload uses a new detached logger every two 20-minute cycles,
-at most 2350 seconds of logging under a 3500-second wall envelope. Each generation
-has a distinct marker and start/removal operation IDs. There are nominal logging
-gaps of 50 seconds plus scheduling/maintenance; this is not one continuous 24h
-job. The predeclared 100/20 daily mutation ceiling becomes 7080: 5040 ordinary,
-1440 logger starts/removals and 600 Fleet targets, below global 8192 and per-owner
-1024 limits. Same-principal credentials renew after 12 hours from actual issue
-time, without changing policy, broker state or namespaces. This corrected
-long-run workload still needs completed continuous validation; its parameters do not validate
-the failed attempt retroactively.
+The signed fixtures are distinct clean source builds with explicit **test**
+versions and an isolated root. The separately built 047/dev.1 bundle passed full
+release audit, metadata and signing checks; it did not replace the frozen
+047/dev.0 or soak inputs. Agent implementation is identical between these signed
+fixtures; the actual product difference is two broker files. Their successful
+release-protocol test does not certify historical agent/schema migration or a
+formal N-1 release. Library-only signed decision reconstruction also remains
+separate from actual signature verification.
 
-The corrected frozen harness `0bc1d93` passed a new short run
-`45c8ca75371441c69bf46de16e3aa599`: 308.664 seconds, all 20 clients completing a
-mixed cycle, 4,385 pings, 230 expected fault errors, zero unexpected errors,
-220 completed mutations and 160 exact markers. Six fault stages recovered and
-no managed process remained after cleanup. Peak RSS was 4,290,998,272 bytes,
-FD 2,940, processes 494, disk 453,555,387 bytes and goroutines 142. This revision
-also passed fresh `make check`, full-repository race and all 17 Python regressions.
-The later 24h run uses these same frozen harness and 047 product bytes.
+Hosted run [34365260787](https://github.com/CIPFZ/rdev/actions/runs/34365260787)
+on 95bdca0 passed check, real installer/storage, IPv4/IPv6/ProxyJump, full race,
+fuzz, Python, online release audit and independent reproducibility. Its public
+runner annotation binds six binary and four metadata digests to source/run/attempt;
+these are runner-reported identities, not an independently downloaded archive.
+The extended ec8c201 run [34368166512](https://github.com/CIPFZ/rdev/actions/runs/34368166512)
+failed its new signed preparation/runtime step. The same clean source reproduced
+the preparation failure locally: the generated public key's display comment
+violated the strict two-field policy contract. The fixture correction in 2245361
+preserves that contract. Thirty Python regressions, independent old-refusal/new-pass
+verification of the same signature, full clean three-bundle preparation and actual
+signed IPv4/IPv6 ProxyJump upgrade/rollback passed. Exact candidate/previous bytes,
+test identity, all six negative cases per target and cleanup are recorded.
+The corrected hosted run [34369741453](https://github.com/CIPFZ/rdev/actions/runs/34369741453)
+passed the complete workflow, including signed SSH and evidence upload. Its six
+binary digests also match the independently verified local 224 release. The
+public combined signature annotation was truncated at GitHub's message limit;
+the preserved partial text is not treated as a complete identity JSON. The
+4b6b30c workflow emits four bounded, independently source/run-bound annotations.
+Its actual run [34371245934](https://github.com/CIPFZ/rdev/actions/runs/34371245934)
+passed all validation and evidence-upload steps. All four public identity records
+parse completely; the signed frozen bundle's six binaries and four metadata files
+match the audited hosted release. These are public runner records; the uploaded
+archive was not independently downloaded. The added historical state case ran
+locally at ad32968, separately from this hosted workflow.
+CI creates only an ephemeral test root, retains
+its public identity/signatures/metadata/binaries, deletes the private key, and
+never publishes or deploys.
 
-Current long-run state is private and persistent at
-`/tmp/rdev-p8-soak-0bc1d93`, run ID `5f68aaab657347af8bf3dc6a69589416`,
-supervisor PID `667709` (process start ticks `192573725`). Workload began
-2026-09-09 13:29:12.940 UTC; its earliest nominal 24h point is
-2026-09-10 13:29:12.940 UTC, followed by final idle and cleanup checks.
-The JSON evidence records a timestamped snapshot; query the run for current
-health. `run.json` binds immutable inputs; `status.json`, `samples.jsonl`,
-`supervisor.log`, `worker-*.json` and `fleet-results.json` retain progress.
-Do not restart this run across sessions or add failed/short durations to it.
+Earlier failed attempts remain failed in the JSON evidence. In particular,
+linked-worktree Go builds lacked predecessor VCS identity; a clean clone fixed
+the fixture without weakening checks. OpenSSH's temporary socket suffix exceeded
+the long runner path; short private controls fixed it. Extended runner-home ACLs
+correctly rejected policy copies; safe private `/tmp` policy locations passed
+real `setfacl` regressions with ancestor ACLs unchanged. The new stream fixture
+initially confused ledger `ambiguous` with protocol `possibly_executed`; only its
+assertion changed. None of these failures is silently counted as passed.
+
+## Compatibility and rerun commands
+
+The engineering predecessor is actual Phase7 e73a38b (product db9a260), not an
+invented formal N-1. At clean source 9b6c430 the complete eight-case entry passed
+with exact 047/e73 binaries: shared and standalone CLI/MCP, new broker rejection
+of a legacy local artifact without release identity, old broker/new agent use,
+new standalone authorized upgrade and old standalone refusal before dispatch.
+Fleet transitions e73 → 047 → e73 broker-only → 047 preserved six predecessor
+audit-event fingerprints, HostIDs, approval policy/expiry/consumption and exact
+attempt/operation/job IDs; six markers remained single `x`. Terminal execute
+returned its existing receipt. Cases own and clean their transports; standalone
+CLI additionally needs a private mount namespace. Historical job/audit scripts
+remain narrower valid evidence.
+
+The additional `secret-sync-outcome-upgrade-continuity` case at clean ad32968
+uses actual e73/047 artifacts. Its five stages exercise recovery of a remote
+completed push whose broker response was held before ACK, new broker restart,
+new agent SIGKILL/reconnect, old broker-only rollback and new broker restoration.
+Four archive records (two active/two retired), all eight tracked original mutation
+identities, two remote push outcomes and one local pull outcome remain intact.
+Real historical output stays redacted for both projects; retired/foreign secrets
+cannot be injected. Consumed sync replay is refused, and business bytes/inode/mtime
+remain unchanged. Additional injection probes create their own mutations; eight
+is the tracked set, not the total number of successful operations. Business sync
+targets and the agent state tree are separate subtrees. This case does not roll
+back the agent or migrate a schema, and is separate from the earlier eight-case
+run. Its exact result, policy scope and independent review are in the JSON evidence.
+The current runner includes it by default; use
+`--case secret-sync-outcome-upgrade-continuity` to run only this addition.
+
+```sh
+GOCACHE=/data/tmp/rdev-gocache GOMODCACHE=/data/tmp/rdev-gomodcache \
+RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy \
+RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config \
+RDEV_RELEASE_POLICY=/PRIVATE/valid-dev-policy.json \
+python3 scripts/compatibility-matrix.py --go /data/tmp/rdev-toolchain/go/bin/go \
+  --out /tmp/phase8-compat-NEW \
+  --artifact-source 047a0f53bb39b637b55c5aedec99c28ff0a0f8da \
+  --current-artifacts /tmp/rdev-p8-final-047a0f5/release \
+  --previous-artifacts /tmp/rdev-p8-compat-047a0f5/previous
+
+# Clean source, still-valid private test policies and a new output directory:
+python3 scripts/signed-upgrade-ssh.py --go /data/tmp/rdev-toolchain/go/bin/go \
+  --out /tmp/phase8-signed-NEW --remote service-deploy \
+  --ssh-config /data/tmp/rdev-validation/ssh/config \
+  --previous-policy /tmp/rdev-p8-final-56351b7/signed-test-policy.json \
+  --candidate-policy /tmp/rdev-p8-signed-candidate-047-dev1/signed-test-policy.json \
+  --frozen-policy /tmp/rdev-p8-final-047a0f5/signed-test-policy.json
+# Supply these as --signed-ROLE-policy to scripts/isolated-ssh.py to run both
+# real local IPv4/IPv6 ProxyJump targets. No draft flag is used for acceptance.
+```
+
+`real-agent-install.py --help` lists required native current/predecessor paths,
+full commits and expected digests; compile outside the checkout with `go test -c -o
+/tmp/rdev-real-agent-record-recovery.test ./internal/agentinstall`. `storage-faults.py --help` uses the same identities,
+computes digests and requires a private mount namespace. Exact complete
+invocations are in the JSON evidence. The old broker has no release-policy
+authority and cannot control managed signed deployment. Drain legacy installers
+before adoption; force is not a trust bypass. Unsupported shared routes never
+fall back to private SSH. Legacy broker text errors remain available alongside
+strict optional typed envelopes; earlier ambiguous mutations remain ambiguous.
+
+## Current scale and continuous soak
+
+Corrected frozen harness 0bc1d93 passed short run
+`45c8ca75371441c69bf46de16e3aa599`: 308.664 seconds, 20 clients completing mixed
+cycles, 4,385 pings, 230 expected fault errors, zero unexpected errors, 220 durable
+completed mutations and 160 exact markers. Six fault stages recovered; cleanup
+left no managed process. Peak RSS was 4,290,998,272 bytes, FD 2,940, processes 494,
+managed disk 453,555,387 bytes and goroutines 142, within predeclared budgets.
+The 100 targets are separate sshd ports/processes and agent/install/state/business
+directories under one account/kernel/filesystem. They are not containers, VMs or
+100 physical machines. Preceding failed/draft runs remain separately recorded.
+
+Retained sync and wait share existing 64 MiB global/32 MiB owner ingress limits.
+The workload admits one such large response at a time; this proves neither
+saturated sync throughput nor fairness. Loggers rotate every two 20-minute cycles,
+with at most 2350 seconds logging under a 3500-second wall envelope. There are
+nominal 50-second-plus scheduling gaps, not one continuous 24h job. The daily
+mutation budget is 7080 (5040 ordinary + 1440 logger + 600 Fleet), below global
+8192/per-owner1024 caps. Same-principal credentials renew after 12 hours from
+issue time with 24h TTL. No state is cleared or namespace recreated; this daily
+budget does not prove indefinitely sustainable deduplication storage.
+
+Actual 24h run `5f68aaab657347af8bf3dc6a69589416` persists at
+`/tmp/rdev-p8-soak-0bc1d93`, supervisor PID667709/start ticks192573725. Workload
+started **2026-09-09 13:29:12.940 UTC**; the earliest nominal 24h point is
+**2026-09-10 13:29:12.940 UTC**, followed by final idle/cleanup evaluation.
+The JSON evidence has a timestamped observation, never an advance pass.
+`run.json`, `status.json`, `samples.jsonl`, `supervisor.log`, workers and Fleet
+results retain progress. Resume observation across sessions; do not restart it
+or splice failed/short durations into it.
 
 ```sh
 python3 scripts/scale-soak.py status --run /tmp/rdev-p8-soak-0bc1d93
 python3 scripts/scale-soak.py cancel --run /tmp/rdev-p8-soak-0bc1d93
-```
-
-Hosted run [34356126067](https://github.com/CIPFZ/rdev/actions/runs/34356126067)
-on `bd98346` passed build/check, real IPv4/IPv6/ProxyJump, race, fuzz, Python,
-online release audit and reproducibility. Earlier failed runs remain recorded;
-the real policy preflight identified an unsupported extended ACL. Moving the
-test policy to an independently private safe `/tmp` directory preserves the
-production ACL refusal and leaves account ACLs unchanged. A real `setfacl`
-regression verifies both refusal and admission. Hosted bytes have their own
-commit stamps; they are separate from the locally signed 047 candidate.
-The final engineering-source run
-[34357317492](https://github.com/CIPFZ/rdev/actions/runs/34357317492) on `0bc1d93`
-also passed every required step, including actual hashing of the six binaries
-and four metadata files, comparison against the manifest and both clean builds,
-and a public source/run/attempt identity notice. Exact runner-reported digests
-are in the JSON evidence. The hosted artifact archive was not downloaded for
-independent local rehash, and the hosted candidate has no official signature.
-
-To execute a new accepted harness against the frozen candidate, use an unused
-private run directory. `--artifact-source` requires a clean checkout, identical
-product build inputs and matching embedded VCS identities; it does not ignore a
-product change:
-
-```sh
+python3 scripts/soak-report.py --run /tmp/rdev-p8-soak-0bc1d93 \
+  --out /tmp/phase8-soak-observation-NEW.json
+# A separate run requires fresh private output and the same immutable inputs.
 python3 scripts/scale-soak.py start --run /tmp/phase8-short-NEW \
   --artifacts /tmp/rdev-p8-final-047a0f5/scale-artifacts \
   --artifact-source 047a0f53bb39b637b55c5aedec99c28ff0a0f8da \
   --go /data/tmp/rdev-toolchain/go/bin/go \
   --seconds 300 --targets 100 --clients 20 --workload mixed --broker-crash --faults
-# Only after the short correctness/capacity check passes, start a separate run
-# with --seconds 86400. An existing run must be queried, never restarted.
-python3 scripts/scale-soak.py status --run /tmp/phase8-soak-NEW
-python3 scripts/scale-soak.py cancel --run /tmp/phase8-soak-NEW
 ```
 
-`cancel` terminates only recorded process identities and preserves state.
-`cleanup` is an explicit destructive fixture removal after all identities are
-confirmed stopped; archive required evidence before invoking it. Never clean
-deduplication/ambiguous/history state during a measured run.
+Only after short correctness/capacity acceptance should a separate final run use
+`--seconds 86400`. `cancel` preserves state and stops recorded identities;
+`cleanup` destructively removes a stopped fixture only after required evidence
+is archived. Strict SLO runs must have uncontended resources and keep the 2×
+control-p95 bound; do not run another scale load beside the current soak.
 
-
-## Compatibility evidence boundary
-
-The primary engineering predecessor is the actual Phase7 source
-`e73a38bcd94c6ffb4dbe379578c3d46ff70fa50e` (production code `db9a260`). It is
-not an invented N-1 formal release. `scripts/compatibility-matrix.py` clean-builds
-that source, records actual binary digests, exercises old CLI/MCP with new
-broker/agent, new CLI/MCP with old broker/agent for shared read/permission routes,
-and upgrades broker/agent while retaining original supervisors and owner state.
-Historical `remote-job-upgrade.sh` and `remote-audit-upgrade.sh` remain narrower
-predecessor regressions; none implies all N/N-1 combinations are certified.
-
-```sh
-RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy \
-RDEV_TEST_SSH_CONFIG=/data/tmp/rdev-validation/ssh/config \
-RDEV_RELEASE_POLICY=/PRIVATE/dev-policy.json \
-GOCACHE=/data/tmp/rdev-gocache GOMODCACHE=/data/tmp/rdev-gomodcache \
-python3 scripts/compatibility-matrix.py --go /data/tmp/rdev-toolchain/go/bin/go \
-  --out /tmp/phase8-compat-NEW
-```
-
-The old broker has no release-policy authority and is unsupported as a managed
-signed deployment controller. Old force upload into a new managed namespace is
-unsupported; drain old installers before adoption. New untrusted/unsigned agent
-admission fails before business dispatch. A first connection rejection can be
-recorded `not_sent`; an earlier dispatched mutation stays `ambiguous`. Broker v1
-adds optional strictly validated `error_envelope`; legacy text remains available,
-and CLI/MCP share typed projection without private SSH fallback.
-
-Release decisions record version/digest/channel/unsigned/test-root/result in
-bounded broker audit events, including Fleet and background connections. They
-never record keys, policy contents or raw installer diagnostics. The current
-observer-series count describes only the fixed-vocabulary `observe.Registry`,
-not every possible process metric collector.
+The independently checked offline reporter never alters this run or reads
+credentials, ledger bodies or business payloads. It streams a fixed sample
+prefix, records incomplete appends, reports cumulative histogram intervals and
+per-worker counts, and separates dial-counter epochs and phased/idle resources.
+These are asynchronous observations. Warm samples remain sparse; CPU misses
+exiting-process final ticks; storage slopes are descriptive. No new SLO or
+production verdict is inferred. Explicit `job_rm` is not autonomous retention GC;
+shared broker has no `storage_gc` route or certified cleanup-interval consumer.
+Saturated fairness, full Fleet/in-flight fault interleaving, retention/metric
+coverage and complete platform/formal identity requirements remain open.

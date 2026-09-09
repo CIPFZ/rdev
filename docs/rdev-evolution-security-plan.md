@@ -1141,11 +1141,11 @@ Fleet Gate（最终源码全部通过，证据层次如下）：
 | Task | 内容 | 依赖 | 验收条件 | 当前状态（2026-09-09） |
 | --- | --- | --- | --- | --- |
 | P8-01 | 生成签名 manifest、SBOM 和 build provenance | Phase 6 | 所有 CLI/broker/agent artifact 可验证来源和 digest | 实际 bytes、测试根、复现构建及许可已验证，正式身份 pending |
-| P8-02 | 实现 agent upgrade lock、staging、health check 和 rollback | P4-15、P5-16 | 新 agent handshake 失败自动回滚，旧 client 不反复覆盖 | 实现及部分真实升级通过，完整真实 rollback/故障窗口 pending |
+| P8-02 | 实现 agent upgrade lock、staging、health check 和 rollback | P4-15、P5-16 | 新 agent handshake 失败自动回滚，旧 client 不反复覆盖 | 真实 binary/test-root 签名 SSH rollback、11 个 SIGKILL hook、17 个记录恢复子例与状态/锁实测通过；完整历史 state/平台组合 pending |
 | P8-03 | 建立 stable/beta/dev channel policy | P8-01、P5-12 | project 配置不能静默使用未签名或更宽松 channel | 统一策略及负向验证通过，正式身份与完整历史组合 pending |
-| P8-04 | 将真 SSH、ProxyJump、故障注入和 fuzz 纳入 CI/release | P0-09、P0-10 | release 前覆盖主要 transport 和协议失败模式 | 0bc1d93 托管完整验证及实际 artifact 身份绑定通过，完整故障矩阵 pending |
+| P8-04 | 将真 SSH、ProxyJump、故障注入和 fuzz 纳入 CI/release | P0-09、P0-10 | release 前覆盖主要 transport 和协议失败模式 | 已有完整托管验证；新增真实 DNS/ControlMaster/ENOSPC/EROFS 与 SSH 单向 EOF/半帧/延迟，最新 CI 见验收表，完整故障矩阵 pending |
 | P8-05 | 执行 100 host/20 client scale 和 24h soak | Phase 7 | RSS/FD/goroutine/ssh/storage 回归稳定，无饥饿和重连风暴 | 同宿主 100 独立 SSH/agent、20 client 短测通过，实际 24h 已启动但未通过，完整规模门槛 pending |
-| P8-06 | 维护 N/N-1 client/broker/agent/migration/rollback matrix | P6-08、P8-02 | 所有支持组合自动验证，unsupported 组合明确拒绝 | 实际 Phase7 工程前驱三组组合通过，正式 N-1 与完整历史状态/回滚矩阵 pending |
+| P8-06 | 维护 N/N-1 client/broker/agent/migration/rollback matrix | P6-08、P8-02 | 所有支持组合自动验证，unsupported 组合明确拒绝 | 实际 Phase7 前驱八组组合及另行执行的历史 secret/sync outcome 保留用例、Fleet/审批/审计连续性、测试发行 signed rollback 通过；正式 N-1、agent/state/schema 回退与完整历史矩阵 pending |
 
 Production Gate（安全评审已收口，完整生产认证仍未通过；精确证据与缺口见 Phase8 验收表）：
 
