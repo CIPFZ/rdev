@@ -3,6 +3,7 @@ package synctree
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -165,4 +166,60 @@ func privateTemp(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestScopedPlanCannotInferProtectedReplacementChildren(t *testing.T) {
+	source, destination := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(source, "node"), "replacement")
+	if err := os.Mkdir(filepath.Join(destination, "node"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(destination, "node", "protected"), "keep")
+	manifest, err := Scan(t.Context(), source, "preserve", StageLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := Inspect(t.Context(), destination, StageLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildScoped(manifest, snapshot, nil, "overwrite"); err == nil {
+		t.Fatal("replacement escaped explicit removal scope")
+	}
+	if _, err := BuildScoped(manifest, snapshot, map[string]bool{"node/protected": true}, "overwrite"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyNormalizesDestinationParent(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint(existing), func(t *testing.T) {
+			source := t.TempDir()
+			write(t, filepath.Join(source, "file"), "retained")
+			destination := filepath.Join(t.TempDir(), "destination")
+			if existing {
+				if err := os.Mkdir(destination, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			captured, manifest, err := Capture(t.Context(), source, privateTemp(t), "preserve", StageLimits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := Inspect(t.Context(), destination+"/", StageLimits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := Build(manifest, snapshot, false, "overwrite")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(t.Context(), captured, destination+"/", plan, StageLimits); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(filepath.Join(destination, "file")); err != nil || string(data) != "retained" {
+				t.Fatal(err)
+			}
+		})
+	}
 }

@@ -200,8 +200,9 @@ func (s *Service) PrepareSync(ctx context.Context, req Request) (*client.SyncRes
 	if err != nil {
 		return nil, err
 	}
-	directoryTarget := snap.Exists && len(snap.Manifest.Entries) > 0 && snap.Manifest.Entries[0].Kind == "directory"
-	prefix := stage.SourceDirectory && !strings.HasSuffix(sourceSpelling, "/") && directoryTarget
+	existingDirectory := snap.Exists && len(snap.Manifest.Entries) > 0 && snap.Manifest.Entries[0].Kind == "directory"
+	directoryTarget := existingDirectory || strings.HasSuffix(destination, "/")
+	prefix := stage.SourceDirectory && !strings.HasSuffix(sourceSpelling, "/") && existingDirectory
 	renameFile := ""
 	if !stage.SourceDirectory && !directoryTarget {
 		renameFile = filepath.Base(filepath.Clean(destination))
@@ -221,7 +222,7 @@ func (s *Service) PrepareSync(ctx context.Context, req Request) (*client.SyncRes
 		var e error
 		stage, e = s.syncStore.Rewrite(work, owner, id, func(dir string) error {
 			var err error
-			deletions, err = s.client.SyncDeletionPaths(work, dir, sourceStage, snap, opts, prefix)
+			deletions, err = s.client.SyncDeletionPaths(work, dir, sourceStage, snap, opts, prefix, renameFile)
 			if err != nil {
 				return err
 			}
@@ -249,9 +250,7 @@ func (s *Service) PrepareSync(ctx context.Context, req Request) (*client.SyncRes
 	s.syncMu.Lock()
 	owned := 0
 	for key, old := range s.syncPlans {
-		if time.Now().After(old.Expires) {
-			delete(s.syncPlans, key)
-			old.Release()
+		if s.expireSyncPlanLocked(key, time.Now()) {
 			continue
 		}
 		if old.Owner == owner {
@@ -268,13 +267,23 @@ func (s *Service) PrepareSync(ctx context.Context, req Request) (*client.SyncRes
 	time.AfterFunc(time.Until(prepared.Expires), func() {
 		s.syncMu.Lock()
 		defer s.syncMu.Unlock()
-		if s.syncPlans[owner+"\x00"+id] == prepared {
-			delete(s.syncPlans, owner+"\x00"+id)
-			prepared.Release()
-		}
+		s.expireSyncPlanLocked(owner+"\x00"+id, time.Now())
 	})
 	return s.syncSummary(prepared), nil
 }
+
+// An admitted execution owns the retained-plan reservation until its joined
+// workers stop. Expiry prevents new execution, but cannot free live work.
+func (s *Service) expireSyncPlanLocked(key string, now time.Time) bool {
+	p := s.syncPlans[key]
+	if p == nil || p.Taken || now.Before(p.Expires) {
+		return false
+	}
+	delete(s.syncPlans, key)
+	p.Release()
+	return true
+}
+
 func (s *Service) syncSummary(p *preparedSync) *client.SyncResult {
 	var lines strings.Builder
 	fmt.Fprintf(&lines, "prepared %d exact path changes; source bytes %d\n", len(p.Plan.Changes), p.Plan.Source.ContentBytes)

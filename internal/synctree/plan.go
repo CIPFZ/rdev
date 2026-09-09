@@ -105,11 +105,22 @@ func Inspect(ctx context.Context, path string, limits Limits) (Snapshot, error) 
 // Build fixes all creates, replacements and removals before approval. It never
 // recomputes a deletion set during execution. Source is an already retained tree.
 func Build(source Manifest, dest Snapshot, deleteExtra bool, conflict string) (Plan, error) {
-	var deletions map[string]bool
+	deletions := map[string]bool{}
 	if deleteExtra {
-		deletions = map[string]bool{}
 		for _, e := range dest.Manifest.Entries {
 			deletions[e.Path] = true
+		}
+	}
+	// The unfiltered API permits replacements of whole directories. Filtered
+	// callers must instead pass the removals actually allowed by their filters.
+	for _, next := range source.Entries {
+		if next.Kind == "directory" {
+			continue
+		}
+		for _, old := range dest.Manifest.Entries {
+			if strings.HasPrefix(old.Path, next.Path+"/") {
+				deletions[old.Path] = true
+			}
 		}
 	}
 	return BuildScoped(source, dest, deletions, conflict)
@@ -184,6 +195,9 @@ func BuildScoped(source Manifest, dest Snapshot, deletions map[string]bool, conf
 			}
 			for _, child := range dest.Manifest.Entries {
 				if strings.HasPrefix(child.Path, e.Path+"/") {
+					if !deletions[child.Path] {
+						return Plan{}, errors.New("sync directory replacement contains a protected entry")
+					}
 					copy := child
 					p.Changes = append(p.Changes, Change{Path: child.Path, Before: &copy})
 				}

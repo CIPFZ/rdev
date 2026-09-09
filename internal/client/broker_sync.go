@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -108,12 +109,15 @@ func (c *Client) FilterSyncStage(ctx context.Context, dir string, opts SyncOptio
 // directory-prefix semantics against private, content-free skeletons. The
 // resulting removed path set is retained in the approval plan; execution never
 // invokes rsync or discovers a fresh deletion set.
-func (c *Client) SyncDeletionPaths(ctx context.Context, dir string, source synctree.Stage, dest synctree.Snapshot, opts SyncOptions, prefix bool) (map[string]bool, error) {
+func (c *Client) SyncDeletionPaths(ctx context.Context, dir string, source synctree.Stage, dest synctree.Snapshot, opts SyncOptions, prefix bool, renameFile string) (map[string]bool, error) {
 	removed := map[string]bool{}
 	if !filepath.IsLocal(source.SourceName) || source.SourceName == "." || filepath.Base(source.SourceName) != source.SourceName {
 		return nil, synctree.ErrStage
 	}
-	if !opts.Delete || !source.SourceDirectory || !dest.Exists {
+	if renameFile != "" && (!filepath.IsLocal(renameFile) || renameFile == "." || filepath.Base(renameFile) != renameFile) {
+		return nil, synctree.ErrStage
+	}
+	if !dest.Exists {
 		return removed, nil
 	}
 	if err := synctree.ValidateManifest(source.Manifest); err != nil {
@@ -170,14 +174,29 @@ func (c *Client) SyncDeletionPaths(ctx context.Context, dir string, source synct
 	if err := skeleton(output, dest.Manifest); err != nil {
 		return nil, err
 	}
-	if !prefix {
+	if !source.SourceDirectory {
+		input = filepath.Join(input, source.SourceName)
+	} else if !prefix {
 		input += string(os.PathSeparator)
 	}
-	args := []string{"-r", "--delete"}
+	// --force models an approved directory replacement even without --delete;
+	// rsync still refuses to remove excluded descendants. --delete separately
+	// controls destination extras, and never widens a single-file transfer.
+	args := []string{"-r", "--force"}
+	if opts.Delete && source.SourceDirectory {
+		args = append(args, "--delete")
+	}
+	if opts.ConflictPolicy == "skip" {
+		args = append(args, "--ignore-existing")
+	}
 	for _, ex := range opts.Exclude {
 		args = append(args, "--exclude", ex)
 	}
-	args = append(args, "--", input, output+string(os.PathSeparator))
+	target := output + string(os.PathSeparator)
+	if !source.SourceDirectory && renameFile != "" {
+		target = filepath.Join(output, renameFile)
+	}
+	args = append(args, "--", input, target)
 	if err := runRsync(ctx, args, io.Discard, io.Discard); err != nil {
 		return nil, err
 	}
@@ -190,9 +209,9 @@ func (c *Client) SyncDeletionPaths(ctx context.Context, dir string, source synct
 		if e.Path == "" {
 			continue
 		}
-		// A former directory replaced by a file has inaccessible descendants;
-		// BuildScoped includes those descendants as explicit replacements.
-		if _, err := root.Lstat(e.Path); errors.Is(err, os.ErrNotExist) {
+		// Descendants of a replaced directory now resolve through a file.
+		// Include them only after rsync has accepted the filtered replacement.
+		if _, err := root.Lstat(e.Path); errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			removed[e.Path] = true
 		}
 	}

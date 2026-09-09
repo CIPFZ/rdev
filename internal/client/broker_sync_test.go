@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/CIPFZ/rdev/internal/transport"
 	"os"
 	"os/exec"
@@ -71,7 +73,7 @@ func TestSyncPreparedRsyncDeletionScope(t *testing.T) {
 			var deletions map[string]bool
 			filtered, err := store.Rewrite(t.Context(), "owner", id, func(dir string) error {
 				var err error
-				deletions, err = c.SyncDeletionPaths(t.Context(), dir, stage, snap, opts, prefix)
+				deletions, err = c.SyncDeletionPaths(t.Context(), dir, stage, snap, opts, prefix, "")
 				if err != nil {
 					return err
 				}
@@ -180,5 +182,112 @@ func TestSyncUsesSharedRetryPolicyAndPreservesRawBytes(t *testing.T) {
 				t.Fatal("bulk failure damaged base connection or retained broken connection")
 			}
 		})
+	}
+}
+
+func TestPreparedSyncDirectoryReplacementHonorsExclusions(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync unavailable")
+	}
+	for _, single := range []bool{false, true} {
+		for _, deletion := range []bool{false, true} {
+			for _, pattern := range []string{"", "protected", "protected/", "/node/protected"} {
+				for _, conflict := range []string{"overwrite", "skip"} {
+					t.Run(fmt.Sprintf("single=%t/delete=%t/exclude=%q/conflict=%s", single, deletion, pattern, conflict), func(t *testing.T) {
+						source, destination := t.TempDir(), t.TempDir()
+						if err := os.WriteFile(filepath.Join(source, "node"), []byte("replacement"), 0600); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.MkdirAll(filepath.Join(destination, "node", "protected"), 0700); err != nil {
+							t.Fatal(err)
+						}
+						protected := filepath.Join(destination, "node", "protected", "value")
+						if err := os.WriteFile(protected, []byte("keep"), 0600); err != nil {
+							t.Fatal(err)
+						}
+						if single {
+							source = filepath.Join(source, "node")
+						}
+						store, err := synctree.NewStore(filepath.Join(t.TempDir(), "stages"))
+						if err != nil {
+							t.Fatal(err)
+						}
+						id, _ := synctree.NewID()
+						stage, err := store.Capture(t.Context(), "owner", id, source, "preserve")
+						if err != nil {
+							t.Fatal(err)
+						}
+						snapshot, err := synctree.Inspect(t.Context(), destination, synctree.StageLimits)
+						if err != nil {
+							t.Fatal(err)
+						}
+						opts := SyncOptions{Delete: deletion, ConflictPolicy: conflict}
+						if pattern != "" {
+							opts.Exclude = []string{pattern}
+						}
+						var removed map[string]bool
+						c := &Client{}
+						filtered, err := store.Rewrite(t.Context(), "owner", id, func(dir string) error {
+							var err error
+							removed, err = c.SyncDeletionPaths(t.Context(), dir, stage, snapshot, opts, false, "")
+							if err != nil {
+								return err
+							}
+							return c.FilterSyncStage(t.Context(), dir, opts, !single, stage.SourceName, false, "", nil)
+						})
+						if pattern != "" && conflict == "overwrite" {
+							if err == nil {
+								_, err = synctree.BuildScoped(filtered.Manifest, snapshot, removed, conflict)
+							}
+							if err == nil {
+								t.Fatal("prepared replacement deletes an excluded descendant")
+							}
+						} else {
+							if err != nil {
+								t.Fatal(err)
+							}
+							plan, err := synctree.BuildScoped(filtered.Manifest, snapshot, removed, conflict)
+							if err != nil {
+								t.Fatal(err)
+							}
+							dir, err := store.Directory("owner", id)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err := synctree.Apply(t.Context(), dir, destination+"/", plan, synctree.StageLimits); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if pattern != "" || conflict == "skip" {
+							if data, err := os.ReadFile(protected); err != nil || string(data) != "keep" {
+								t.Fatal("protected child changed", err)
+							}
+						} else if data, err := os.ReadFile(filepath.Join(destination, "node")); err != nil || string(data) != "replacement" {
+							t.Fatal("approved replacement not applied", err)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestSyncRejectsNonUTF8RootOperandsAndFilters(t *testing.T) {
+	for _, field := range []string{"local", "remote", "exclude"} {
+		opts := SyncOptions{Local: "/source", Remote: "/destination"}
+		switch field {
+		case "local":
+			opts.Local += string([]byte{255})
+		case "remote":
+			opts.Remote += string([]byte{255})
+		case "exclude":
+			opts.Exclude = []string{string([]byte{255})}
+		}
+		if _, err := NormalizeSyncOptions(opts); err == nil {
+			t.Fatal("accepted JSON-lossy sync option", field)
+		}
+		if _, err := json.Marshal(opts); err == nil {
+			t.Fatal("serialized a different sync path/filter", field)
+		}
 	}
 }

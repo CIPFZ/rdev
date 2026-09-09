@@ -1687,6 +1687,26 @@ type SyncOptions struct {
 	MaxOutputBytes int64 `json:"max_output_bytes,omitempty"`
 }
 
+func (opts SyncOptions) MarshalJSON() ([]byte, error) {
+	if err := validateSyncText(opts); err != nil {
+		return nil, err
+	}
+	type plain SyncOptions
+	return json.Marshal(plain(opts))
+}
+
+func validateSyncText(opts SyncOptions) error {
+	if !utf8.ValidString(opts.Local) || !utf8.ValidString(opts.Remote) {
+		return errors.New("sync root paths must be valid UTF-8")
+	}
+	for _, pattern := range opts.Exclude {
+		if !utf8.ValidString(pattern) {
+			return errors.New("sync exclusion patterns must be valid UTF-8")
+		}
+	}
+	return nil
+}
+
 // SyncResult reports rsync's outcome.
 type SyncResult struct {
 	OperationID      string           `json:"operation_id,omitempty"`
@@ -1716,6 +1736,12 @@ const defaultSyncOutputBytes int64 = 256 << 10
 func NormalizeSyncOptions(opts SyncOptions) (SyncOptions, error) {
 	if opts.Local == "" || opts.Remote == "" {
 		return opts, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)
+	}
+	// Root operands and filter patterns travel as JSON strings. Reject invalid
+	// text before serialization can silently select another path/filter. Entry
+	// names inside retained trees use the separate byte-preserving wire format.
+	if err := validateSyncText(opts); err != nil {
+		return opts, err
 	}
 	if opts.Direction != "" && opts.Direction != "push" && opts.Direction != "pull" {
 		return opts, proto.NewError(proto.CodeInvalidRequest, "", proto.StateNotSent)

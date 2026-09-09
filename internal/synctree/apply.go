@@ -21,6 +21,13 @@ import (
 // must never cause an automatic replay. Files are published by atomic rename;
 // directories are removed only when empty, never by a recursive delete.
 func Apply(ctx context.Context, source, destination string, plan Plan, limits Limits) error {
+	// Inspect binds the cleaned absolute path. Use the same spelling when
+	// pinning its parent, including for directory operands ending in '/'.
+	var err error
+	destination, err = filepath.Abs(destination)
+	if err != nil {
+		return err
+	}
 	if err := ValidatePlan(plan); err != nil {
 		return err
 	}

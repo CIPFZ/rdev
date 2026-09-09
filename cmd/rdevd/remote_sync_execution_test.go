@@ -111,6 +111,53 @@ func TestRemoteBrokerPreparedSync(t *testing.T) {
 		return r.Wire.Ping.PID
 	}
 	base := ping()
+	// Root spelling is part of transfer layout, then normalized for filesystem
+	// identity checks. Exercise real absolute remote paths (not expandHome).
+	remoteBaseRaw, err := ssh("import os,sys\nprint(os.path.expanduser('~/'+sys.argv[1]))\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteBase := strings.TrimSpace(string(remoteBaseRaw))
+	for _, existing := range []bool{false, true} {
+		name := "missing-slash"
+		if existing {
+			name = "existing-slash"
+			if out, err := ssh("import os,sys\nos.mkdir(os.path.expanduser('~/'+sys.argv[1]+'/existing-slash'))\n"); err != nil {
+				t.Fatal(err, string(out))
+			}
+		}
+		upload := approve(a, prepare(a, client.SyncOptions{Direction: "push", Local: filepath.Join(source, "file"), Remote: remoteBase + "/" + name + "/"}))
+		if r := call(a, upload); !r.OK || r.Mutation == nil || !r.Mutation.RemoteOK {
+			t.Fatal("single-file push to directory operand", existing, r.Error)
+		}
+		destination := filepath.Join(t.TempDir(), "download")
+		if existing {
+			if err := os.Mkdir(destination, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		download := approve(a, prepare(a, client.SyncOptions{Direction: "pull", Local: destination + "/", Remote: remoteBase + "/" + name + "/file"}))
+		if r := call(a, download); !r.OK || r.Mutation == nil || !r.Mutation.RemoteOK {
+			t.Fatal("single-file pull to directory operand", existing, r.Error)
+		}
+		if data, err := os.ReadFile(filepath.Join(destination, "file")); err != nil || string(data) != payload {
+			t.Fatal("directory operand changed transfer layout", err)
+		}
+	}
+	// A replacement cannot consume protected descendants, including without
+	// --delete. Rejection happens while preparing, before an approval is issued.
+	if out, err := ssh("import os,sys\np=os.path.expanduser('~/'+sys.argv[1]+'/protected-replacement/file');os.makedirs(p);open(p+'/protected','w').write('keep')\n"); err != nil {
+		t.Fatal(err, string(out))
+	}
+	for _, deletion := range []bool{false, true} {
+		options := &client.SyncOptions{Direction: "push", Local: filepath.Join(source, "file"), Remote: remoteBase + "/protected-replacement/", Exclude: []string{"protected"}, Delete: deletion, Prepare: true, DryRun: true}
+		if r := call(a, broker.Request{Operation: "sync.push", Host: "runtime-host", Sync: options}); r.OK {
+			t.Fatal("approved replacement could delete excluded contents")
+		}
+	}
+	if out, err := ssh("import os,sys\np=os.path.expanduser('~/'+sys.argv[1]+'/protected-replacement/file/protected');assert open(p).read()=='keep'\n"); err != nil {
+		t.Fatal(err, string(out))
+	}
 	opts := client.SyncOptions{Direction: "push", Local: source + "/", Remote: remote, Delete: true, Exclude: []string{"excluded"}}
 	req := prepare(a, opts)
 	if r := call(a, req); r.OK {
