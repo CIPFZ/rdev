@@ -202,7 +202,7 @@ func (s *Service) PrepareSync(ctx context.Context, req Request) (*client.SyncRes
 	}
 	existingDirectory := snap.Exists && len(snap.Manifest.Entries) > 0 && snap.Manifest.Entries[0].Kind == "directory"
 	directoryTarget := existingDirectory || strings.HasSuffix(destination, "/")
-	prefix := stage.SourceDirectory && !strings.HasSuffix(sourceSpelling, "/") && existingDirectory
+	prefix := stage.SourceDirectory && !strings.HasSuffix(sourceSpelling, "/")
 	renameFile := ""
 	if !stage.SourceDirectory && !directoryTarget {
 		renameFile = filepath.Base(filepath.Clean(destination))

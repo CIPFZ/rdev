@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,6 +158,26 @@ func TestRemoteBrokerPreparedSync(t *testing.T) {
 	}
 	if out, err := ssh("import os,sys\np=os.path.expanduser('~/'+sys.argv[1]+'/protected-replacement/file/protected');assert open(p).read()=='keep'\n"); err != nil {
 		t.Fatal(err, string(out))
+	}
+	// A directory operand without a trailing slash keeps its basename even
+	// when the destination does not exist. Match rsync for either target spelling.
+	for i, suffix := range []string{"", "/"} {
+		directoryTarget := remoteBase + fmt.Sprintf("/missing-directory-%d", i)
+		pushed := approve(a, prepare(a, client.SyncOptions{Direction: "push", Local: source, Remote: directoryTarget + suffix}))
+		if r := call(a, pushed); !r.OK {
+			t.Fatal("directory push to missing destination", r.Error)
+		}
+		pulled := filepath.Join(t.TempDir(), "missing-directory")
+		pullDirectory := approve(a, prepare(a, client.SyncOptions{Direction: "pull", Local: pulled + suffix, Remote: directoryTarget + "/" + filepath.Base(source)}))
+		if r := call(a, pullDirectory); !r.OK {
+			t.Fatal("directory pull to missing destination", r.Error)
+		}
+		if content, err := os.ReadFile(filepath.Join(pulled, filepath.Base(source), "file")); err != nil || string(content) != payload {
+			t.Fatal("directory operand lost basename", err)
+		}
+		if _, err := os.Lstat(filepath.Join(pulled, "file")); !os.IsNotExist(err) {
+			t.Fatal("directory contents placed at wrong level")
+		}
 	}
 	opts := client.SyncOptions{Direction: "push", Local: source + "/", Remote: remote, Delete: true, Exclude: []string{"excluded"}}
 	req := prepare(a, opts)
