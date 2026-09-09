@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/transport"
-	"golang.org/x/sys/unix"
 )
 
 func syncProcessState(pid int) (state, start string) {
@@ -112,33 +111,5 @@ func TestRealRsyncCancellationStopsSSHDescendants(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
-	}
-}
-
-func TestManifestOpenRejectsFIFOWithoutBlocking(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "source")
-	if err := unix.Mkfifo(path, 0600); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		f, err := openManifestFile(path)
-		if f != nil {
-			f.Close()
-		}
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("manifest accepted a substituted FIFO")
-		}
-	case <-time.After(time.Second):
-		// Unblock the old implementation so a failing regression does not leak.
-		fd, _ := unix.Open(path, unix.O_RDWR|unix.O_NONBLOCK, 0)
-		if fd >= 0 {
-			defer unix.Close(fd)
-		}
-		t.Fatal("manifest open blocked on a substituted FIFO")
 	}
 }

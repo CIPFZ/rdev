@@ -41,6 +41,14 @@ func SyncPreviewBudget(req Request) int64 {
 	return 16 * opts.MaxOutputBytes
 }
 
+func SyncPreviewWorkerBudget(req Request) int64 {
+	budget := SyncPreviewBudget(req)
+	if req.Sync != nil && req.Sync.Direction == "push" {
+		budget += client.SharedSyncManifestMemoryBudget
+	}
+	return budget
+}
+
 func (s *Service) PreviewSync(ctx context.Context, req Request) (*client.SyncResult, error) {
 	if err := validateSyncRoute(req); err != nil {
 		return nil, err
@@ -56,7 +64,7 @@ func (s *Service) PreviewSync(ctx context.Context, req Request) (*client.SyncRes
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	_, err = s.DispatchScheduled(ctx, req.Host, req.Owner.Key(), LaneBulk, func(workCtx context.Context) (*proto.Response, error) {
-		releaseBudget, err := s.Ingress.Hold(req.Owner.Key(), SyncPreviewBudget(req))
+		releaseBudget, err := s.Ingress.Hold(req.Owner.Key(), SyncPreviewWorkerBudget(req))
 		if err != nil {
 			return nil, err
 		}

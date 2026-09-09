@@ -1,0 +1,20 @@
+=== RUN   TestRemoteBrokerSyncManifest
+    remote_sync_manifest_test.go:84: actual daemon/rsync/SSH: full 5 MiB source digest detects same-size/same-mtime mutation; sparse source beyond 8 GiB and 8200-entry source fail bounded shared scan; destination remains empty
+--- PASS: TestRemoteBrokerSyncManifest (5.04s)
+=== RUN   TestRemoteBrokerSyncPreview
+    remote_sync_test.go:328: actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending
+--- PASS: TestRemoteBrokerSyncPreview (16.65s)
+=== RUN   TestRemoteBrokerSyncManifest
+    remote_sync_manifest_test.go:84: actual daemon/rsync/SSH: full 5 MiB source digest detects same-size/same-mtime mutation; sparse source beyond 8 GiB and 8200-entry source fail bounded shared scan; destination remains empty
+--- PASS: TestRemoteBrokerSyncManifest (4.99s)
+=== RUN   TestRemoteBrokerSyncPreview
+    remote_sync_test.go:328: actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending
+--- PASS: TestRemoteBrokerSyncPreview (16.64s)
+=== RUN   TestRemoteBrokerSyncManifest
+    remote_sync_manifest_test.go:84: actual daemon/rsync/SSH: full 5 MiB source digest detects same-size/same-mtime mutation; sparse source beyond 8 GiB and 8200-entry source fail bounded shared scan; destination remains empty
+--- PASS: TestRemoteBrokerSyncManifest (5.01s)
+=== RUN   TestRemoteBrokerSyncPreview
+    remote_sync_test.go:328: actual daemon/CLI/MCP/rsync/SSH: push/pull/delete previews preserve both trees; exact host/project/default/capability and malformed-route denial before dial; separate delete grant; no frontend fallback; bounded output and independently held owner capture budget; held real server response cancellation terminates SSH descendants and preserves the other project's base PID; request/outcome audit excludes paths/output; same authority after SIGKILL; manifest-bound shared execution remains pending
+--- PASS: TestRemoteBrokerSyncPreview (16.65s)
+PASS
+ok  	github.com/CIPFZ/rdev/cmd/rdevd	66.005s

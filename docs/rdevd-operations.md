@@ -840,7 +840,14 @@ broker's OS account and remote SSH account respectively.
 Previews use bulk admission, a 30-second operation deadline and bounded, redacted
 stdout/stderr. The per-stream default is 256 KiB. The frontend and worker each
 reserve sixteen times the configured per-stream limit while retaining output,
-including worst-case JSON expansion. Cancellation terminates the preview's rsync
+including worst-case JSON expansion. Push workers also reserve 16 MiB for source
+manifest allocations. Shared scans allow at most 8192 visited entries, 2 MiB of
+metadata and 8 GiB of hashed file content; limits fail explicitly. Standalone
+scans allow 100000 entries and 16 MiB of metadata with the same content cap.
+The scanner reads directory names in bounded batches and hashes every regular
+file in full. Preserved symlinks remain links; `follow` only accepts relative links
+resolving inside the source root and rejects cycles or a symlink root. Special
+files fail instead of blocking the scan. Cancellation terminates the preview's rsync
 and auxiliary SSH process group, preserving the already running shared master.
 Auxiliary SSH may reuse that master but cannot create a persistent replacement.
 

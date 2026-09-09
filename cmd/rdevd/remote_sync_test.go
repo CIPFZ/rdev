@@ -230,7 +230,7 @@ func TestRemoteBrokerSyncPreview(t *testing.T) {
 	awaitRuntime(t, 5*time.Second, "real rsync server response held", func() bool { _, err := os.Stat(gate + ".entered"); return err == nil })
 	state := call(a, broker.Request{Operation: "status"})
 	other := call(b, broker.Request{Operation: "status"})
-	if state.Scheduler == nil || state.Scheduler.Lanes[broker.LaneBulk].Active != 1 || state.Ingress.ObservationBytes != broker.SyncPreviewBudget(r) || state.Ingress.Bytes < 2*broker.SyncPreviewBudget(r) || other.Ingress.ObservationBytes != 0 || other.Scheduler.Active != 0 {
+	if state.Scheduler == nil || state.Scheduler.Lanes[broker.LaneBulk].Active != 1 || state.Ingress.ObservationBytes != broker.SyncPreviewWorkerBudget(r) || state.Ingress.Bytes < broker.SyncPreviewBudget(r)+broker.SyncPreviewWorkerBudget(r) || other.Ingress.ObservationBytes != 0 || other.Scheduler.Active != 0 {
 		t.Fatal("sync worker/capture reservation missing or crossed projects")
 	}
 	if ping() != basePID {
@@ -270,6 +270,31 @@ func TestRemoteBrokerSyncPreview(t *testing.T) {
 	bounded := preview(a, r)
 	if !bounded.Truncated || bounded.StdoutTruncation.RetainedBytes > 1024 || bounded.StdoutTruncation.DroppedBytes == 0 {
 		t.Fatal("sync output was not bounded with an exact truncation ledger")
+	}
+	largePath := filepath.Join(local, "large-file")
+	if err := os.WriteFile(largePath, []byte(strings.Repeat("x", 5<<20)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	largeBefore := preview(a, r)
+	info, err := os.Stat(largePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(largePath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("y"), 4<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(largePath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if largeAfter := preview(a, r); largeBefore.ManifestDigest == largeAfter.ManifestDigest {
+		t.Fatal("shared source manifest missed a large-file content change with preserved size and mtime")
 	}
 	if out, err := ssh("import os,sys\np=os.path.expanduser('~/'+sys.argv[1]+'/sync-target')\nassert os.listdir(p)==['remote-only']\nassert open(p+'/remote-only').read()=='remote-old'\n"); err != nil {
 		t.Fatalf("preview mutated remote tree: %v %s", err, out)

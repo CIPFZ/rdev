@@ -1838,3 +1838,62 @@ Shared immutable sync execution and rsync traffic pacing/accounting remain open,
 along with mixed sustained load, session administration, declarative secret
 delegation, retention/failure/upgrade/platform matrices and independent review.
 Phase5 and the Multi Agent Gate remain In progress.
+
+
+## Complete source content scans (2026-09-09)
+
+The earlier manifest hashed only regular files up to 4 MiB.
+[The actual predecessor daemon](evidence/phase5/2026-09-09/sync-manifest-old-daemon.log)
+misses a content change in a 5 MiB source when size and mtime are preserved.
+The corrected real test checks a changed digest, explicit rejection of a sparse
+source above 8 GiB and an 8200-entry source, and an unchanged remote destination.
+
+The new `internal/synctree` scanner hashes all regular-file bytes with per-scan
+content, metadata, entry and depth caps. It reads directory names sixteen at a
+time, checks cancellation during enumeration/hashing, and retains byte-exact
+length-prefixed filenames and link targets in the digest. Open-file identities
+and metadata are checked around reads; followed directory links are scanned
+within the pinned root, with cycles and escapes rejected. Dangling followed
+links no longer discard the manifest and silently proceed to standalone rsync.
+
+The first no-follow test found that `os.Root.OpenFile` resolves a final symlink
+even when passed `O_NOFOLLOW`. The corrected Unix path pins the confined parent
+and invokes `openat` with `O_NOFOLLOW|O_NONBLOCK`, then requires the expected
+regular-file/directory type. The [initial failing test](evidence/phase5/2026-09-09/sync-manifest-initial.log)
+and [corrected package race runs](evidence/phase5/2026-09-09/sync-manifest-core-race.log)
+preserve that diagnosis. FIFO, ancestor/leaf symlink, raw filename, content/entry/
+metadata budget, followed-content and cancellation regressions pass. Superseded
+client leaf-open helpers and their duplicate tests were removed after moving the
+coverage to the new scanner.
+
+Shared source scans use 8192 visited entries and 2 MiB metadata, with a separate
+16 MiB reservation held by the worker through teardown. This covers bounded
+entry/path/name/descriptor-buffer/hash allocations through both observations.
+Standalone retains the 100000-entry/16 MiB metadata caps. Both hash at most
+8 GiB of regular content. Full scanning includes excluded source entries, as
+the previous observational guard did. These are scan limits, not rsync bandwidth
+pacing or a destination disk budget.
+
+[Final check and real runtime](evidence/phase5/2026-09-09/sync-manifest-final-check-runtime.log),
+[full repository race](evidence/phase5/2026-09-09/sync-manifest-full-race.log), and
+[explicit client guards](evidence/phase5/2026-09-09/sync-manifest-guards.log)
+track validation. Actual daemon/CLI race and committed-source results follow.
+
+These observations do not make a concurrently edited source immutable. Source
+content still needs private staging, and execution must bind exact destination
+entries, approval and durable mutation state. No Phase5-wide completion is
+claimed; platform, mixed-load, remaining shared routes and independent review
+requirements remain.
+
+
+The interrupted session's final check/runtime and actual race logs were recovered
+intact. The actual race run passed three complete preview/manifest scenarios
+with the real daemon, CLI, MCP, rsync and SSH (66.005 seconds). The full check
+and six-cycle lease run also completed successfully before interruption.
+A fresh implementing-agent review checked scan limits, raw-byte digest framing,
+root confinement, no-follow leaf opens, cancellation and the independent worker
+reservation. This is not independent reviewer approval.
+
+Race artifact SHA-256:
+- daemon: `5c33f4f0d3586bd73a7bc5d5c73a65ab508fc4545385843da4047e06218fb021`
+- CLI: `e7798c70bf3e78cc266455dc763a1e79f40256a9a469b80dd854c146636c6f24`

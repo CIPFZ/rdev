@@ -365,23 +365,6 @@ func TestBuildSyncManifestFollowRejectsEscapingSymlink(t *testing.T) {
 	}
 }
 
-func TestOpenManifestFileDoesNotFollowFinalSymlink(t *testing.T) {
-	d := t.TempDir()
-	target := filepath.Join(d, "target")
-	link := filepath.Join(d, "link")
-	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
-	f, err := openManifestFile(link)
-	if err == nil {
-		_ = f.Close()
-		t.Fatal("manifest digest open unexpectedly followed symlink")
-	}
-}
-
 func TestSyncDeleteRequiresBoundedPlanAndReturnsDigest(t *testing.T) {
 	c := syncTestClient(t)
 	local := t.TempDir()

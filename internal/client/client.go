@@ -1770,12 +1770,20 @@ func (c *Client) syncForTarget(ctx context.Context, opts SyncOptions, target str
 
 	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
 	manifest := syncManifest{}
+	scan := buildSyncManifestContext
+	if bulk {
+		scan = func(ctx context.Context, root, policy string) (syncManifest, error) {
+			return scanSyncManifest(ctx, root, policy, sharedSyncManifestLimits)
+		}
+	}
 	if opts.Direction == "" || opts.Direction == "push" {
-		manifest, err = buildSyncManifestContext(ctx, opts.Local, opts.SymlinkPolicy)
+		manifest, err = scan(ctx, opts.Local, opts.SymlinkPolicy)
 		if err != nil {
-			// Preserve rsync's own diagnostics for a missing source path. The
-			// manifest is an audit aid, not a second path-validation mechanism.
-			if os.IsNotExist(err) {
+			// Standalone retains rsync's diagnostics when the source root is
+			// absent. A missing descendant or dangling followed link must not
+			// silently discard the manifest and proceed without the guard.
+			_, rootErr := os.Lstat(opts.Local)
+			if !bulk && os.IsNotExist(err) && os.IsNotExist(rootErr) {
 				manifest = syncManifest{}
 			} else {
 				return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("build sync manifest: %w", err))
@@ -1863,7 +1871,8 @@ func (c *Client) syncForTarget(ctx context.Context, opts SyncOptions, target str
 		return nil, c.redactErrWith(redactionSnapshot, fmt.Errorf("run rsync: %w", runErr))
 	}
 	if manifest.Digest != "" {
-		if verifyErr := verifySyncManifestContext(ctx, opts.Local, opts.SymlinkPolicy, manifest); verifyErr != nil {
+		verified, verifyErr := scan(ctx, opts.Local, opts.SymlinkPolicy)
+		if verifyErr != nil || verified != manifest {
 			return res, c.redactErrWith(redactionSnapshot, proto.NewError(proto.CodeInvalidRequest, "sync source changed during transfer", proto.StateCompleted))
 		}
 	}

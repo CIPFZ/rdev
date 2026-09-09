@@ -588,3 +588,16 @@ readiness and Linux systemd recovery. All-package race and three actual daemon/
 CLI race runs also passed. Logs and artifact digests are linked in the runtime
 evidence record. This completes preview validation only; immutable execution,
 rsync traffic budgets and all remaining Phase5 requirements stay In progress.
+
+
+## Content-complete source observations
+
+A real predecessor-daemon regression reproduced unchanged manifest digests after
+a 5 MiB file was modified with its size and mtime preserved. The new bounded
+scanner hashes every file, confines link resolution to a pinned root, enforces
+no-follow leaf opens with `openat`, and enumerates directories in small batches.
+Shared worker admission now includes manifest memory. Actual source size/entry
+limits fail without writing the destination. These changes improve the preview
+guard and provide full entries for subsequent plan construction; retained source
+content, explicit destination deletion plans and approved durable execution are
+still required. Full Phase5 and Multi Agent Gate status remain In progress.
