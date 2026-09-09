@@ -30,7 +30,7 @@ jobs:
       - name: Install local SSH fixture dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes openssh-server rsync
+          sudo apt-get install --yes openssh-server rsync acl
           sudo install -d -m 755 /run/sshd
       - name: Bind runner and tool identities
         run: |

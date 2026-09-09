@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/artifact"
+	"golang.org/x/sys/unix"
 )
 
 // The isolated SSH harness checks its own trust fixture before dispatching any
@@ -124,5 +126,71 @@ func TestReleasePolicyFixtureChecksInheritedPathAndWritableAncestors(t *testing.
 		if (err != nil) != writable || !strings.Contains(string(out), want) || strings.Contains(string(out), path) || strings.Contains(string(out), data) {
 			t.Fatalf("policy readiness inheritance or rejection contract failed: writable=%t exit=%v", writable, err)
 		}
+	}
+}
+
+func TestIsolatedPolicyAvoidsExtendedACLWithoutRelaxingTrust(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux POSIX ACL fixture; other platform ACL runtime remains separate")
+	}
+	for _, tool := range []string{"setfacl", "python3"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("CI") != "" {
+				t.Fatalf("CI requires the actual ACL regression tool %s", tool)
+			}
+			t.Skipf("actual ACL fixture requires %s", tool)
+		}
+	}
+	fixture, err := os.MkdirTemp("/tmp", ".rdev-p8-ssh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fixture)
+	fixture, err = filepath.EvalSymlinks(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A named ACL entry is incompatible with the trust contract even though
+	// ordinary mode bits do not grant group/other write permission.
+	if out, err := exec.CommandContext(t.Context(), "setfacl", "-m", "u:65534:r-x", fixture).CombinedOutput(); err != nil {
+		t.Fatalf("create actual extended ACL: %v %s", err, out)
+	}
+	aclSize, err := unix.Getxattr(fixture, "system.posix_acl_access", nil)
+	if err != nil || aclSize <= 0 {
+		t.Fatal("ACL regression did not create an actual extended ACL")
+	}
+	oldPath := filepath.Join(fixture, "old-policy.json")
+	data := fmt.Sprintf(`{"schema_version":1,"valid_until":%q,"channels":["dev"],"allow_unsigned_dev":true,"allow_test_roots":false,"roots":[]}`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	if err := os.WriteFile(oldPath, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := artifact.LoadPolicy(oldPath, time.Now()); releasePolicyFixtureReason(err) != "extended_acl" {
+		t.Fatal("production verifier accepted a policy below an extended ACL ancestor")
+	}
+	loader := `import importlib.util,pathlib,sys
+spec=importlib.util.spec_from_file_location("isolated_ssh",sys.argv[1]);h=importlib.util.module_from_spec(spec);spec.loader.exec_module(h)
+fixture,out=pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3])
+if sys.argv[4]=="create": print(h.create_release_policy(fixture,out))
+else: h.cleanup_release_policy(fixture,out)
+`
+	args := []string{"-B", "-c", loader, filepath.Join(repoRoot(t), "scripts", "isolated-ssh.py"), fixture, filepath.Join(fixture, "evidence")}
+	defer func() {
+		if out, err := exec.Command("python3", append(args, "cleanup")...).CombinedOutput(); err != nil {
+			t.Fatalf("private policy cleanup failed: %v %s", err, out)
+		}
+	}()
+	out, err := exec.CommandContext(t.Context(), "python3", append(args, "create")...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create independent policy fixture: %v %s", err, out)
+	}
+	newPath := strings.TrimSpace(string(out))
+	if filepath.Dir(filepath.Dir(newPath)) != "/tmp" {
+		t.Fatal("policy did not use the checked temporary trust parent")
+	}
+	if _, err := artifact.LoadPolicy(newPath, time.Now()); err != nil {
+		t.Fatal("production verifier rejected the independent private policy fixture")
+	}
+	if after, err := unix.Getxattr(fixture, "system.posix_acl_access", nil); err != nil || after != aclSize {
+		t.Fatal("fixture changed the existing account-directory ACL")
 	}
 }

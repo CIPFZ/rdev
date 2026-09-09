@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -115,19 +116,67 @@ def owned_processes(fixture, namespace):
     return records
 
 
+def release_policy_root(fixture):
+    return Path("/tmp") / ("rdev-p8-policy-" + fixture.name.removeprefix(".rdev-p8-ssh-"))
+
+
+def create_release_policy(fixture, out):
+    # OpenSSH accepts a fixture below the account home even when a home
+    # ancestor has an extended ACL. Release trust deliberately rejects those
+    # ACLs. Keep its isolated test policy below the real root-owned sticky /tmp,
+    # without changing the account ACL or weakening the production verifier.
+    parent = Path("/tmp")
+    info = parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or not info.st_mode & stat.S_ISVTX:
+        raise RuntimeError("release policy fixture requires a real root-owned sticky /tmp")
+    if {"system.posix_acl_access", "system.posix_acl_default"}.intersection(os.listxattr(parent)):
+        raise RuntimeError("release policy temporary parent has an unsupported extended ACL")
+    root = release_policy_root(fixture)
+    root.mkdir(mode=0o700)
+    binding = {"fixture": str(fixture), "evidence": str(out)}
+    policy = root / "release-policy.json"
+    for path, value in ((root / "owner.json", binding), (policy, {"schema_version": 1, "valid_until": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), "channels": ["dev"], "allow_unsigned_dev": True, "allow_test_roots": False, "roots": []})):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as output:
+            json.dump(value, output)
+    return policy
+
+
+def cleanup_release_policy(fixture, out):
+    root = release_policy_root(fixture)
+    if not root.exists():
+        return
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise RuntimeError("release policy recovery directory is not private and owned")
+    if {entry.name for entry in root.iterdir()} != {"owner.json", "release-policy.json"}:
+        raise RuntimeError("unknown release policy recovery entries retained")
+    for name in ("owner.json", "release-policy.json"):
+        info = (root / name).lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096:
+            raise RuntimeError("unsafe release policy recovery file retained")
+    if json.loads((root / "owner.json").read_text()) != {"fixture": str(fixture), "evidence": str(out)}:
+        raise RuntimeError("release policy recovery binding mismatch")
+    for name in ("release-policy.json", "owner.json"):
+        (root / name).unlink()
+    root.rmdir()
+
+
 def recover(out, action):
     record = json.loads((out / "recovery.json").read_text())
     fixture, namespace = Path(record["fixture"]), Path(record["namespace"])
     if fixture.parent != Path.home() or not fixture.name.startswith(".rdev-p8-ssh-") or namespace.parent != Path.home() / ".cache" or namespace.name != "rdev-phase5-isolated-" + fixture.name.removeprefix(".rdev-p8-ssh-"):
         raise RuntimeError("recovery paths are not the private fixture namespace")
     if not fixture.exists():
+        if action == "cleanup":
+            cleanup_release_policy(fixture, out)
         print(json.dumps({"status": "already-cleaned", "evidence": str(out)}))
         return
     if json.loads((fixture / "owner.json").read_text())["evidence"] != str(out):
         raise RuntimeError("fixture ownership binding mismatch")
     live = owned_processes(fixture, namespace)
     if action == "status":
-        print(json.dumps({"fixture": str(fixture), "namespace": str(namespace), "live_processes": live, "ssh_config": str(fixture / "ssh_config")}))
+        print(json.dumps({"fixture": str(fixture), "namespace": str(namespace), "live_processes": live, "ssh_config": str(fixture / "ssh_config"), "release_policy_root": str(release_policy_root(fixture))}))
         return
     # Explicit recovery cleanup authorizes terminating only this isolated run.
     # Retain the directory whenever process termination cannot be confirmed.
@@ -155,8 +204,9 @@ def recover(out, action):
         if json.loads((namespace / ".isolated-owner.json").read_text())["evidence"] != str(out):
             raise RuntimeError("namespace ownership binding mismatch")
         shutil.rmtree(namespace)
+    cleanup_release_policy(fixture, out)
     shutil.rmtree(fixture)
-    record.update(cleaned_unix=time.time(), status="cleaned")
+    record.update(cleaned_unix=time.time(), status="cleaned", live_processes=[])
     (out / "recovery.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps({"status": "cleaned", "evidence": str(out)}))
 
@@ -329,8 +379,9 @@ def main():
             raise RuntimeError("host-key failure injection was not observed")
         report["checks"]["host-key-denied"] = "passed"
         if not args.preflight_only:
-            policy = fixture / "release-policy.json"
-            policy.write_text(json.dumps({"schema_version": 1, "valid_until": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), "channels": ["dev"], "allow_unsigned_dev": True, "allow_test_roots": False, "roots": []}))
+            policy = create_release_policy(fixture, args.out)
+            recovery["release_policy_root"] = str(policy.parent)
+            (args.out / "recovery.json").write_text(json.dumps(recovery, indent=2) + "\n")
             report["release_trust"] = "isolated administrator unsigned-dev opt-in; not trusted release certification"
             preflight_env = dict(os.environ, RDEV_RELEASE_POLICY=str(policy), RDEV_TEST_RELEASE_POLICY_PREFLIGHT="1")
             with (args.out / "release-policy-preflight.log").open("wb") as log:
