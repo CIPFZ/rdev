@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run real rdev runtime tests through private loopback sshd/ProxyJump servers.
 
-Requires Linux, OpenSSH client/server, rsync, Python 3 and a usable local account
-(root on standard CI runners). This creates no user, changes no SSH configuration
+Requires Linux, OpenSSH client/server, rsync, Python 3 and a usable local account.
+Both root and ordinary accounts may run the fixture. This creates no user, changes no SSH configuration
 and reads no existing key. Reports contain public identities and test output only.
 """
 import argparse
@@ -332,6 +332,13 @@ def main():
             policy = fixture / "release-policy.json"
             policy.write_text(json.dumps({"schema_version": 1, "valid_until": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), "channels": ["dev"], "allow_unsigned_dev": True, "allow_test_roots": False, "roots": []}))
             report["release_trust"] = "isolated administrator unsigned-dev opt-in; not trusted release certification"
+            preflight_env = dict(os.environ, RDEV_RELEASE_POLICY=str(policy), RDEV_TEST_RELEASE_POLICY_PREFLIGHT="1")
+            with (args.out / "release-policy-preflight.log").open("wb") as log:
+                run([args.go, "test", "./cmd/rdevd", "-run", "^TestIsolatedReleasePolicyReadiness$", "-count=1", "-v"], env=preflight_env, cwd=repo, stdout=log, stderr=subprocess.STDOUT, timeout=120)
+            preflight = (args.out / "release-policy-preflight.log").read_text()
+            if "RDEV_SAFE_POLICY reason=accepted explicit=true" not in preflight or "--- PASS:" not in preflight:
+                raise RuntimeError("release policy preflight did not prove explicit fixture admission")
+            report["checks"]["release-policy-readiness"] = "passed"
             for target in ("target-v4", "target-v6"):
                 env = dict(os.environ, TMPDIR=str(fixture / "tmp"), RDEV_TEST_RUNTIME_ROOT=str(fixture / "runtime"), RDEV_TEST_NAMESPACE_PREFIX=str(namespace.relative_to(Path.home())), RDEV_RUN_REMOTE="1", RDEV_TEST_REMOTE=target, RDEV_TEST_SSH_CONFIG=str(topology.config), RDEV_RELEASE_POLICY=str(policy))
                 with (args.out / (target + "-runtime.log")).open("wb") as log:

@@ -54,17 +54,21 @@ jobs:
           python3 - <<'PY'
           import json, os, pathlib, re
           root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rdev-evidence" / "ssh"
-          summary = {"failed_tests": [], "source_locations": [], "failure_codes": [], "checks": {}}
+          summary = {"failed_tests": [], "source_locations": [], "failure_codes": [], "policy_readiness": [], "checks": {}}
           result = root / "result.json"
           if result.exists():
               data = json.loads(result.read_text())
               summary["checks"] = data.get("checks", {})
               summary["status"] = data.get("status")
-          for log in root.glob("*-runtime.log"):
+          for log in [*root.glob("*-runtime.log"), root / "release-policy-preflight.log"]:
+              if not log.exists():
+                  continue
               content = log.read_text(errors="replace")
               summary["failed_tests"] += re.findall(r"--- FAIL: ([A-Za-z0-9_/]+)", content)
               summary["source_locations"] += re.findall(r"^\s*([A-Za-z0-9_]+_test\.go:[0-9]+):", content, re.M)
               summary["failure_codes"] += re.findall(r"RDEV_SAFE_FAILURE code=[a-zA-Z0-9_.]+ state=[a-zA-Z0-9_]+ stages=[a-z_,]*", content)
+              summary["policy_readiness"] += re.findall(r"RDEV_SAFE_POLICY reason=[a-z_]+ explicit=(?:true|false)", content)
+              summary["policy_readiness"] += re.findall(r"RDEV_SAFE_POLICY_COMPONENT depth=[0-9]+ status=[a-z_]+(?: owner=[a-z_]+ mode=[0-7]+ symlink=(?:true|false) directory=(?:true|false))?", content)
           summary["source_locations"] = sorted(set(summary["source_locations"]))
           summary["failure_codes"] = sorted(set(summary["failure_codes"]))
           message = json.dumps(summary, sort_keys=True)
@@ -102,6 +106,7 @@ jobs:
             ${{ runner.temp }}/rdev-evidence/openssh.txt
             ${{ runner.temp }}/rdev-evidence/run.txt
             ${{ runner.temp }}/rdev-evidence/ssh/result.json
+            ${{ runner.temp }}/rdev-evidence/ssh/release-policy-preflight.log
             ${{ runner.temp }}/rdev-evidence/ssh/recovery.json
             ${{ runner.temp }}/rdev-evidence/ssh/target-v4-runtime.log
             ${{ runner.temp }}/rdev-evidence/ssh/target-v6-runtime.log
