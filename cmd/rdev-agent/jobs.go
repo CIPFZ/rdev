@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -128,10 +127,10 @@ func validatedJobDir(state, id string) (string, error) {
 		return "", err
 	}
 	if st, statErr := os.Lstat(root); statErr == nil {
-		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !ownedPath(root, st) {
 			return "", processStateError("job root is not a private directory")
 		}
-		if st.Mode().Perm() != 0o700 {
+		if !platformPrivateMode(st, 0o700) {
 			lease, err := statepkg.AcquireWriter(filepath.Dir(root))
 			if err != nil {
 				return "", stateWriteError(err)
@@ -256,16 +255,8 @@ func readChildProcess(dir string) (int, string) {
 	return c.ChildPID, c.ProcessIdentity
 }
 
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	// Signal 0 performs permission and existence checks without delivering.
-	return syscall.Kill(pid, 0) == nil
-}
-
 func processMatches(pid int, identity string) bool {
-	if pid <= 0 || syscall.Kill(pid, 0) != nil {
+	if !processAlive(pid) {
 		return false
 	}
 	if identity == "" {
@@ -297,34 +288,11 @@ func readMeta(dir string) (*jobMeta, error) {
 	return m, nil
 }
 
-func writeJSON(path string, v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	// Write-then-rename so a reader never observes a partial record.
-	//
-	// The temp name carries the pid: a fixed "<path>.tmp" is shared state between
-	// every writer of that path, and two of them interleaving would let one
-	// rename the other's half-written bytes into place. Writers of one job's
-	// status now hold the job lock, but the supervisor writes child.json outside
-	// it, and a unique name costs nothing.
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) // do not leave the temp file behind on a failed rename
-		return err
-	}
-	return nil
-}
-
 func readJSON(path string, v any) error {
 	if err := secureRecordFile(path); err != nil {
 		return err
 	}
-	b, err := os.ReadFile(path)
+	b, err := readManagedFile(path)
 	if err != nil {
 		return err
 	}

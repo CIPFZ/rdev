@@ -13,8 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const CurrentSchemaVersion = 1
@@ -57,30 +55,6 @@ type Report struct {
 
 const manifestName = "manifest.json"
 const lockName = ".migration.lock"
-
-// validateRoot is deliberately read-only. The agent normally creates this
-// directory before calling the state package, but exported state operations
-// must not follow a caller-controlled symlink into an arbitrary tree.
-func validateRoot(root string) error {
-	if root == "" {
-		return errors.New("state root is required")
-	}
-	st, err := os.Lstat(root)
-	if err != nil {
-		return err
-	}
-	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
-		return errors.New("state root is not a directory")
-	}
-	var native unix.Stat_t
-	if err := unix.Lstat(root, &native); err != nil {
-		return err
-	}
-	if st.Mode().Perm() != 0700 || int(native.Uid) != os.Geteuid() {
-		return errors.New("state root is not private and owned")
-	}
-	return nil
-}
 
 func validateJobsDir(root string) error {
 	jobs := filepath.Join(root, "jobs")
@@ -127,28 +101,6 @@ func ensurePrivateDirSynced(path string, mode os.FileMode, sync func(string) err
 	}
 	return sync(filepath.Dir(path))
 }
-func syncDirectory(path string) error {
-	d, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
-
-func privateRegular(path string) (os.FileInfo, error) {
-	st, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
-	}
-	if st.Mode().Perm()&0077 != 0 {
-		return nil, fmt.Errorf("%s is not private", filepath.Base(path))
-	}
-	return st, nil
-}
 
 func loadManifest(root string) (*Manifest, error) {
 	p := filepath.Join(root, manifestName)
@@ -188,41 +140,6 @@ func loadManifest(root string) (*Manifest, error) {
 		return nil, ErrFutureSchema
 	}
 	return &m, nil
-}
-
-func writeAtomic(path string, value any) error {
-	b, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	f, err := os.CreateTemp(filepath.Dir(path), ".rdev-state-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(b)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	if err = os.Rename(tmp, path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }
 
 func acquire(root string) (func(), error) {

@@ -358,6 +358,13 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	remoteDir, _ := ValidateRemoteDir(host.RemoteDir) // validated before the probe
 	c.stateDir = probe.home + "/" + remoteDir
 	c.agentPath = probe.home + "/" + remoteDir + "/rdev-agent"
+	if probe.goos == "windows" {
+		c.stateDir, err = windowsStatePath(probe.home, remoteDir)
+		if err != nil {
+			return nil, err
+		}
+		c.agentPath = windowsAgentPath(c.stateDir, probe.agentSHA)
+	}
 
 	stage = observe.DialLookup
 	bin, err := lookup(probe.goos, probe.goarch)
@@ -463,6 +470,9 @@ type remoteProbe struct {
 // and prefixed so a chatty profile printing to stdout cannot be mistaken for
 // probe data.
 func (c *Conn) probeRemote(ctx context.Context) (*remoteProbe, error) {
+	if c.host.GOOS == "windows" {
+		return c.probeWindows(ctx)
+	}
 	const script = `printf 'rdev-os %s\n' "$(uname -s)"
 printf 'rdev-arch %s\n' "$(uname -m)"
 printf 'rdev-home %s\n' "$HOME"
@@ -478,10 +488,16 @@ fi`
 	}
 	out, err := c.runShell(ctx, script, remoteDir+"/rdev-agent")
 	if err != nil {
+		if remoteShellFailed(err) {
+			return c.probeWindows(ctx)
+		}
 		// A failure here is a real connectivity or auth problem; surface ssh's own
 		// message, which explains it better than a wrapped error would. Two shapes
 		// get an added next step, because ssh's text alone leaves the reader stuck.
 		return nil, fmt.Errorf("connect and probe %s: %w", c.host.Addr, explainSSHError(err, c.host))
+	}
+	if strings.Contains(out, "rdev-os MINGW") || strings.Contains(out, "rdev-os MSYS") || strings.Contains(out, "rdev-os CYGWIN") {
+		return c.probeWindows(ctx)
 	}
 	return parseProbe(out)
 }
@@ -604,6 +620,9 @@ func shellCommand(script string, argv ...string) []string {
 
 // sshArgs is the final shared boundary before every ssh process creation.
 func (c *Conn) sshArgs(remote ...string) ([]string, error) {
+	if len(remote) > 0 && remote[0] == "powershell.exe" && len(strings.Join(remote, " ")) >= 8000 {
+		return nil, errors.New("Windows bootstrap exceeds the SSH default shell command limit")
+	}
 	host, err := NormalizeHost(c.host)
 	if err != nil {
 		return nil, fmt.Errorf("invalid host %q: %w", c.host.Name, err)
@@ -636,7 +655,7 @@ func (c *Conn) runSSH(ctx context.Context, argv ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return out.String(), errors.New(msg)
+		return out.String(), &sshCommandError{cause: err, message: msg}
 	}
 	if out.truncated {
 		return "", fmt.Errorf("auxiliary ssh stdout exceeded %d-byte retention limit", auxiliaryStdoutBytes)
@@ -659,11 +678,13 @@ func mapPlatform(unameOut string) (goos, goarch string, err error) {
 		goos = "linux"
 	case "darwin":
 		goos = "darwin"
+	case "windows":
+		goos = "windows"
 	default:
 		return "", "", fmt.Errorf("unsupported remote OS %q", fields[0])
 	}
 
-	switch fields[1] {
+	switch strings.ToLower(fields[1]) {
 	case "x86_64", "amd64":
 		goarch = "amd64"
 	case "aarch64", "arm64":
@@ -742,6 +763,9 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 	if want == "" {
 		sum := sha256.Sum256(bin.Data)
 		want = hex.EncodeToString(sum[:])
+	}
+	if c.host.GOOS == "windows" {
+		return c.ensureWindowsAgent(ctx, bin, want, installedSHA, decision)
 	}
 	if installedSHA != "" && installedSHA == want {
 		if bin.Authorize != nil {
@@ -1308,7 +1332,11 @@ func (c *Conn) installAgentMode(ctx context.Context, data []byte, want string, e
 // this host installed it. Letting the agent default independently would silently
 // split the two sides apart whenever RemoteDir is customized.
 func (c *Conn) startAgent(ctx context.Context) error {
-	args, err := c.sshArgs(shellCommand(`exec "$1" -state "$2"`, c.agentPath, c.stateDir)...)
+	remote := shellCommand(`exec "$1" -state "$2"`, c.agentPath, c.stateDir)
+	if c.host.GOOS == "windows" {
+		remote = windowsLaunch(c.agentPath, "-state", c.stateDir)
+	}
+	args, err := c.sshArgs(remote...)
 	if err != nil {
 		return err
 	}

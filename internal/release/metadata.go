@@ -219,7 +219,7 @@ func artifact(dir, name, goVersion string) (Artifact, error) {
 	return a, nil
 }
 
-var AgentNames = []string{"rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64"}
+var AgentNames = []string{"rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64", "rdev-agent-windows-amd64"}
 
 func Generate(dir string, source Source, goVersion string) error {
 	current, err := Snapshot()
@@ -347,7 +347,7 @@ func verifyManifest(dir string, raw []byte) error {
 	if err := artifactcontract.DecodeEvidence(raw, &m); err != nil {
 		return err
 	}
-	if m.SchemaVersion != 1 || len(m.Artifacts) != 6 {
+	if m.SchemaVersion != 1 || len(m.Artifacts) != 2+len(AgentNames) {
 		return errors.New("invalid manifest")
 	}
 	contract, err := json.Marshal(m.Compatibility)

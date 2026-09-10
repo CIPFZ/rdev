@@ -40,7 +40,7 @@ func Inspect(ctx context.Context, path string, limits Limits) (Snapshot, error) 
 	if err != nil {
 		return Snapshot{}, err
 	}
-	parent, err := os.Stat(filepath.Dir(abs))
+	parent, err := nativeStatPath(filepath.Dir(abs))
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -48,7 +48,7 @@ func Inspect(ctx context.Context, path string, limits Limits) (Snapshot, error) 
 	if snap.ParentID == "" {
 		return Snapshot{}, errors.New("sync filesystem identity unsupported")
 	}
-	info, err := os.Lstat(abs)
+	info, err := nativeLstatPath(abs)
 	if errors.Is(err, os.ErrNotExist) {
 		return snap, nil
 	}
@@ -87,14 +87,14 @@ func Inspect(ctx context.Context, path string, limits Limits) (Snapshot, error) 
 		if !info.IsDir() {
 			name = filepath.Base(abs)
 		}
-		current, err := root.Lstat(name)
+		current, err := nativeRootStat(root, name, false)
 		if err != nil {
 			return Snapshot{}, err
 		}
 		writeField(h, entry.Path)
 		writeField(h, fileIdentity(current))
 	}
-	end, err := os.Lstat(abs)
+	end, err := nativeLstatPath(abs)
 	if err != nil || !sameInfo(info, end) {
 		return Snapshot{}, ErrChanged
 	}

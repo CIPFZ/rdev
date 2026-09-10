@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/proto"
@@ -95,9 +94,4 @@ func probeCapabilities(refresh bool) *proto.CapabilityResult {
 func cgroupV2Available() bool {
 	b, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
 	return err == nil && len(bytes.TrimSpace(b)) > 0
-}
-
-func rlimitAvailable() bool {
-	var limit syscall.Rlimit
-	return syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit) == nil
 }

@@ -26,14 +26,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -341,55 +339,6 @@ func expandHome(p string) string {
 	return filepath.Join(home, p[2:])
 }
 
-// buildCmd turns ExecParams into an *exec.Cmd.
-//
-// When LoginShell is set the command becomes:
-//
-//	bash -lc 'exec "$@"' rdev <argv...>
-//
-// The profile is sourced, then `exec "$@"` replaces the shell with the target
-// process. Because argv arrives as positional parameters rather than embedded
-// in the script text, the shell never re-parses it: a filename containing
-// spaces, quotes, or `$(...)` is passed through byte-for-byte.
-func buildCmd(p *proto.ExecParams) (*exec.Cmd, error) {
-	if len(p.Argv) == 0 {
-		return nil, invalidRequestError("argv must not be empty")
-	}
-
-	var cmd *exec.Cmd
-	if p.LoginShell {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/bash"
-		}
-		args := append([]string{"-lc", `exec "$@"`, "rdev"}, p.Argv...)
-		cmd = exec.Command(shell, args...)
-	} else {
-		cmd = exec.Command(p.Argv[0], p.Argv[1:]...)
-	}
-
-	if p.Cwd != "" {
-		dir := expandHome(p.Cwd)
-		info, err := os.Stat(dir)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil, objectNotFoundError(err)
-			}
-			return nil, err
-		}
-		if !info.IsDir() {
-			return nil, invalidRequestError("cwd is not a directory")
-		}
-		cmd.Dir = dir
-	}
-
-	cmd.Env = os.Environ()
-	for k, v := range p.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
-	return cmd, nil
-}
-
 // capWriter collects output up to a cap while still counting everything, so a
 // truncated reply can report the true stream size.
 type capWriter struct {
@@ -470,141 +419,6 @@ func doExecContext(ctx context.Context, p *proto.ExecParams) (*proto.ExecResult,
 	return doExecContextStream(ctx, p, nil, nil)
 }
 
-func doExecContextStream(ctx context.Context, p *proto.ExecParams, stdoutHook, stderrHook func([]byte)) (*proto.ExecResult, error) {
-	cmd, err := buildCmd(p)
-	if err != nil {
-		return nil, err
-	}
-
-	limit := p.MaxOutputBytes
-	if limit < 0 || int64(limit) > proto.AbsoluteOutputBytes {
-		return nil, limitExceededError("max_output_bytes is outside the hard limit")
-	}
-	if limit == 0 {
-		limit = defaultMaxOutput
-	}
-	timeout, err := proto.ResolveTimeout(p.TimeoutSec, proto.DefaultExecTimeoutSeconds)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(p.Stdin)) > proto.AbsoluteRequestFrameBytes {
-		return nil, limitExceededError("stdin exceeds the hard limit")
-	}
-	stdout := &capWriter{cap: limit, hook: stdoutHook}
-	stderr := &capWriter{cap: limit, hook: stderrHook}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if p.Stdin != "" {
-		cmd.Stdin = strings.NewReader(p.Stdin)
-	}
-
-	// Put the child in its own process group so a timeout kill reaches the
-	// whole tree, not just the immediate child.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	start := time.Now()
-	if err := cmd.Start(); err != nil {
-		return nil, processStartError(err)
-	}
-	pgid := cmd.Process.Pid // Setpgid makes the child's PID the original PGID.
-	exited, stopObserving, observeErr := observeProcessExit(cmd.Process.Pid)
-	if observeErr != nil {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("observe foreground process: %w", observeErr)
-	}
-	defer stopObserving()
-
-	var timedOut bool
-	var canceled bool
-	var timer <-chan time.Time
-	if timeout > 0 {
-		timer = time.After(time.Duration(timeout) * time.Second)
-	}
-	select {
-	case <-exited:
-		err = cmd.Wait()
-	case <-ctx.Done():
-		canceled = true
-		terminateProcessGroup(pgid)
-		err = cmd.Wait()
-		waitProcessGroupGone(pgid)
-		err = ctx.Err()
-	case <-timer:
-		timedOut = true
-		terminateProcessGroup(pgid)
-		err = cmd.Wait()
-		waitProcessGroupGone(pgid)
-	}
-
-	stdoutText, stdoutB64, stdoutRetained := stdout.payload()
-	stderrText, stderrB64, stderrRetained := stderr.payload()
-	stdoutTruncation, _ := proto.NewTruncation(stdout.total, stdoutRetained)
-	stderrTruncation, _ := proto.NewTruncation(stderr.total, stderrRetained)
-	res := &proto.ExecResult{
-		Stdout:           stdoutText,
-		Stderr:           stderrText,
-		StdoutB64:        stdoutB64,
-		StderrB64:        stderrB64,
-		StdoutBytes:      stdout.total,
-		StderrBytes:      stderr.total,
-		Truncated:        stdout.truncated() || stderr.truncated(),
-		StdoutTruncation: stdoutTruncation,
-		StderrTruncation: stderrTruncation,
-		TimedOut:         timedOut,
-		DurationMS:       time.Since(start).Milliseconds(),
-	}
-	if timedOut {
-		res.ExitCode = -1
-		return res, nil
-	}
-	if canceled {
-		res.ExitCode = -1
-		return res, err
-	}
-	// A non-zero exit is data, not a transport error: report it in ExitCode
-	// and let the caller decide. Only failures to *run* the command error out.
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		res.ExitCode = ee.ExitCode()
-	} else if err != nil {
-		return nil, err
-	}
-	return res, nil
-}
-
-var processGroupGrace = 250 * time.Millisecond
-
-// terminateProcessGroup gives cooperative children a brief TERM window, then
-// escalates the original request-owned group independently of leader exit. The
-// leader is deliberately left unreaped by observeProcessExit until this helper
-// returns, keeping its PID/PGID reserved throughout the reuse-sensitive window.
-func terminateProcessGroup(pgid int) {
-	if pgid <= 0 {
-		return
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	timer := time.NewTimer(processGroupGrace)
-	defer timer.Stop()
-	<-timer.C
-	if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
-		return
-	}
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return
-	}
-}
-
-func waitProcessGroupGone(pgid int) {
-	deadline := time.Now().Add(processGroupGrace)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 	if p.Path == "" {
 		return nil, invalidRequestError("read path required")
@@ -613,6 +427,9 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 		return nil, invalidRequestError("read offset must not be negative")
 	}
 	path := expandHome(p.Path)
+	if err := validateBusinessPath(path); err != nil {
+		return nil, invalidRequestError(err.Error())
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -700,6 +517,9 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 		return nil, invalidRequestError("write mode must contain permission bits only")
 	}
 	path := expandHome(p.Path)
+	if err := validateBusinessPath(path); err != nil {
+		return nil, invalidRequestError(err.Error())
+	}
 	if !filepath.IsAbs(path) {
 		path, _ = filepath.Abs(path)
 	}
@@ -762,7 +582,7 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	if err := tmp.Close(); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := replaceFile(tmpPath, path); err != nil {
 		return nil, err
 	}
 	cleanup = false
@@ -771,7 +591,7 @@ func doWrite(p *proto.WriteParams) (*proto.WriteResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := df.Sync(); err != nil {
+	if err := syncDataDirectory(df); err != nil {
 		_ = df.Close()
 		return nil, err
 	}
@@ -842,7 +662,7 @@ func doAppend(path string, data []byte, mode os.FileMode, explicitMode bool) (*p
 		if err != nil {
 			return nil, err
 		}
-		if err := df.Sync(); err != nil {
+		if err := syncDataDirectory(df); err != nil {
 			_ = df.Close()
 			return nil, err
 		}
@@ -906,6 +726,9 @@ func doList(p *proto.ListParams) (*proto.ListResult, error) {
 		return nil, invalidRequestError("list parameters required")
 	}
 	path := expandHome(p.Path)
+	if err := validateBusinessPath(path); err != nil {
+		return nil, invalidRequestError(err.Error())
+	}
 	if path == "" {
 		path = "."
 	}

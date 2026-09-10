@@ -28,6 +28,9 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 	if err != nil {
 		return err
 	}
+	if err := validatePlatformManifest(plan.Source); err != nil {
+		return err
+	}
 	if err := ValidatePlan(plan); err != nil {
 		return err
 	}
@@ -35,7 +38,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 	if err != nil {
 		return err
 	}
-	if staged.Digest != plan.Source.Digest {
+	if !platformManifestEqual(staged, plan.Source) {
 		return ErrChanged
 	}
 	current, err := Inspect(ctx, destination, limits)
@@ -55,7 +58,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 		return err
 	}
 	defer parent.Close()
-	parentInfo, err := parent.Stat(".")
+	parentInfo, err := nativeRootStat(parent, ".", true)
 	if err != nil || fileIdentity(parentInfo) != plan.Destination.ParentID {
 		return ErrChanged
 	}
@@ -73,7 +76,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 	}
 	defer dest.Close()
 	if current.Exists {
-		info, err := dest.Stat(".")
+		info, err := nativeRootStat(dest, ".", true)
 		if err != nil || fileIdentity(info) != current.RootID {
 			return ErrChanged
 		}
@@ -86,7 +89,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 			if name == "" {
 				name = "."
 			}
-			info, err := dest.Lstat(name)
+			info, err := nativeRootStat(dest, name, false)
 			if err != nil {
 				return err
 			}
@@ -102,7 +105,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 			if name == "." {
 				break
 			}
-			info, err := dest.Lstat(name)
+			info, err := nativeRootStat(dest, name, false)
 			if err != nil || !info.IsDir() || identities[name] != "" && fileIdentity(info) != identities[name] {
 				return nil, "", ErrChanged
 			}
@@ -115,7 +118,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 		if err != nil {
 			return nil, "", err
 		}
-		info, err := p.Stat(".")
+		info, err := nativeRootStat(p, ".", true)
 		if err != nil || identities[parentName] != "" && fileIdentity(info) != identities[parentName] {
 			p.Close()
 			return nil, "", ErrChanged
@@ -139,7 +142,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 		}
 		err = verifyEntry(ctx, p, name, *change.Before, change.Before.Kind == "directory")
 		if err == nil && change.Before.Kind == "directory" {
-			info, statErr := p.Lstat(name)
+			info, statErr := nativeRootStat(p, name, false)
 			if statErr != nil || fileIdentity(info) != identities[change.Path] {
 				err = ErrChanged
 			}
@@ -174,7 +177,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 		}
 		if before != nil {
 			err = verifyEntry(ctx, p, name, *before, before.Kind == "directory")
-		} else if _, e := p.Lstat(name); !errors.Is(e, os.ErrNotExist) {
+		} else if _, e := nativeRootStat(p, name, false); !errors.Is(e, os.ErrNotExist) {
 			err = ErrChanged
 		}
 		if err == nil {
@@ -184,7 +187,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 					err = p.Mkdir(name, 0700)
 				}
 				if err == nil {
-					info, e := p.Lstat(name)
+					info, e := nativeRootStat(p, name, false)
 					err = e
 					if e == nil {
 						identities[change.Path] = fileIdentity(info)
@@ -232,7 +235,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 		if name == "" {
 			name = "."
 		}
-		info, err := dest.Lstat(name)
+		info, err := nativeRootStat(dest, name, false)
 		if err != nil || !info.IsDir() {
 			return ErrChanged
 		}
@@ -265,14 +268,7 @@ func Apply(ctx context.Context, source, destination string, plan Plan, limits Li
 func sameSnapshot(a, b Snapshot) bool {
 	return a.Exists == b.Exists && a.ParentID == b.ParentID && a.RootID == b.RootID && a.Identity == b.Identity && a.Manifest.Digest == b.Manifest.Digest
 }
-func syncRoot(root *os.Root) error {
-	f, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
-}
+
 func temporaryName() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -281,7 +277,7 @@ func temporaryName() (string, error) {
 	return ".rdev-sync-" + hex.EncodeToString(b[:]), nil
 }
 func verifyEntry(ctx context.Context, root *os.Root, name string, expected Entry, directory bool) error {
-	info, err := root.Lstat(name)
+	info, err := nativeRootStat(root, name, false)
 	if err != nil {
 		return ErrChanged
 	}
@@ -357,7 +353,7 @@ func publishFile(ctx context.Context, source, dest *os.Root, name string, entry 
 	if err != nil {
 		return err
 	}
-	err = fresh.Sync()
+	err = syncReadableFile(fresh)
 	fresh.Close()
 	if err != nil {
 		return err
@@ -365,7 +361,7 @@ func publishFile(ctx context.Context, source, dest *os.Root, name string, entry 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return dest.Rename(tmp, name)
+	return renameInRoot(dest, tmp, name)
 }
 
 func ValidatePlan(plan Plan) error {

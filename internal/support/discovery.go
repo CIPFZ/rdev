@@ -71,6 +71,13 @@ func (d *Discovery) SetRuntime(probe *proto.CapabilityResult) {
 		}
 	}
 	r := &Runtime{Features: append([]proto.Feature(nil), probe.Features...), ProbeVersion: probe.ProbeVersion, ProbedAt: probe.ProbedAt, Platform: p, CgroupDetected: probe.Cgroup, RlimitDetected: probe.Rlimit, WallTimeoutMaxSec: probe.Resources.WallTimeoutSec}
+	if probe.OS == "windows" {
+		d.Frontends = append(d.Frontends,
+			Boundary{Name: "posix_login_shell", Status: "unsupported", Alternative: "invoke powershell.exe or pwsh.exe explicitly"},
+			Boundary{Name: "remote_rsync", Status: "unsupported", Alternative: "use shared broker sync -prepare/-plan"},
+			Boundary{Name: "windows_sync", Status: "experimental", Scope: "local drives; regular files/directories; POSIX mode bits are best effort; reparse points and case-colliding names are refused"},
+			Boundary{Name: "windows_detached_jobs", Status: "experimental", Scope: "requires successful breakaway from the SSH session job; TERM requests supervisor cancellation, not POSIX signal delivery"})
+	}
 	// A detected cgroup hierarchy does not mean rdev can enforce tree budgets.
 	// Probe v1 agents reject these resource envelopes even on Linux cgroup v2.
 	for _, name := range []string{"cpu", "memory", "pids"} {

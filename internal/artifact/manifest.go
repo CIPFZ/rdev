@@ -16,7 +16,7 @@ const SignatureNamespace = "rdev-release"
 const ManifestName = "release.json"
 const SignatureName = "release.json.sig"
 
-var BinaryNames = []string{"rdev", "rdevd", "rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64"}
+var BinaryNames = []string{"rdev", "rdevd", "rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64", "rdev-agent-windows-amd64"}
 var MetadataNames = []string{"manifest.json", "sbom.cdx.json", "provenance.intoto.json", "THIRD_PARTY_NOTICES.txt"}
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var commitPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
@@ -81,14 +81,14 @@ func (m Manifest) Validate(now time.Time) error {
 	if m.IssuedAt.IsZero() || m.IssuedAt.After(now) || !m.ExpiresAt.After(now) || !m.ExpiresAt.After(m.IssuedAt) || m.ExpiresAt.Sub(m.IssuedAt) > 90*24*time.Hour {
 		return errors.New("release expired, not yet valid, or validity exceeds 90 days")
 	}
-	if len(m.Binaries) != len(BinaryNames) || len(m.Metadata) != len(MetadataNames) {
+	if (len(m.Binaries) != 6 && len(m.Binaries) != len(BinaryNames)) || len(m.Metadata) != len(MetadataNames) {
 		return errors.New("incomplete release")
 	}
 	for i, b := range m.Binaries {
 		if b.Name != BinaryNames[i] || !validFile(b.File) {
 			return errors.New("invalid or duplicate binary")
 		}
-		if (b.GOOS != "linux" && b.GOOS != "darwin") || (b.GOARCH != "amd64" && b.GOARCH != "arm64") {
+		if (b.GOOS != "linux" && b.GOOS != "darwin" && !(i >= 2 && b.GOOS == "windows" && b.GOARCH == "amd64")) || (b.GOARCH != "amd64" && b.GOARCH != "arm64") {
 			return errors.New("unsupported artifact platform")
 		}
 		if i >= 2 && b.Name != "rdev-agent-"+b.GOOS+"-"+b.GOARCH {

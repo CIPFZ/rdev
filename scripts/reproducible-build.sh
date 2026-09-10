@@ -25,7 +25,7 @@ for rdev_repro_copy in first second; do
 done
 python3 - "$rdev_repro_out" "$rdev_repro_source" "$rdev_repro_version" "$rdev_repro_started" <<'PY'
 import hashlib,json,pathlib,sys,datetime
-root=pathlib.Path(sys.argv[1]); paths=['bin/rdev','bin/rdevd']+['cmd/rdev/agents/rdev-agent-'+p for p in ['linux-amd64','linux-arm64','darwin-amd64','darwin-arm64']]
+root=pathlib.Path(sys.argv[1]); paths=['bin/rdev','bin/rdevd']+['cmd/rdev/agents/rdev-agent-'+p for p in ['linux-amd64','linux-arm64','darwin-amd64','darwin-arm64','windows-amd64']]
 rows=[]
 for p in paths:
     digests=[]

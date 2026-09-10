@@ -21,7 +21,7 @@ rdev ping dev
 rdev exec dev -- printf '%s\n' '中文 "quoted" $(not-run)'
 ```
 
-首次连接自动选择并上传 agent，无需远端安装 Go。远端 bootstrap 使用 POSIX shell、`uname`、`dd`、`chmod`、`mv` 及 SHA-256 工具。SSH host key 和认证由用户管理。
+首次连接自动选择并上传 agent，无需远端安装 Go。Linux/macOS bootstrap 使用 POSIX shell、`uname`、`dd`、`chmod`、`mv` 及 SHA-256 工具；实验性的 Windows amd64 远端使用 OpenSSH Server 与 Windows PowerShell 5.1。SSH host key 和认证由用户管理。Windows 操作及验收边界见 [Phase9](docs/phase9-acceptance.md)。
 
 多人或多个 AI 客户端共享主机时，按 [rdevd 运维说明](docs/rdevd-operations.md) 配置 daemon、principal 凭证和默认拒绝的 policy。客户端设置 `RDEV_BROKER_SOCKET`、`RDEV_CLIENT_ID`、`RDEV_PROJECT_ID`、`RDEV_PRINCIPAL_TOKEN` 后，同一 CLI 或 `rdev serve` 使用共享模式。身份令牌只证明身份，不自动授予业务权限；管理员签名密钥不能交给客户端。
 
@@ -211,7 +211,7 @@ rdev secrets check dev apptoken -path '~/.config/myapp/token' -- env
 | Linux arm64 | build-only | build-only |
 | macOS arm64 | 历史开发基线；本次 shared runtime 未验证 | build-only |
 | macOS amd64 | build-only | build-only |
-| 原生 Windows | unsupported | unsupported |
+| 原生 Windows amd64 | unsupported | Phase9 实验实现；交叉构建通过，原生运行与真实 SSH 验收待完成 |
 
 **macOS runtime 尚未验证，已由用户明确延期；交叉编译不算实测。** Darwin 配置的 fd-native ACL 检查依赖 cgo，无该能力时 fail closed。OpenSSH 需要 `BatchMode`、`ControlMaster`、`ControlPath`、`ControlPersist`；最低版本尚未完成正式认证。复杂 ProxyCommand 是实验能力；PTY/TUI、通用端口转发、完整 ACL/xattr/owner 保真和 remote-to-remote sync 不在当前支持范围。
 

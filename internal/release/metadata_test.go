@@ -54,7 +54,7 @@ func TestSBOMIncludesEmbeddedAgentsAndActualPerBinaryDependencies(t *testing.T) 
 	b := sbom(m)
 	edges := b["dependencies"].([]object)
 	cli := edges[0]["dependsOn"].([]string)
-	if len(cli) != 6 {
+	if len(cli) != 2+len(AgentNames) {
 		t.Fatalf("missing CLI embedded or library edges: %v", cli)
 	}
 	for _, edge := range edges[1:] {

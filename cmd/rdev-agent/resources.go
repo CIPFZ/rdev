@@ -24,9 +24,8 @@ func effectiveEnvelope(requested *proto.ResourceEnvelope) (proto.ResourceEnvelop
 		if requested.FDs <= 0 {
 			return out, fmt.Errorf("fd limit must be positive")
 		}
-		var lim syscall.Rlimit
-		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim); err != nil || uint64(requested.FDs) > lim.Max {
-			return out, fmt.Errorf("requested fd limit exceeds enforceable hard limit")
+		if err := validateFDLimit(requested.FDs); err != nil {
+			return out, err
 		}
 		out.FDs = requested.FDs
 	}

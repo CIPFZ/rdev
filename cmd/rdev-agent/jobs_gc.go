@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/storage"
@@ -121,7 +120,7 @@ func planStorageGC(state string, scope storage.ScopePolicy, options GCOptions) (
 		report.Scanned++
 		dir := filepath.Join(root, entry.Name())
 		st, statErr := os.Lstat(dir)
-		if statErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+		if statErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !ownedPath(dir, st) {
 			report.Skipped = append(report.Skipped, entry.Name())
 			continue
 		}
@@ -263,7 +262,7 @@ func runStorageGC(state string, scope storage.ScopePolicy, options GCOptions) (*
 		dir := filepath.Join(report.Root, item.ID)
 		locked, lockErr := tryJobLock(dir, func() error {
 			st, statErr := os.Lstat(dir)
-			if statErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+			if statErr != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !ownedPath(dir, st) {
 				return errGCSkip
 			}
 			meta, metaErr := readMeta(dir)
@@ -389,7 +388,7 @@ func managedJobSize(dir string) (int64, error) {
 		if err != nil {
 			return err
 		}
-		if st.Mode()&os.ModeSymlink != 0 || !pathOwnedByCurrentUser(st) {
+		if st.Mode()&os.ModeSymlink != 0 || !ownedPath(path, st) {
 			return fmt.Errorf("unsafe job entry %s", path)
 		}
 		if entry.IsDir() {
@@ -409,7 +408,7 @@ func managedJobSize(dir string) (int64, error) {
 
 func managedJobName(name string) bool {
 	switch name {
-	case "meta.json", "status.json", "child.json", "ledger.json", "stdout", "stderr", "storage-policy.json", "storage-metrics.json":
+	case "meta.json", "status.json", "child.json", "ledger.json", "stdout", "stderr", "storage-policy.json", "storage-metrics.json", "supervisor-ready.json", "stop.json":
 		return true
 	default:
 		return false
@@ -436,12 +435,4 @@ func safeTreeSize(root string) (int64, error) {
 		return nil
 	})
 	return total, err
-}
-
-func filesystemFreeBytes(path string) int64 {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return -1
-	}
-	return int64(st.Bavail) * int64(st.Bsize)
 }

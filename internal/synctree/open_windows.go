@@ -1,8 +1,15 @@
 package synctree
 
-import "os"
+import (
+	"github.com/CIPFZ/rdev/internal/winutil"
+	"os"
+	"path/filepath"
+)
 
 func openEntry(root *os.Root, name string, directory, follow bool) (*os.File, error) {
+	if err := winutil.ValidatePath(filepath.Join(root.Name(), name)); err != nil {
+		return nil, err
+	}
 	if !follow {
 		info, err := root.Lstat(name)
 		if err != nil {
@@ -14,6 +21,10 @@ func openEntry(root *os.Root, name string, directory, follow bool) (*os.File, er
 	}
 	f, err := root.Open(name)
 	if err != nil {
+		return nil, err
+	}
+	if err := winutil.CheckHandle(f, false); err != nil {
+		f.Close()
 		return nil, err
 	}
 	info, err := f.Stat()

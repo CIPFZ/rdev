@@ -59,7 +59,7 @@
     "binaries": {
       "type": "array",
       "minItems": 6,
-      "maxItems": 6,
+      "maxItems": 7,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -80,7 +80,8 @@
           "goos": {
             "enum": [
               "linux",
-              "darwin"
+              "darwin",
+              "windows"
             ]
           },
           "goarch": {

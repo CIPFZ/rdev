@@ -1,6 +1,14 @@
 GO ?= $(HOME)/sdk/go1.25.0/bin/go
+.DEFAULT_GOAL := all
 AGENT_DIR := cmd/rdev/agents
-PLATFORMS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64
+PLATFORMS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
+
+.PHONY: windows-remote-smoke
+# Run from a supported controller with a configured, host-key-verified Windows
+# SSH alias. Creates and removes one isolated remote test namespace.
+windows-remote-smoke:
+	@test -n "$$RDEV_WINDOWS_SSH"
+	RDEV_WINDOWS_AGENT='$(CURDIR)/cmd/rdev/agents/rdev-agent-windows-amd64' $(GO) test ./internal/transport -run '^TestWindowsRemoteSSH$$' -count=1 -timeout=5m -v
 
 # Build identity, stamped into both binaries so a running one can say what it is.
 #

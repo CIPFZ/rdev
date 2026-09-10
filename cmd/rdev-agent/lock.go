@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Per-job locking.
 //
 // Job records are shared mutable state with more than one writer. Two sources of

@@ -11,7 +11,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -43,7 +42,7 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	if err := secureRecordFile(path); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(path)
+	f, err := openJobLog(path)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +94,7 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 			if err := f.Close(); err != nil {
 				return err
 			}
-			f, err = os.Open(path)
+			f, err = openJobLog(path)
 			if err != nil {
 				return err
 			}
@@ -200,7 +199,7 @@ func readTailStatus(path string, n int) (string, bool, int64, error) {
 	if n < 1 {
 		n = 1
 	}
-	f, err := os.Open(path)
+	f, err := openJobLog(path)
 	if err != nil {
 		return "", false, 0, err
 	}

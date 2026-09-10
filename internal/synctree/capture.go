@@ -26,7 +26,7 @@ func Capture(ctx context.Context, source, privateParent, policy string, limits L
 	if err != nil {
 		return "", Manifest{}, err
 	}
-	info, err := os.Lstat(abs)
+	info, err := nativeLstatPath(abs)
 	if err != nil {
 		return "", Manifest{}, err
 	}
@@ -85,7 +85,7 @@ func Capture(ctx context.Context, source, privateParent, policy string, limits L
 		if err != nil {
 			return "", Manifest{}, err
 		}
-		opened, err := f.Stat()
+		opened, err := nativeStatFile(f)
 		if err != nil || opened.Size() != entry.Size || uint32(opened.Mode()) != entry.Mode || opened.ModTime().UnixNano() != entry.ModifiedNS {
 			f.Close()
 			return "", Manifest{}, ErrChanged
@@ -100,7 +100,7 @@ func Capture(ctx context.Context, source, privateParent, policy string, limits L
 		n, copyErr := io.CopyBuffer(io.MultiWriter(out, h), &contextReader{ctx: ctx, reader: io.LimitReader(f, entry.Size)}, buffer)
 		var extra [1]byte
 		k, endErr := f.Read(extra[:])
-		after, statErr := f.Stat()
+		after, statErr := nativeStatFile(f)
 		f.Close()
 		if copyErr == nil && (n != entry.Size || k != 0 || endErr != io.EOF || statErr != nil || !sameInfo(opened, after) || hex.EncodeToString(h.Sum(nil)) != entry.Digest) {
 			copyErr = ErrChanged
@@ -155,19 +155,6 @@ func Capture(ctx context.Context, source, privateParent, policy string, limits L
 
 // PrivateDirectory refuses symlink, public and foreign-owned managed roots.
 // It creates only the final component; callers select an already private parent.
-func PrivateDirectory(path string) error {
-	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode().Perm() != 0700 || !ownedByCurrentUser(info) {
-		return errors.New("sync state requires a private owned directory")
-	}
-	return nil
-}
 
 // RemoveCaptured reopens only directories under a managed private stage and
 // restores owner write access before cleanup. Retained source permissions may
@@ -198,7 +185,7 @@ func RemoveCaptured(path string) error {
 		for {
 			names, readErr := f.Readdirnames(32)
 			for _, name := range names {
-				info, err := dir.Lstat(name)
+				info, err := nativeRootStat(dir, name, false)
 				if err != nil {
 					return err
 				}

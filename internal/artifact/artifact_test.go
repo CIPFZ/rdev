@@ -17,6 +17,11 @@ import (
 
 func signedFixture(t *testing.T) (string, Policy, Manifest, string) {
 	t.Helper()
+	return signedFixturePlatforms(t, BinaryNames)
+}
+
+func signedFixturePlatforms(t *testing.T, binaryNames []string) (string, Policy, Manifest, string) {
+	t.Helper()
 	t.Setenv("TMPDIR", "/tmp")
 	if _, e := exec.LookPath("ssh-keygen"); e != nil {
 		t.Fatal("OpenSSH ssh-keygen required for actual SSHSIG tests")
@@ -59,7 +64,7 @@ func signedFixture(t *testing.T) (string, Policy, Manifest, string) {
 	}
 	m.Source.Commit = strings.TrimSpace(string(rev))
 	local := LocalEvidence{SchemaVersion: 1, Source: m.Source, Compatibility: fixtureCompatibility(), Evidence: map[string]string{}}
-	for i, name := range BinaryNames {
+	for i, name := range binaryNames {
 		osys, arch := "linux", "amd64"
 		if i >= 2 {
 			parts := strings.Split(name, "-")
@@ -151,6 +156,16 @@ func TestRealSSHSIGBundleAndTamper(t *testing.T) {
 				t.Fatal("tampered bytes accepted")
 			}
 		})
+	}
+}
+
+func TestHistoricalSixBinarySignedBundle(t *testing.T) {
+	// Phase 8 releases contain four agents. Adding Windows to current bundles
+	// must not invent a Windows SBOM edge or invalidate their signed metadata.
+	dir, policy, manifest, _ := signedFixturePlatforms(t, BinaryNames[:6])
+	verified, decision, err := VerifyBundle(context.Background(), dir, policy, time.Now())
+	if err != nil || decision.Unsigned || !decision.TestRoot || len(verified.Binaries) != len(manifest.Binaries) {
+		t.Fatalf("historical signed bundle: %+v %v", decision, err)
 	}
 }
 func TestTrustedPolicyCannotBeReplacedBySignerClaim(t *testing.T) {

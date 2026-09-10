@@ -16,6 +16,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-remote:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.26.8'
+          cache: true
+      - name: Build native remote agent and bind runtime identity
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = '0'
+          $agent = Join-Path $env:RUNNER_TEMP 'rdev-agent.exe'
+          go build -trimpath -o $agent ./cmd/rdev-agent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RDEV_WINDOWS_AGENT=$agent" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/rdev-windows-evidence" | Out-Null
+          Get-ComputerInfo -Property WindowsProductName,WindowsVersion,OsBuildNumber | ConvertTo-Json > "$env:RUNNER_TEMP/rdev-windows-evidence/platform.json"
+          go version > "$env:RUNNER_TEMP/rdev-windows-evidence/toolchain.txt"
+          Get-FileHash -Algorithm SHA256 $agent | ConvertTo-Json > "$env:RUNNER_TEMP/rdev-windows-evidence/agent.json"
+      - name: Native ACL, process trees, protocol, jobs, sync and install recovery
+        shell: pwsh
+        run: |
+          go test -json -count=1 -timeout=10m ./internal/winutil ./internal/windowsruntime ./internal/agentinstall > "$env:RUNNER_TEMP/rdev-windows-evidence/tests.jsonl"
+          exit $LASTEXITCODE
+      - name: Windows PowerShell bootstrap and binary pipe inheritance
+        shell: pwsh
+        run: |
+          go test -json -count=1 -timeout=5m ./internal/transport -run '^TestWindows' > "$env:RUNNER_TEMP/rdev-windows-evidence/bootstrap.jsonl"
+          exit $LASTEXITCODE
+      - name: Retain Windows runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-remote-runtime
+          path: ${{ runner.temp }}/rdev-windows-evidence
+          retention-days: 14
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -214,11 +254,11 @@ jobs:
           source = os.environ["GITHUB_SHA"]
           assert re.fullmatch(r"[0-9a-f]{40}", source)
           assert manifest["source"]["commit"] == source and manifest["source"]["dirty"] is False
-          names = ["rdev", "rdevd", "rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64"]
-          assert len(manifest["artifacts"]) == 6 and {a["name"] for a in manifest["artifacts"]} == set(names)
+          names = ["rdev", "rdevd", "rdev-agent-linux-amd64", "rdev-agent-linux-arm64", "rdev-agent-darwin-amd64", "rdev-agent-darwin-arm64", "rdev-agent-windows-amd64"]
+          assert len(manifest["artifacts"]) == len(names) and {a["name"] for a in manifest["artifacts"]} == set(names)
           actual = {name: hashlib.sha256((release / name).read_bytes()).hexdigest() for name in names}
           assert all(actual[a["name"]] == a["sha256"] for a in manifest["artifacts"])
-          assert repro["source_commit"] == source and repro["result"] == "passed" and len(repro["artifacts"]) == 6
+          assert repro["source_commit"] == source and repro["result"] == "passed" and len(repro["artifacts"]) == len(names)
           assert {pathlib.PurePosixPath(a["path"]).name for a in repro["artifacts"]} == set(names)
           assert all(a["first_sha256"] == a["second_sha256"] == actual[pathlib.PurePosixPath(a["path"]).name] for a in repro["artifacts"])
           metadata = ["manifest.json", "sbom.cdx.json", "provenance.intoto.json", "THIRD_PARTY_NOTICES.txt"]

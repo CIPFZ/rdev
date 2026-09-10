@@ -34,13 +34,15 @@ GOBIN="$RDEV_RELEASE_TOOLS" "$RDEV_RELEASE_GO" install "golang.org/x/vuln/cmd/go
 make GO="$RDEV_RELEASE_GO" VERSION="${RDEV_RELEASE_TAG:-0.1.0-dev.0}" all daemon
 cp bin/rdevd "$RDEV_RELEASE_OUT/rdevd"
 cp bin/rdev "$RDEV_RELEASE_OUT/rdev"
-for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64; do
     cp "cmd/rdev/agents/rdev-agent-$platform" "$RDEV_RELEASE_OUT/rdev-agent-$platform"
     report="$RDEV_RELEASE_OUT/govulncheck-source-$platform.json"
-    GOOS=${platform%-*} GOARCH=${platform#*-} CGO_ENABLED=0 "$RDEV_RELEASE_TOOLS/govulncheck" -json ./... > "$report"
+    rdev_audit_packages=./...
+    case "$platform" in windows-*) rdev_audit_packages=./cmd/rdev-agent ;; esac
+    GOOS=${platform%-*} GOARCH=${platform#*-} CGO_ENABLED=0 "$RDEV_RELEASE_TOOLS/govulncheck" -json "$rdev_audit_packages" > "$report"
     "$RDEV_RELEASE_TOOLS/releasecheck" audit "$report"
 done
-for artifact in rdev rdevd rdev-agent-linux-amd64 rdev-agent-linux-arm64 rdev-agent-darwin-amd64 rdev-agent-darwin-arm64; do
+for artifact in rdev rdevd rdev-agent-linux-amd64 rdev-agent-linux-arm64 rdev-agent-darwin-amd64 rdev-agent-darwin-arm64 rdev-agent-windows-amd64; do
     report="$RDEV_RELEASE_OUT/govulncheck-binary-$artifact.json"
     "$RDEV_RELEASE_TOOLS/govulncheck" -mode=binary -json "$RDEV_RELEASE_OUT/$artifact" > "$report"
     "$RDEV_RELEASE_TOOLS/releasecheck" audit "$report"

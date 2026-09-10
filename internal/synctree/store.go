@@ -79,11 +79,11 @@ func (s *Store) WithLock(ctx context.Context, fn func() error) error {
 	return fn()
 }
 func readPrivateJSON(path string, out any) error {
-	info, err := os.Lstat(path)
+	info, err := nativeLstatPath(path)
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !ownedByCurrentUser(info) || info.Size() > 4<<20 {
+	if !info.Mode().IsRegular() || !privateInfo(info, 0600) || info.Size() > 4<<20 {
 		return ErrStage
 	}
 	parent, err := os.OpenRoot(filepath.Dir(path))
@@ -96,7 +96,7 @@ func readPrivateJSON(path string, out any) error {
 		return err
 	}
 	defer f.Close()
-	opened, err := f.Stat()
+	opened, err := nativeStatFile(f)
 	if err != nil || !sameInfo(info, opened) {
 		return ErrStage
 	}
@@ -147,7 +147,7 @@ func writePrivateJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	if err := root.Rename(tmp, filepath.Base(path)); err != nil {
+	if err := renameInRoot(root, tmp, filepath.Base(path)); err != nil {
 		return err
 	}
 	return syncRoot(root)
@@ -170,16 +170,19 @@ func (s *Store) load(owner, id string) (Stage, string, error) {
 	return stage, dir, nil
 }
 func privateExistingDirectory(path string) error {
-	info, err := os.Lstat(path)
+	info, err := nativeLstatPath(path)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode().Perm() != 0700 || !ownedByCurrentUser(info) {
+	if !info.IsDir() || !privateInfo(info, 0700) {
 		return ErrStage
 	}
 	return nil
 }
 func (s *Store) reserve(owner, id string, manifest Manifest) (Stage, string, error) {
+	if err := validatePlatformManifest(manifest); err != nil {
+		return Stage{}, "", err
+	}
 	if err := ValidateManifest(manifest); err != nil {
 		return Stage{}, "", err
 	}
@@ -216,7 +219,7 @@ func (s *Store) reserve(owner, id string, manifest Manifest) (Stage, string, err
 		if err := readPrivateJSON(filepath.Join(path, "meta.json"), &old); err != nil {
 			// A crash between mkdir and metadata publication leaves an orphan.
 			// Charge its slot until TTL rather than blocking every other owner.
-			info, statErr := os.Lstat(path)
+			info, statErr := nativeLstatPath(path)
 			if statErr != nil {
 				return Stage{}, "", statErr
 			}
@@ -276,7 +279,7 @@ func (s *Store) Capture(ctx context.Context, owner, id, source, policy string) (
 			return err
 		}
 		stage.Manifest = m
-		info, e := os.Lstat(source)
+		info, e := nativeLstatPath(source)
 		if e != nil {
 			return e
 		}
@@ -383,13 +386,16 @@ func (s *Store) Put(ctx context.Context, owner, id string, index int, offset int
 			return err
 		}
 		defer f.Close()
-		info, err := f.Stat()
+		info, err := nativeStatFile(f)
 		if err != nil || !info.Mode().IsRegular() || info.Size() != entry.Size {
 			return ErrStage
 		}
 		n, err := f.WriteAt(data, offset)
 		if err == nil && n != len(data) {
 			err = io.ErrShortWrite
+		}
+		if err == nil {
+			err = syncWrittenChunk(f)
 		}
 		return err
 	})
@@ -437,7 +443,7 @@ func (s *Store) Seal(ctx context.Context, owner, id string) (Stage, error) {
 				if err != nil {
 					return err
 				}
-				err = f.Sync()
+				err = syncReadableFile(f)
 				f.Close()
 				if err != nil {
 					return err
@@ -448,7 +454,7 @@ func (s *Store) Seal(ctx context.Context, owner, id string) (Stage, error) {
 		if err != nil {
 			return err
 		}
-		if m.Digest != stage.Manifest.Digest {
+		if !platformManifestEqual(m, stage.Manifest) {
 			return ErrChanged
 		}
 		stage.Ready = true

@@ -6,7 +6,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +16,6 @@ import (
 	"github.com/CIPFZ/rdev/internal/proto"
 	statepkg "github.com/CIPFZ/rdev/internal/state"
 	"github.com/CIPFZ/rdev/internal/storage"
-	"golang.org/x/sys/unix"
 )
 
 // External storage reports intentionally use stable scope-relative labels.
@@ -31,41 +29,6 @@ const storageReportMetrics = "storage-metrics.json"
 // parallel inside one agent process, so serialize the transaction to avoid
 // losing counters or pressure transitions to a stale writer.
 var storageMetricsUpdateMu sync.Mutex
-
-func tryStorageMetricsLock(state string, fn func()) bool {
-	if err := secureDir(state, 0o700); err != nil {
-		return false
-	}
-	path := filepath.Join(state, ".storage-metrics.lock")
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return false
-	}
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = unix.Close(fd)
-		return false
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
-		return false
-	}
-	if st.Mode().Perm() != 0o600 && f.Chmod(0o600) != nil {
-		return false
-	}
-	// Metrics are best effort and must never delay GC behind another agent.
-	// Skipping one contested sample is preferable to blocking a user operation.
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-			return false
-		}
-		return false
-	}
-	defer unix.Flock(fd, unix.LOCK_UN)
-	fn()
-	return true
-}
 
 func storageScope(p *proto.StorageParams) (storage.ScopePolicy, string, error) {
 	if p == nil {
@@ -84,7 +47,7 @@ func storageScope(p *proto.StorageParams) (storage.ScopePolicy, string, error) {
 func loadStoragePolicy(state string) (storage.Policy, string, error) {
 	path := filepath.Join(state, "storage-policy.json")
 	if st, err := os.Lstat(path); err == nil {
-		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !ownedPath(path, st) {
 			return storage.Policy{}, path, fmt.Errorf("storage policy is not a private owned regular file")
 		}
 	} else if !os.IsNotExist(err) {
@@ -109,7 +72,7 @@ func readMetaReadOnly(dir string) (*jobMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !ownedPath(path, st) {
 		return nil, fmt.Errorf("%s is not an owned regular file", path)
 	}
 	if st.Size() > statepkg.MaxMetadataBytes {
@@ -157,7 +120,7 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 	if err != nil {
 		return nil, err
 	}
-	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() || !pathOwnedByCurrentUser(rootInfo) {
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() || !ownedPath(root, rootInfo) {
 		return nil, fmt.Errorf("job root is not a private directory")
 	}
 	used, err := safeTreeSize(root)
@@ -178,7 +141,7 @@ func storageStatus(p *proto.StorageParams, state string) (*proto.StorageScope, e
 		}
 		dir := filepath.Join(root, e.Name())
 		st, e1 := os.Lstat(dir)
-		if e1 != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+		if e1 != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !ownedPath(dir, st) {
 			continue
 		}
 		meta, e1 := readMetaReadOnly(dir)
@@ -323,12 +286,12 @@ func storageLedgerMetrics(state string) storage.LogMetrics {
 			}
 			dir := filepath.Join(root, e.Name())
 			dirInfo, err := os.Lstat(dir)
-			if err != nil || dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() || !pathOwnedByCurrentUser(dirInfo) {
+			if err != nil || dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() || !ownedPath(dir, dirInfo) {
 				continue
 			}
 			path := filepath.Join(dir, "ledger.json")
 			st, err := os.Lstat(path)
-			if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+			if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !ownedPath(path, st) {
 				continue
 			}
 			var raw struct {
@@ -358,7 +321,7 @@ func storageLedgerMetrics(state string) storage.LogMetrics {
 
 func loadStorageMetricsReadOnly(state string) storage.MetricsSnapshot {
 	path := filepath.Join(state, storageReportMetrics)
-	if st, err := os.Lstat(path); err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !pathOwnedByCurrentUser(st) {
+	if st, err := os.Lstat(path); err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || !ownedPath(path, st) {
 		return storage.NewMetricsSnapshot()
 	}
 	snap, err := storage.LoadMetrics(path)
@@ -386,7 +349,7 @@ func updateStorageMetrics(path, state, scopeName string, scope storage.ScopePoli
 func updateStorageMetricsLocked(path, state, scopeName string, scope storage.ScopePolicy, report *GCReport, duration time.Duration) *proto.StorageMetrics {
 
 	snap := storage.NewMetricsSnapshot()
-	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink == 0 && st.Mode().IsRegular() && pathOwnedByCurrentUser(st) {
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink == 0 && st.Mode().IsRegular() && ownedPath(path, st) {
 		if loaded, loadErr := storage.LoadMetrics(path); loadErr == nil {
 			snap = loaded
 		}
@@ -497,26 +460,26 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 	}
 	report.Root = storageReportRoot
 	stateInfo, stateErr := os.Lstat(stateAbs)
-	if stateErr != nil || stateInfo.Mode()&os.ModeSymlink != 0 || !stateInfo.IsDir() || !pathOwnedByCurrentUser(stateInfo) {
+	if stateErr != nil || stateInfo.Mode()&os.ModeSymlink != 0 || !stateInfo.IsDir() || !ownedPath(stateAbs, stateInfo) {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "state_root_invalid", Severity: "error", Path: "state", Message: "state root is missing, not a private owned directory, or is a symlink", Action: "create a private owner-only state directory"})
 		return report, nil
 	}
-	if stateInfo.Mode().Perm() != 0o700 {
+	if !platformPrivateMode(stateInfo, 0o700) {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "state_root_permissions", Severity: "warning", Path: "state", Message: "state root permissions are broader than 0700", Action: "chmod the state root to 0700"})
 	}
 	root := filepath.Join(stateAbs, "jobs")
 	jobRootInfo, jobRootErr := os.Lstat(root)
-	if jobRootErr != nil || jobRootInfo.Mode()&os.ModeSymlink != 0 || !jobRootInfo.IsDir() || !pathOwnedByCurrentUser(jobRootInfo) {
+	if jobRootErr != nil || jobRootInfo.Mode()&os.ModeSymlink != 0 || !jobRootInfo.IsDir() || !ownedPath(root, jobRootInfo) {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_root_invalid", Severity: "error", Path: storageReportRoot, Message: "jobs root is missing, not a private owned directory, or is a symlink", Action: "create or repair the jobs root with owner-only permissions"})
 		return report, nil
 	}
-	if jobRootInfo.Mode().Perm() != 0o700 {
+	if !platformPrivateMode(jobRootInfo, 0o700) {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_root_permissions", Severity: "warning", Path: storageReportRoot, Message: "jobs root permissions are broader than 0700", Action: "chmod the jobs root to 0700"})
 	}
 	if _, _, err := loadStoragePolicy(state); err != nil {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "policy_invalid", Severity: "error", Path: storageReportPolicy, Message: err.Error(), Action: "restore a valid policy or remove the file to use defaults"})
 	}
-	if policyPath := filepath.Join(state, "storage-policy.json"); func() bool { st, e := os.Lstat(policyPath); return e == nil && st.Mode().Perm() != 0o600 }() {
+	if policyPath := filepath.Join(state, "storage-policy.json"); func() bool { st, e := os.Lstat(policyPath); return e == nil && !platformPrivateMode(st, 0o600) }() {
 		report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "policy_permissions", Severity: "warning", Path: "storage-policy.json", Message: "storage policy permissions are broader than 0600", Action: "chmod the policy file to 0600"})
 	}
 	if free := filesystemFreeBytes(root); free >= 0 {
@@ -546,7 +509,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 		path := filepath.Join(root, name)
 		if strings.HasPrefix(name, ".rdev-gc-") {
 			st, e1 := os.Lstat(path)
-			if e1 != nil || st.Mode()&os.ModeSymlink != 0 || !pathOwnedByCurrentUser(st) {
+			if e1 != nil || st.Mode()&os.ModeSymlink != 0 || !ownedPath(path, st) {
 				report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "unsafe_gc_tombstone", Severity: "error", Message: "GC tombstone is missing, a symlink, or not owned by the current user", Action: "do not remove automatically; inspect and quarantine it manually"})
 				continue
 			}
@@ -568,7 +531,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 		if e1 != nil {
 			continue
 		}
-		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !pathOwnedByCurrentUser(st) {
+		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() || !ownedPath(path, st) {
 			report.Findings = append(report.Findings, proto.StorageDoctorFinding{Code: "job_entry_unsafe", Severity: "error", Message: "job entry is not a private owned directory", Action: "quarantine manually; automatic GC will skip it"})
 			continue
 		}
@@ -585,7 +548,7 @@ func storageDoctor(p *proto.StorageParams, state string) (*proto.StorageDoctorRe
 			}
 			path := filepath.Join(lockRoot, e.Name())
 			st, e2 := os.Lstat(path)
-			if e2 != nil || st.Mode()&os.ModeSymlink != 0 || !pathOwnedByCurrentUser(st) {
+			if e2 != nil || st.Mode()&os.ModeSymlink != 0 || !ownedPath(path, st) {
 				continue
 			}
 			if now.Sub(st.ModTime()) <= time.Hour {

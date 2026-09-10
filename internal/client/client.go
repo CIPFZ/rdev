@@ -1880,7 +1880,12 @@ func NormalizeSyncOptions(opts SyncOptions) (SyncOptions, error) {
 	if err := validateLocalSyncPath(opts.Local); err != nil {
 		return opts, err
 	}
-	if err := validateRemoteSyncPath(opts.Remote); err != nil {
+	if opts.Prepare || opts.PlanID != "" {
+		// Prepared transfers send paths through agent JSON, never a remote shell.
+		if err := validateLocalSyncPath(opts.Remote); err != nil {
+			return opts, err
+		}
+	} else if err := validateRemoteSyncPath(opts.Remote); err != nil {
 		return opts, err
 	}
 	opts.MaxOutputBytes = limit
@@ -1932,6 +1937,9 @@ func (c *Client) syncForTarget(ctx context.Context, opts SyncOptions, target str
 	defer release()
 
 	args := buildSyncArgs(pooled.conn.Host(), pooled.conn.SSHArgs(), opts)
+	if pooled.conn.Host().GOOS == "windows" {
+		return nil, errors.New("Windows remote sync requires shared broker -prepare/-plan; remote rsync is unsupported")
+	}
 	manifest := syncManifest{}
 	scan := buildSyncManifestContext
 	if bulk {

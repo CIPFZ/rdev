@@ -95,7 +95,7 @@ func Scan(ctx context.Context, path, policy string, limits Limits) (Manifest, er
 	if err != nil {
 		return Manifest{}, err
 	}
-	before, err := os.Lstat(abs)
+	before, err := nativeLstatPath(abs)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -111,7 +111,7 @@ func Scan(ctx context.Context, path, policy string, limits Limits) (Manifest, er
 		return Manifest{}, err
 	}
 	defer root.Close()
-	after, err := root.Lstat(name)
+	after, err := nativeRootStat(root, name, false)
 	if err != nil || !sameInfo(before, after) {
 		return Manifest{}, ErrChanged
 	}
@@ -120,7 +120,7 @@ func Scan(ctx context.Context, path, policy string, limits Limits) (Manifest, er
 	if err := s.walk(name, relative, nil); err != nil {
 		return Manifest{}, err
 	}
-	after, err = os.Lstat(abs)
+	after, err = nativeLstatPath(abs)
 	if err != nil || !sameInfo(before, after) {
 		return Manifest{}, ErrChanged
 	}
@@ -146,7 +146,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 	if s.visited > s.limits.Entries || len(ancestors) > maxDepth {
 		return ErrLimit
 	}
-	before, err := s.root.Lstat(name)
+	before, err := nativeRootStat(s.root, name, false)
 	if err != nil {
 		return err
 	}
@@ -163,7 +163,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 		if s.policy == "follow" {
 			// Root resolves links against the pinned directory and rejects every
 			// escape, including a changed intermediate path component.
-			info, err = s.root.Stat(name)
+			info, err = nativeRootStat(s.root, name, true)
 			if err != nil {
 				return err
 			}
@@ -178,7 +178,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 	case info.IsDir():
 		entry.Kind, entry.Size = "directory", 0
 		for _, ancestor := range ancestors {
-			if os.SameFile(ancestor, info) {
+			if sameObject(ancestor, info) {
 				return errors.New("sync tree contains a symlink cycle")
 			}
 		}
@@ -187,7 +187,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 			return err
 		}
 		defer f.Close()
-		opened, err := f.Stat()
+		opened, err := nativeStatFile(f)
 		if err != nil || !sameInfo(info, opened) {
 			return ErrChanged
 		}
@@ -209,7 +209,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 				return readErr
 			}
 		}
-		end, err := f.Stat()
+		end, err := nativeStatFile(f)
 		if err != nil || !sameInfo(info, end) {
 			return ErrChanged
 		}
@@ -222,7 +222,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 		if err != nil {
 			return err
 		}
-		opened, err := f.Stat()
+		opened, err := nativeStatFile(f)
 		if err != nil || !sameInfo(info, opened) {
 			_ = f.Close()
 			return ErrChanged
@@ -231,7 +231,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 		// One excess byte detects growth without permitting an active writer
 		// to keep hashing beyond the declared content budget indefinitely.
 		n, readErr := io.CopyBuffer(h, &contextReader{ctx: s.ctx, reader: io.LimitReader(f, info.Size()+1)}, s.buffer)
-		end, statErr := f.Stat()
+		end, statErr := nativeStatFile(f)
 		closeErr := f.Close()
 		if readErr != nil {
 			return readErr
@@ -249,12 +249,12 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 	default:
 		return ErrType
 	}
-	after, err := s.root.Lstat(name)
+	after, err := nativeRootStat(s.root, name, false)
 	if err != nil || !sameInfo(before, after) {
 		return ErrChanged
 	}
 	if s.policy == "follow" && before.Mode()&os.ModeSymlink != 0 {
-		end, err := s.root.Stat(name)
+		end, err := nativeRootStat(s.root, name, true)
 		if err != nil || !sameInfo(info, end) {
 			return ErrChanged
 		}
@@ -264,7 +264,7 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 }
 
 func sameInfo(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+	return a != nil && b != nil && sameObject(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
 func writeField(h hash.Hash, value string) {

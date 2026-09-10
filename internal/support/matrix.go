@@ -36,6 +36,7 @@ func Snapshot() Matrix {
 			{OS: "linux", Arch: "arm64", Tier: "build", TargetTier: "tier1", Status: "cross-build only", Validation: "build_only"},
 		},
 		Remote: []Platform{
+			{OS: "windows", Arch: "amd64", Tier: "experimental", TargetTier: "tier1", Status: "native remote agent implemented; Windows runtime and SSH certification pending", Validation: "build_only"},
 			{OS: "linux", Arch: "amd64", Tier: "tier1", TargetTier: "tier1", Status: "Ubuntu standalone and shared bootstrap, exec, file, sync, cancellation and jobs runtime verified", Validation: "runtime_verified"},
 			{OS: "linux", Arch: "arm64", Tier: "build", TargetTier: "tier1", Status: "agent cross-build only", Validation: "build_only"},
 			{OS: "darwin", Arch: "amd64", Tier: "build", TargetTier: "tier1", Status: "agent cross-build only", Validation: "build_only"},
@@ -49,13 +50,13 @@ func Snapshot() Matrix {
 			{Name: "regular_files_and_symlink_policy", Status: "supported"},
 			{Name: "file_mode_mtime", Status: "best_effort", Scope: "subject to target filesystem and user permissions"},
 			{Name: "interactive_pty", Status: "unsupported"},
-			{Name: "native_windows", Status: "unsupported"},
+			{Name: "native_windows", Status: "experimental", Scope: "remote Windows amd64 agent only; native Windows controller remains unsupported; see docs/phase9-acceptance.md"},
 			{Name: "complete_acl_xattr_owner_fidelity", Status: "unsupported"},
 			{Name: "remote_to_remote_sync", Status: "unsupported", Alternative: "stage through a local directory"},
 		},
 		NonGoals: []string{
-			"native Windows runtime", "interactive PTY or TUI forwarding", "port forwarding",
-			"native Windows config owner, mode, ACL, or POSIX no-follow guarantees",
+			"native Windows controller runtime", "interactive PTY or TUI forwarding", "port forwarding",
+			"native Windows controller config owner, mode, ACL, or POSIX no-follow guarantees",
 			"full ACL, xattr, owner, or sparse-file fidelity", "multi-tenant remote sandboxing",
 		},
 	}

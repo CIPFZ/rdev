@@ -17,7 +17,6 @@ import (
 	"sync"
 
 	"github.com/CIPFZ/rdev/internal/proto"
-	"golang.org/x/sys/unix"
 )
 
 const maxTransferBytes int64 = 1 << 30
@@ -67,6 +66,9 @@ func doTransferChunk(p *proto.WriteParams) (*proto.WriteResult, error) {
 		return nil, limitExceededError("transfer chunk exceeds limit")
 	}
 	path := expandHome(p.Path)
+	if err := validateBusinessPath(path); err != nil {
+		return nil, invalidRequestError(err.Error())
+	}
 	if !filepath.IsAbs(path) {
 		path, _ = filepath.Abs(path)
 	}
@@ -90,7 +92,7 @@ func doTransferChunk(p *proto.WriteParams) (*proto.WriteResult, error) {
 		return nil, err
 	}
 	defer func() {
-		_ = unix.Flock(int(flock.Fd()), unix.LOCK_UN)
+		releaseTransferLock(flock)
 		_ = flock.Close()
 	}()
 	meta := transferMeta{Path: path, TotalSize: p.TotalSize, Digest: p.Digest, Mode: p.Mode}
@@ -109,7 +111,7 @@ func doTransferChunk(p *proto.WriteParams) (*proto.WriteResult, error) {
 			return nil, err
 		}
 	}
-	f, err := openTransferArtifact(part, unix.O_WRONLY|unix.O_CREAT)
+	f, err := openTransferArtifact(part, os.O_WRONLY|os.O_CREATE)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) || !errors.Is(err, os.ErrNotExist) {
 			// Keep the protocol error stable and avoid exposing a platform-specific
@@ -165,7 +167,7 @@ func doTransferChunk(p *proto.WriteParams) (*proto.WriteResult, error) {
 	if err := os.Chmod(part, mode); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(part, path); err != nil {
+	if err := replaceFile(part, path); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(metaPath)
@@ -173,7 +175,7 @@ func doTransferChunk(p *proto.WriteParams) (*proto.WriteResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	syncErr := df.Sync()
+	syncErr := syncDataDirectory(df)
 	closeErr = df.Close()
 	if syncErr != nil {
 		return nil, syncErr
@@ -193,71 +195,15 @@ func transferLock(path string) *sync.Mutex {
 // A transfer ID can be retried by two agent processes after a reconnect; both
 // must not append to the same staging inode concurrently. O_NOFOLLOW keeps a
 // pre-planted lock symlink from redirecting the open outside the destination.
-func acquireTransferLock(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = unix.Close(fd)
-		return nil, errors.New("failed to create transfer lock")
-	}
-	st, statErr := f.Stat()
-	if statErr != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
-		_ = f.Close()
-		if statErr != nil {
-			return nil, statErr
-		}
-		return nil, errors.New("transfer lock is not a private regular file")
-	}
-	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return f, nil
-}
 
 func decodeTransferB64(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
-
-func validateTransferArtifact(path string) error {
-	st, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
-		return errors.New("transfer artifact is not private regular file")
-	}
-	return nil
-}
 
 // openTransferArtifact opens a staging/metadata artifact without following a
 // symlink. The lstat-before-open check alone is insufficient because another
 // process can swap the inode between those operations.
-func openTransferArtifact(path string, flags int) (*os.File, error) {
-	fd, err := unix.Open(path, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = unix.Close(fd)
-		return nil, errors.New("failed to open transfer artifact")
-	}
-	st, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
-		_ = f.Close()
-		return nil, errors.New("transfer artifact is not a private regular file")
-	}
-	return f, nil
-}
 
 func readTransferMeta(path string) ([]byte, error) {
-	f, err := openTransferArtifact(path, unix.O_RDONLY)
+	f, err := openTransferArtifact(path, os.O_RDONLY)
 	if err != nil {
 		return nil, err
 	}
@@ -297,14 +243,14 @@ func writeTransferMeta(path string, m transferMeta) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(tmpPath, path); err != nil {
+	if err = replaceFile(tmpPath, path); err != nil {
 		return err
 	}
 	d, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
-	err = d.Sync()
+	err = syncDataDirectory(d)
 	closeErr := d.Close()
 	if err != nil {
 		return err

@@ -37,18 +37,6 @@ func jobStartRequest(req *proto.Request, state string) (*proto.JobResult, error)
 	identity := &jobStartIdentity{Schema: 1, JobID: id, OperationID: req.OperationID, PrincipalID: req.ClientID, Digest: digest}
 	return jobStartWithIdentity(req.Job, state, identity, req.Replay)
 }
-func syncJobDirectory(path string) error {
-	d, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	closeErr := d.Close()
-	if err == nil {
-		err = closeErr
-	}
-	return err
-}
 
 // reserveJobStart runs under the cross-process admission lock. Tombstones are
 // never removed by job_rm/GC, so a missing job cannot turn an old operation ID

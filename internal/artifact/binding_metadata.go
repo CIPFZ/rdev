@@ -33,8 +33,10 @@ func SBOM(m LocalEvidence) object {
 		}
 		dependencies = append(dependencies, object{"ref": a.Name, "dependsOn": refs})
 	}
-	// The CLI also embeds four executable components, each with its own deps.
-	dependencies[0]["dependsOn"] = append(dependencies[0]["dependsOn"].([]string), BinaryNames[2:]...)
+	// Bind the exact embedded set, including historical six-binary releases.
+	for _, a := range m.Artifacts[2:] {
+		dependencies[0]["dependsOn"] = append(dependencies[0]["dependsOn"].([]string), a.Name)
+	}
 	return object{"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1, "components": components, "dependencies": dependencies}
 }
 

@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Supervisor mode for rdev-agent.
 //
 // A detached job cannot rely on the agent to record its exit code: the agent
