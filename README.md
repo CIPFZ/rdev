@@ -25,6 +25,27 @@ rdev exec dev -- printf '%s\n' '中文 "quoted" $(not-run)'
 
 多人或多个 AI 客户端共享主机时，按 [rdevd 运维说明](docs/rdevd-operations.md) 配置 daemon、principal 凭证和默认拒绝的 policy。客户端设置 `RDEV_BROKER_SOCKET`、`RDEV_CLIENT_ID`、`RDEV_PROJECT_ID`、`RDEV_PRINCIPAL_TOKEN` 后，同一 CLI 或 `rdev serve` 使用共享模式。身份令牌只证明身份，不自动授予业务权限；管理员签名密钥不能交给客户端。
 
+## 安装到本机用户环境
+
+当前项目以源码构建为主，尚未提供 Homebrew、安装包或 `rdev update`/`rdev upgrade` 自更新命令。构建完成后，建议把实体二进制复制到用户级目录，使 Claude Code 和其他 agent 不依赖开发目录：
+
+```bash
+make GO="$(command -v go)" all daemon
+install -m 755 bin/rdev "$HOME/.local/bin/rdev"
+install -m 755 bin/rdevd "$HOME/.local/bin/rdevd"
+export PATH="$HOME/.local/bin:$PATH"
+rdev version
+claude mcp add rdev --scope user -- "$HOME/.local/bin/rdev" serve
+```
+
+升级时获取新的源码或发布产物，完成校验后重复构建和 `install` 即可；远程 agent 会在客户端重新连接时按版本、能力和 release policy 协商升级。生产部署请先阅读 [Phase8 验收与操作](docs/phase8-acceptance.md) 和 [rdevd 运维说明](docs/rdevd-operations.md)。
+
+## 适合什么场景
+
+`rdev` 适合需要让本地 AI agent 安全、可恢复地操作一台或多台远程开发机的场景：前台命令、后台 job、文件读写、目录同步、凭据隔离和 Fleet 批量编排都通过同一 host 抽象提供。它使用 SSH 作为传输，不要求远端预装 Go；简单的一次性命令仍可直接使用 SSH。
+
+第一次使用建议依次执行 `rdev hosts add`、`rdev hosts trust`、`rdev hosts approve-project`、`rdev ping`，再运行 `rdev exec` 或 `rdev sync`。共享 broker、审批和多主机编排属于进阶部署，不影响 standalone 单机使用。
+
 ## 两层配置：工具全局，主机按项目
 
 standalone 的主机配置分两层：
