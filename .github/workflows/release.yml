@@ -36,9 +36,11 @@ jobs:
             arch="${target#*-}"
             out="rdev-${GITHUB_REF_NAME}-${target}"
             mkdir -p "$out"
+            client_out="$out/rdev"
+            [[ "$os" == windows ]] && client_out="$out/rdev.exe"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
               -ldflags="-X github.com/CIPFZ/rdev/internal/buildinfo.Version=$version -X github.com/CIPFZ/rdev/internal/buildinfo.Commit=$GITHUB_SHA -X github.com/CIPFZ/rdev/internal/buildinfo.CommitTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              -o "$out/rdev" ./cmd/rdev
+              -o "$client_out" ./cmd/rdev
             # rdevd currently depends on Unix peer credentials and sockets;
             # Windows receives the client/agent artifact until a native daemon
             # implementation is complete.
@@ -49,7 +51,6 @@ jobs:
             fi
             cp README.md "$out/"
             if [[ "$os" == windows ]]; then
-              mv "$out/rdev" "$out/rdev.exe"
               (cd "$out" && zip -q -r "../dist/$out.zip" .)
             else
               tar -C "$out" -czf "dist/$out.tar.gz" .
