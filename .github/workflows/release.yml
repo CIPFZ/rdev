@@ -39,9 +39,14 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
               -ldflags="-X github.com/CIPFZ/rdev/internal/buildinfo.Version=$version -X github.com/CIPFZ/rdev/internal/buildinfo.Commit=$GITHUB_SHA -X github.com/CIPFZ/rdev/internal/buildinfo.CommitTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               -o "$out/rdev" ./cmd/rdev
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
-              -ldflags="-X github.com/CIPFZ/rdev/internal/buildinfo.Version=$version -X github.com/CIPFZ/rdev/internal/buildinfo.Commit=$GITHUB_SHA -X github.com/CIPFZ/rdev/internal/buildinfo.CommitTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              -o "$out/rdevd" ./cmd/rdevd
+            # rdevd currently depends on Unix peer credentials and sockets;
+            # Windows receives the client/agent artifact until a native daemon
+            # implementation is complete.
+            if [[ "$os" != windows ]]; then
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+                -ldflags="-X github.com/CIPFZ/rdev/internal/buildinfo.Version=$version -X github.com/CIPFZ/rdev/internal/buildinfo.Commit=$GITHUB_SHA -X github.com/CIPFZ/rdev/internal/buildinfo.CommitTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                -o "$out/rdevd" ./cmd/rdevd
+            fi
             cp README.md "$out/"
             if [[ "$os" == windows ]]; then
               mv "$out/rdev" "$out/rdev.exe"
