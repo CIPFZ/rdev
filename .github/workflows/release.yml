@@ -50,7 +50,6 @@ jobs:
             cp README.md "$out/"
             if [[ "$os" == windows ]]; then
               mv "$out/rdev" "$out/rdev.exe"
-              mv "$out/rdevd" "$out/rdevd.exe"
               (cd "$out" && zip -q -r "../dist/$out.zip" .)
             else
               tar -C "$out" -czf "dist/$out.tar.gz" .

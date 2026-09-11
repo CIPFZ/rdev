@@ -2,9 +2,9 @@ name: Validation
 
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
+  push:
+    tags: ['v*']
 
 # This workflow never receives signing credentials and never publishes/deploys.
 # A production signing workflow requires separately authorized trust and identity.
