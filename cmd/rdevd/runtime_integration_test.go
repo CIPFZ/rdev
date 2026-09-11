@@ -38,6 +38,14 @@ func newRuntimeDaemon(t *testing.T, bin string) *runtimeDaemon {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// CLI cwd resolves /tmp to /private/tmp on Darwin. Keep approval operands
+	// identical to the absolute paths actually submitted by that process.
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		os.RemoveAll(dir)
+		t.Fatal(err)
+	}
+	dir = canonical
 	d := &runtimeDaemon{t: t, bin: bin, dir: dir, socket: filepath.Join(dir, "broker.sock"), ready: filepath.Join(dir, "ready"), key: filepath.Join(dir, "principal.key")}
 	t.Cleanup(func() { d.stop(syscall.SIGKILL); os.RemoveAll(dir) })
 	d.admin("principal-keygen", "-out", d.key)

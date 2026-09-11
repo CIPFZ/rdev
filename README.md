@@ -209,11 +209,11 @@ rdev secrets check dev apptoken -path '~/.config/myapp/token' -- env
 |---|---|---|
 | Linux amd64 | standalone/shared 真实运行验证 | Ubuntu 真实 SSH、同步、取消、job 验证 |
 | Linux arm64 | build-only | build-only |
-| macOS arm64 | 历史开发基线；本次 shared runtime 未验证 | build-only |
+| macOS arm64 | 本机 cgo/launchd 及 shared controller → Linux amd64 真实 SSH 已验证；macOS 作为远端 agent 未验证 | build-only |
 | macOS amd64 | build-only | build-only |
 | 原生 Windows amd64 | unsupported | Phase9 实验实现；交叉构建通过，原生运行与真实 SSH 验收待完成 |
 
-**macOS runtime 尚未验证，已由用户明确延期；交叉编译不算实测。** Darwin 配置的 fd-native ACL 检查依赖 cgo，无该能力时 fail closed。OpenSSH 需要 `BatchMode`、`ControlMaster`、`ControlPath`、`ControlPersist`；最低版本尚未完成正式认证。复杂 ProxyCommand 是实验能力；PTY/TUI、通用端口转发、完整 ACL/xattr/owner 保真和 remote-to-remote sync 不在当前支持范围。
+**macOS arm64 作为本地 controller 的 runtime 已验证；macOS 远端 agent、macOS amd64 和 logout/reboot 生命周期仍未验证。** 证据见 [macOS controller 验收](docs/macos-controller-acceptance.md)。Darwin 配置的 fd-native ACL 检查依赖 cgo，无该能力时 fail closed。OpenSSH 需要 `BatchMode`、`ControlMaster`、`ControlPath`、`ControlPersist`；最低版本尚未完成正式认证。复杂 ProxyCommand 是实验能力；PTY/TUI、通用端口转发、完整 ACL/xattr/owner 保真和 remote-to-remote sync 不在当前支持范围。
 
 shared `support HOST` 返回当前 principal 的权限快照；`permission_denied` 与平台 unsupported 分开。`scope=broker` 表示无 host 的本地 broker 接口；`secret.use`、`sync.delete` 的 `callable=false` 表示附加权限，不是独立路由。没有 `capability_probe` 授权时不触发 SSH，也不返回其他 owner 的状态、registry 或 execution profile。权限许可不替代 runtime 能力、资源准入或 mutation approval。
 

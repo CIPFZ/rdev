@@ -191,8 +191,8 @@ func newRemoteRuntime(t *testing.T) (*runtimeDaemon, string, func(string) ([]byt
 	if os.Getenv("RDEV_RUN_REMOTE") != "1" {
 		t.Skip("set RDEV_RUN_REMOTE=1 for the real SSH multi-process benchmark")
 	}
-	if runtime.GOOS != "linux" {
-		t.Skip("local /proc process-count evidence currently requires Linux")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("real SSH harness requires a Linux or macOS controller and Linux target")
 	}
 	remote := os.Getenv("RDEV_TEST_REMOTE")
 	if remote == "" {
@@ -274,6 +274,20 @@ print(json.dumps(sorted(pids)))
 
 func countDaemonSSHChildren(t *testing.T, daemonPID int) int {
 	t.Helper()
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("ps", "-axo", "ppid=,comm=").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == strconv.Itoa(daemonPID) && filepath.Base(strings.Join(fields[1:], " ")) == "ssh" {
+				count++
+			}
+		}
+		return count
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		t.Fatal(err)

@@ -246,6 +246,11 @@ func (s *scanner) walk(name, relative string, ancestors []os.FileInfo) error {
 		s.manifest.ContentBytes += n
 	case info.Mode()&os.ModeSymlink != 0:
 		entry.Kind, entry.Link = "symlink", link
+		// Linux exposes symlink permissions as 0777; Darwin creates them using
+		// the umask. We do not preserve link permissions (or follow the link to
+		// chmod its target). Use one portable representation for stage sealing
+		// and approval digests, while sameInfo still checks the source object.
+		entry.Mode = uint32(os.ModeSymlink | 0777)
 	default:
 		return ErrType
 	}

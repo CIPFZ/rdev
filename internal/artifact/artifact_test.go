@@ -22,7 +22,12 @@ func signedFixture(t *testing.T) (string, Policy, Manifest, string) {
 
 func signedFixturePlatforms(t *testing.T, binaryNames []string) (string, Policy, Manifest, string) {
 	t.Helper()
-	t.Setenv("TMPDIR", "/tmp")
+	// Darwin's /tmp is a symlink; policy admission intentionally rejects it.
+	tmpRoot, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmpRoot)
 	if _, e := exec.LookPath("ssh-keygen"); e != nil {
 		t.Fatal("OpenSSH ssh-keygen required for actual SSHSIG tests")
 	}

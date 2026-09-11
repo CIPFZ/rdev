@@ -897,7 +897,9 @@ metadata and 8 GiB of hashed content. `preserve` keeps source links; `follow` is
 confined to the source root, and special files are rejected. The Linux daemon,
 CLI/MCP, real SSH execution, cancellation and pre-acknowledgment crash paths are
 covered by `make remote-sync-execution`; `make remote-mixed-qos` covers concurrent
-exec/wait/status/transfers. macOS runtime remains unverified and was deferred by
+exec/wait/status/transfers. macOS arm64 controller runtime is now recorded in
+[macOS controller acceptance](macos-controller-acceptance.md); macOS remote-agent
+runtime remains unverified and was deferred by
 the user; see [Phase5 acceptance](phase5-acceptance.md).
 
 
@@ -945,7 +947,8 @@ and does not look up host inventory. `allowed` is authorization, `callable` excl
 supplementary rights such as `secret.use`, and runtime support is separate. A
 positive grant still requires resource admission and approval. Probe results omit
 profile/environment/path data; a probe is not platform runtime certification.
-macOS shared runtime remains unverified and explicitly deferred.
+macOS shared controller runtime is covered by [macOS controller acceptance](macos-controller-acceptance.md);
+macOS remote-agent runtime remains unverified and explicitly deferred.
 
 `rdev compat` / `rdev_compat` expose ranges, features, error registry, actual config
 fields and persisted schemas from the same constants used by validators. Standalone

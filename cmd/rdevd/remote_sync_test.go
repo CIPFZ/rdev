@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -253,6 +254,19 @@ func TestRemoteBrokerSyncPreview(t *testing.T) {
 		t.Fatal("held SSH process identities missing")
 	}
 	for _, pid := range descendants {
+		if runtime.GOOS == "darwin" {
+			out, err := exec.Command("ps", "-p", fmt.Sprint(pid), "-o", "stat=").Output()
+			if err == nil && !strings.HasPrefix(strings.TrimSpace(string(out)), "Z") {
+				t.Fatal("canceled rsync left its SSH child running")
+			}
+			if err != nil {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+					t.Fatal("cannot inspect canceled SSH child", err)
+				}
+			}
+			continue
+		}
 		if raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
 			fields := strings.Fields(string(raw)[strings.LastIndex(string(raw), ")")+1:])
 			if len(fields) == 0 || fields[0] != "Z" {

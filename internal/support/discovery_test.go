@@ -33,8 +33,10 @@ func TestDiscoveryDoesNotPromoteProbeToCertification(t *testing.T) {
 		if p.OS == "linux" && p.Arch == "amd64" && p.Validation != "runtime_verified" {
 			t.Fatalf("Linux baseline stale=%+v", p)
 		}
+	}
+	for _, p := range d.Remote {
 		if p.OS == "darwin" && p.Validation == "runtime_verified" {
-			t.Fatal("deferred macOS marked runtime verified")
+			t.Fatal("Darwin remote-agent was incorrectly certified")
 		}
 	}
 }

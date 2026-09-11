@@ -30,7 +30,7 @@ func Snapshot() Matrix {
 		SchemaVersion:           SchemaVersion,
 		ProductionCertification: "pending: Tier 1 runtime, trusted official signing, hosted CI, complete compatibility/scale and continuous 24h evidence required",
 		Local: []Platform{
-			{OS: "darwin", Arch: "arm64", Tier: "tier1", TargetTier: "tier1", Status: "historical development baseline; shared runtime unverified and deferred; fd-native config ACL checks require cgo", Validation: "historical_only"},
+			{OS: "darwin", Arch: "arm64", Tier: "tier1", TargetTier: "tier1", Status: "macOS arm64 controller, launchd and Linux amd64 remote runtime verified; macOS remote-agent runtime remains unverified; fd-native config ACL checks require cgo", Validation: "runtime_verified"},
 			{OS: "darwin", Arch: "amd64", Tier: "build", TargetTier: "tier1", Status: "cross-build only", Validation: "build_only"},
 			{OS: "linux", Arch: "amd64", Tier: "tier1", TargetTier: "tier1", Status: "Linux standalone and shared broker real-SSH runtime verified", Validation: "runtime_verified"},
 			{OS: "linux", Arch: "arm64", Tier: "build", TargetTier: "tier1", Status: "cross-build only", Validation: "build_only"},

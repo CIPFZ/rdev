@@ -59,8 +59,9 @@ rerun above. Raw logs and release artifacts stay outside the repository.
 The real runtime harness uses one authorized SSH machine with three independent
 agent state namespaces and isolated business directories. This is real SSH and
 real side-effect evidence, not three physical machines or 100 real hosts. The
-100-host evidence is deterministic simulation. macOS runtime remains unverified
-and explicitly deferred; cross-compilation is recorded separately. Full real
+100-host evidence is deterministic simulation. The macOS arm64 controller
+runtime is now recorded in [macOS controller acceptance](macos-controller-acceptance.md);
+macOS as a remote agent remains unverified. Full real
 scale, 100-host/20-client/24-hour soak, signed publication and production
 certification remain Phase8. No release or deployment is performed here.
 

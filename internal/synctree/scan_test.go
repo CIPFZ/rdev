@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -138,18 +139,28 @@ func (c *countedContext) Err() error {
 
 func TestRawNamesAndStableDigest(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"a\nb", "a\xffb", "a\xfeb", "back\\slash"} {
+	first, second, replacement := "a\xffb", "a\xfeb", "a\xfdb"
+	// Probe the filesystem instead of weakening name validation. APFS cannot
+	// create raw invalid UTF-8 names; Linux retains that byte-exact coverage.
+	if err := os.WriteFile(filepath.Join(dir, first), nil, 0600); err != nil {
+		if !errors.Is(err, syscall.EILSEQ) {
+			t.Fatal(err)
+		}
+		first, second, replacement = "a雪b", "a雨b", "a風b"
+		t.Log("filesystem rejects invalid UTF-8; exercising Unicode names")
+	}
+	for _, name := range []string{"a\nb", first, second, "back\\slash"} {
 		write(t, filepath.Join(dir, name), name)
 	}
 	m := scan(t, dir, "preserve")
 	if len(m.Entries) != 5 || m.Digest != scan(t, dir, "preserve").Digest {
 		t.Fatal("manifest unstable or lost byte-exact names")
 	}
-	if err := os.Rename(filepath.Join(dir, "a\xffb"), filepath.Join(dir, "a\xfdb")); err != nil {
+	if err := os.Rename(filepath.Join(dir, first), filepath.Join(dir, replacement)); err != nil {
 		t.Fatal(err)
 	}
 	if scan(t, dir, "preserve").Digest == m.Digest {
-		t.Fatal("invalid UTF-8 filename substitution did not alter digest")
+		t.Fatal("filename substitution did not alter digest")
 	}
 }
 

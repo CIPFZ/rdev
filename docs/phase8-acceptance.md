@@ -19,7 +19,7 @@ to `origin/main` after fetch. No original platform target or gate is waived.
 | Production Gate | Status and evidence boundary |
 |---|---|
 | 1. High/Medium findings closed | Passed for independently reviewed product source 047a0f5; no unresolved confirmed High/Medium and no agent-made risk acceptance. Subsequent harness/CI deltas are independently reviewed with their exact source bindings in the evidence. |
-| 2. All declared Tier 1 runtime | Pending. Linux amd64/OpenSSH/XFS and actual IPv4/IPv6/ProxyJump exercised. Linux arm64 and Darwin runtime not run; macOS remains explicitly deferred. Cross-builds do not pass these targets. |
+| 2. All declared Tier 1 runtime | Pending. Linux amd64/OpenSSH/XFS and macOS arm64 controller → Linux amd64 runtime are exercised. Linux arm64 and macOS remote-agent runtime remain unverified; cross-builds do not pass these targets. |
 | 3. Official signature, SBOM, provenance, audits, notices | Blocked on authorized official signing identity/root. Local exact-byte audits/notices/SBOM/provenance and isolated test signatures passed. |
 | 4. Real continuous 24h within budgets | Pending; run 5f68aaab657347af8bf3dc6a69589416 started at 2026-09-09 13:29:12.940 UTC. No completed 24h evidence; starting or supervising is not passing. |
 | 5. Complete upgrade/rollback/crash/network/migration drills | Partial. Actual test-root signed SSH rollback, record/crash barriers, retained jobs and Fleet/audit recovery passed; complete historical state/migration/channel and platform matrix remains pending. |

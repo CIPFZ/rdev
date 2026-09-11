@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -34,6 +35,11 @@ func TestSyncStoreBinaryRoundTripAndRestart(t *testing.T) {
 	}
 	source := t.TempDir()
 	name := "binary-\xff\nname"
+	if runtime.GOOS == "darwin" {
+		// APFS rejects invalid UTF-8 names; still exercise binary contents,
+		// Unicode/newline paths, symlinks, wire transport and restart replay.
+		name = "binary-雪\nname"
+	}
 	data := bytes.Repeat([]byte{0, 255, 1, 13, 10}, ChunkBytes/3)
 	if err := os.WriteFile(filepath.Join(source, name), data, 0600); err != nil {
 		t.Fatal(err)

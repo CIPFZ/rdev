@@ -3,6 +3,7 @@ package mcpsrv
 import (
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -17,7 +18,13 @@ func TestFleetSDKStandaloneRejectsAndSharedPreservesContracts(t *testing.T) {
 	if isErr, _ := callTool(t, standalone, "rdev_fleet", map[string]any{"action": "list", "request": map[string]any{}}, nil); !isErr {
 		t.Fatal("standalone Fleet accepted")
 	}
-	socket := filepath.Join(t.TempDir(), "broker.sock")
+	// macOS TMPDIR plus the test name exceeds sockaddr_un.sun_path.
+	dir, err := os.MkdirTemp("/tmp", "rdev-mcp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "broker.sock")
 	l, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

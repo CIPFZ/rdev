@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -174,13 +175,47 @@ func (c *Client) SyncDeletionPaths(ctx context.Context, dir string, source synct
 	if err := skeleton(output, dest.Manifest); err != nil {
 		return nil, err
 	}
+	// Evaluate receiver exclusions independently of replacement. openrsync's
+	// --force can remove an excluded descendant while replacing its parent,
+	// unlike rsync 3. Retain the excluded set before running that simulation so
+	// neither implementation can authorize deleting protected paths.
+	protected := map[string]bool{}
+	if len(opts.Exclude) > 0 {
+		included := filepath.Join(scratch, "included")
+		if err := os.Mkdir(included, 0700); err != nil {
+			return nil, err
+		}
+		filterArgs := []string{"-r"}
+		for _, ex := range opts.Exclude {
+			filterArgs = append(filterArgs, "--exclude", ex)
+		}
+		filterArgs = append(filterArgs, "--", output+string(os.PathSeparator), included+string(os.PathSeparator))
+		if err := runRsync(ctx, filterArgs, io.Discard, io.Discard); err != nil {
+			return nil, err
+		}
+		for _, e := range dest.Manifest.Entries {
+			if _, err := os.Lstat(filepath.Join(included, e.Path)); errors.Is(err, os.ErrNotExist) {
+				protected[e.Path] = true
+			} else if err != nil {
+				return nil, err
+			}
+		}
+		if !source.SourceDirectory && opts.ConflictPolicy == "overwrite" {
+			prefix := source.SourceName + string(filepath.Separator)
+			for path := range protected {
+				if strings.HasPrefix(filepath.FromSlash(path), prefix) {
+					return nil, errors.New("sync replacement would remove an excluded destination path")
+				}
+			}
+		}
+	}
 	if !source.SourceDirectory {
 		input = filepath.Join(input, source.SourceName)
 	} else if !prefix {
 		input += string(os.PathSeparator)
 	}
 	// --force models an approved directory replacement even without --delete;
-	// rsync still refuses to remove excluded descendants. --delete separately
+	// The independent protected set fences excluded descendants. --delete separately
 	// controls destination extras, and never widens a single-file transfer.
 	args := []string{"-r", "--force"}
 	if opts.Delete && source.SourceDirectory {
@@ -212,7 +247,12 @@ func (c *Client) SyncDeletionPaths(ctx context.Context, dir string, source synct
 		// Descendants of a replaced directory now resolve through a file.
 		// Include them only after rsync has accepted the filtered replacement.
 		if _, err := root.Lstat(e.Path); errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			if protected[e.Path] {
+				return nil, errors.New("sync replacement would remove an excluded destination path")
+			}
 			removed[e.Path] = true
+		} else if err != nil {
+			return nil, err
 		}
 	}
 	return removed, nil

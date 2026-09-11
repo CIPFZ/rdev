@@ -3,12 +3,20 @@ GO ?= $(HOME)/sdk/go1.25.0/bin/go
 AGENT_DIR := cmd/rdev/agents
 PLATFORMS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
 
-.PHONY: windows-remote-smoke
+.PHONY: windows-remote-smoke macos-launchd-smoke macos-controller-runtime
 # Run from a supported controller with a configured, host-key-verified Windows
 # SSH alias. Creates and removes one isolated remote test namespace.
 windows-remote-smoke:
 	@test -n "$$RDEV_WINDOWS_SSH"
 	RDEV_WINDOWS_AGENT='$(CURDIR)/cmd/rdev/agents/rdev-agent-windows-amd64' $(GO) test ./internal/transport -run '^TestWindowsRemoteSSH$$' -count=1 -timeout=5m -v
+
+# Native macOS controller closure. These targets require a macOS arm64 host;
+# the controller connects through the user's already verified SSH alias.
+macos-launchd-smoke: daemon
+	python3 scripts/launchd-rdevd-smoke.py --daemon '$(CURDIR)/bin/rdevd' --out '$${RDEV_MACOS_EVIDENCE_OUT:-/tmp/rdev-macos-launchd.json}'
+
+macos-controller-runtime: all daemon
+	python3 scripts/macos-controller-runtime.py --go '$(GO)' --target '$${RDEV_REMOTE_SSH:-service-deploy}' --ssh-config '$${RDEV_SSH_CONFIG:-}' --group '$${RDEV_MACOS_GROUP:-core}' --out '$${RDEV_MACOS_EVIDENCE_DIR:-/tmp/rdev-macos-controller}'
 
 # Build identity, stamped into both binaries so a running one can say what it is.
 #

@@ -5,10 +5,11 @@ Current status: **Complete for the user-approved Phase5 scope**, verified
 implementation, Linux runtime evidence and independent review. Final integrated
 validation passed on `29b5f08`; see the [review and final evidence](phase5-runtime-evidence.md#phase5-review).
 
-**macOS runtime remains unverified.** The user explicitly deferred it on
-2026-09-09 because no environment is available. Actual launchd lifecycle,
-readiness, socket and peer-identity testing remains platform follow-up and is
-not a blocker for this closeout. Cross-compilation is not a runtime pass.
+**macOS controller runtime is now closed for the tested arm64 → Linux amd64
+topology;** see [macOS controller acceptance](macos-controller-acceptance.md).
+The historical Phase5 table below records the state at its original Linux
+closeout. macOS as a remote agent, macOS amd64 and cross-UID privileged negative
+evidence remain separate boundaries.
 
 ## Scope and follow-up
 
@@ -34,7 +35,7 @@ records the corrections to handshake, audit, sync, host fairness and shared wait
 | Item | Requirement | Status | Runtime evidence | Follow-up |
 |---|---|---|---|---|
 | P5-01 | Version negotiation | Complete | [020230b](phase5-runtime-evidence.md#020230b): Incompatible peers reject; pipelined hello/request regression passes.  Final review also verifies client-side reply versions and cancellable hello. | — |
-| P5-02 | Socket, singleton and peer identity | Complete (Linux runtime) | [020230b](phase5-runtime-evidence.md#020230b): Real duplicate launch, SIGKILL recovery and foreign UID denial. | macOS runtime deferred by user. |
+| P5-02 | Socket, singleton and peer identity | Complete (Linux + macOS controller runtime) | [020230b](phase5-runtime-evidence.md#020230b) and [macOS controller acceptance](macos-controller-acceptance.md). | macOS remote-agent runtime remains separate. |
 | P5-03 | Shared connection and secret ownership | Complete | [b5e9422](phase5-runtime-evidence.md#b5e9422), [08ff4fb](phase5-runtime-evidence.md#08ff4fb), [c5707ee](phase5-runtime-evidence.md#c5707ee): 20-process/one-agent benchmark; shared secret and frontend routes verified. Shared sync: [9cf6103](phase5-runtime-evidence.md#9cf6103). | — |
 | P5-04 | Client/project scope | Complete | [020230b](phase5-runtime-evidence.md#020230b), [b5e9422](phase5-runtime-evidence.md#b5e9422), [c5707ee](phase5-runtime-evidence.md#c5707ee), [e3ac9c2](phase5-runtime-evidence.md#e3ac9c2): Real provisioning/rotation and exact-project request, secret and job isolation. | — |
 | P5-05 | Cancellation isolation | Complete | [2a61674](phase5-runtime-evidence.md#2a61674), [bd03436](phase5-runtime-evidence.md#bd03436), [6d2eeb3](phase5-runtime-evidence.md#6d2eeb3): Real retry/SIGKILL plus shared wait and rsync-preview cancellation. Shared sync CLI cancellation: [9cf6103](phase5-runtime-evidence.md#9cf6103). Mixed workload: [9097f5d](phase5-runtime-evidence.md#9097f5d). | — |
@@ -47,7 +48,7 @@ records the corrections to handshake, audit, sync, host fairness and shared wait
 | P5-12 | Principal/capability/policy | Complete | [669f18f](phase5-runtime-evidence.md#669f18f), [74da502](phase5-runtime-evidence.md#74da502), [c5707ee](phase5-runtime-evidence.md#c5707ee), [4bfdf06](phase5-runtime-evidence.md#4bfdf06): Pre-queue stable decision; exact host/project grants, secret use and Fleet denial. | — |
 | P5-13 | Digest-bound approval | Complete | [915fb5e](phase5-runtime-evidence.md#915fb5e), [c5707ee](phase5-runtime-evidence.md#c5707ee), [21996d4](phase5-runtime-evidence.md#21996d4): Wire/secret owner/host/request/policy substitution, expiry/replay/restart negatives. Retained sync plan approvals: [9cf6103](phase5-runtime-evidence.md#9cf6103). | — |
 | P5-14 | Private audit, rotation and query | Complete | [41cddb4](phase5-runtime-evidence.md#41cddb4), [8af4fb7](phase5-runtime-evidence.md#8af4fb7): 600-second rotation/crash soak; exact-owner request/approval/outcome correlation. Sync approval/outcome correlation: [9cf6103](phase5-runtime-evidence.md#9cf6103). | — |
-| P5-15 | User service lifecycle | Complete (Linux runtime) | [020230b](phase5-runtime-evidence.md#020230b): Actual Linux systemd install/enable/start/reload/SIGKILL/stop/start. | macOS runtime deferred by user. |
+| P5-15 | User service lifecycle | Complete (Linux systemd + macOS launchd controller runtime) | [020230b](phase5-runtime-evidence.md#020230b) and [macOS controller acceptance](macos-controller-acceptance.md). | macOS remote-agent runtime remains separate. |
 | P5-16 | Validated reload and bounded drain | Complete | [020230b](phase5-runtime-evidence.md#020230b), [a96b359](phase5-runtime-evidence.md#a96b359): Invalid reload preserves config; durable mutation and stalled-response shutdown. Pre-ACK sync SIGKILL recovery: [9cf6103](phase5-runtime-evidence.md#9cf6103). | — |
 
 ## Multi Agent Gate

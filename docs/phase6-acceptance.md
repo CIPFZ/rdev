@@ -7,7 +7,9 @@ Status: Complete — P6-01 through P6-09 accepted on 2026-09-09. Baseline
 changes documentation/evidence only. Phase5's `29b5f08` remains the regression
 reference.
 
-macOS runtime remains unverified and explicitly deferred by the user. Linux
+The macOS arm64 controller runtime and launchd closure are recorded in
+[macOS controller acceptance](macos-controller-acceptance.md). macOS remote-agent
+runtime remains unverified. Linux
 runtime and cross-build coverage are recorded separately. No hosted release,
 deployment or repository permission change is part of this work.
 
