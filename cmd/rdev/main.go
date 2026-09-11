@@ -566,7 +566,8 @@ func brokerJob(ctx context.Context, args []string) error {
 			return err
 		}
 		if resp.Job.TimedOut {
-			return fmt.Errorf("still running after %dms; wait again", resp.Job.WaitedMS)
+			fmt.Fprintf(os.Stderr, "rdev: wait timed out after %dms; job is still running (use job status/logs or wait again)\n", resp.Job.WaitedMS)
+			return nil
 		}
 		if resp.Job.Info != nil && resp.Job.Info.ExitCode != 0 {
 			os.Exit(resp.Job.Info.ExitCode)
@@ -988,7 +989,8 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 				return err
 			}
 			if res.TimedOut {
-				return fmt.Errorf("still running after %dms; wait again", res.WaitedMS)
+				fmt.Fprintf(os.Stderr, "rdev: wait timed out after %dms; job is still running (use job status/logs or wait again)\n", res.WaitedMS)
+				return nil
 			}
 			// Exit non-zero if any job failed, so shell && / || works off a batch.
 			for _, w := range res.Waited {
@@ -1015,7 +1017,8 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		if res.TimedOut {
-			return fmt.Errorf("still running after %dms; wait again", res.WaitedMS)
+			fmt.Fprintf(os.Stderr, "rdev: wait timed out after %dms; job is still running (use job status/logs or wait again)\n", res.WaitedMS)
+			return nil
 		}
 		// Mirror the job's exit code so shell && / || work off a remote job.
 		if res.Info.ExitCode != 0 {

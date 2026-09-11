@@ -136,6 +136,10 @@ wait:
 				limit = "log_bytes"
 				break wait
 			}
+			// Publish a readable snapshot while the job is running so job_logs is
+			// useful on Windows too; the terminal write remains authoritative.
+			_ = winutil.AtomicWrite(filepath.Join(dir, "stdout"), so.Bytes())
+			_ = winutil.AtomicWrite(filepath.Join(dir, "stderr"), se.Bytes())
 			_ = writeJSON(filepath.Join(dir, "ledger.json"), map[string]any{"stdout_ledger": ledgerProto(so.Ledger()), "stderr_ledger": ledgerProto(se.Ledger())})
 		}
 	}
