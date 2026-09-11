@@ -382,6 +382,7 @@ type JobWaitOut struct {
 	// Waited is set when ids was used.
 	Waited         []WaitedJobOut       `json:"waited,omitempty"`
 	TimedOut       bool                 `json:"timed_out,omitempty" jsonschema:"True when the wait budget expired while a job was still running. The jobs are unaffected."`
+	WaitState      string               `json:"wait_state" jsonschema:"completed when the requested job reached a terminal state, timed_out when only this wait budget expired, or failed when the wait request itself failed."`
 	WaitedMS       int64                `json:"waited_ms"`
 	Logs           string               `json:"logs,omitempty"`
 	LogsTruncation proto.Truncation     `json:"logs_truncation"`
@@ -522,6 +523,13 @@ func registerJobs(s *mcp.Server, c *client.Client) {
 			Logs:           res.Logs,
 			LogsTruncation: res.LogsTruncation, OperationID: res.OperationID,
 			Terminal: res.Terminal, ExecutionState: res.Execution,
+		}
+		if res.TimedOut {
+			out.WaitState = "timed_out"
+		} else if res.Terminal {
+			out.WaitState = "completed"
+		} else {
+			out.WaitState = "waiting"
 		}
 		for _, w := range res.Waited {
 			out.Waited = append(out.Waited, WaitedJobOut{
