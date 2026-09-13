@@ -40,6 +40,8 @@ func schema(name string) commandSpec {
 		s.min, s.max = 0, 1
 	case "agent.status", "agent.plan":
 		s.min, s.max = 1, 1
+	case "bootstrap-key", "setup":
+		s.min, s.max = 1, 1
 	case "fleet.plan", "fleet.inventory-update":
 		add("string", 0, "file")
 	case "fleet.approve", "fleet.execute":

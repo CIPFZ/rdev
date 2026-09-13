@@ -166,6 +166,8 @@ func main() {
 		err = cmdDoctor(ctx, c, os.Args[2:])
 	case "agent":
 		err = cmdAgent(ctx, c, os.Args[2:])
+	case "bootstrap-key", "setup":
+		err = cmdInteractiveSetup(os.Args[1], os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -742,6 +744,8 @@ USAGE
   rdev policy   check                      inspect the selected local release policy (standalone)
   rdev doctor   [host]                     read-only local/remote diagnosis
   rdev agent    status|plan <host>         read-only agent version/install plan
+  rdev bootstrap-key <host>                interactive dedicated-key bootstrap
+  rdev setup   <host>                      interactive first-connection setup
   rdev compat                             machine-readable version and migration contracts
 
 HOST
