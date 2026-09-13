@@ -4,8 +4,7 @@ Run `rdev version`, inspect `rdev hosts list`, establish host-key trust and
 project approval, then run `rdev ping HOST`. Use structured argv after `--` for
 exec and jobs. Use `rdev policy check` and `rdev doctor [HOST]` for read-only
 diagnostics. A missing host, path, credential or approval must be requested from
-the user; never invent one. Passwords and interactive trust prompts are terminal
-only and are never MCP parameters.
+the caller; never invent one. Agents may provide bootstrap passwords only through an inherited private `-password-fd` and explicit `-confirm`; passwords and trust prompts are never MCP parameters.
 
 `rdev agent status|plan HOST` is also read-only; unavailable fields are reported
 as `unknown` and no upload or repair is triggered. `bootstrap-key`, `setup` and
