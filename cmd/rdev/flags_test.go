@@ -114,3 +114,14 @@ func TestStdinFailureCannotDispatchPartialWrite(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentStatusPlanCLIValidation(t *testing.T) {
+	for _, args := range [][]string{{"agent", "status", "dev"}, {"agent", "plan", "dev"}} {
+		if err := validateCLI(args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if err := validateCLI([]string{"agent", "repair", "dev"}); err == nil {
+		t.Fatal("accepted unsupported agent action")
+	}
+}
