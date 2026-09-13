@@ -8,19 +8,23 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type Identity struct {
-	DeviceID string
-	HostID   string
-	Private  string
-	Public   string
-	Metadata string
+	DeviceID       string
+	HostID         string
+	Private        string
+	Public         string
+	Metadata       string
+	OpenSSHPrivate string
 }
 
 func DefaultRoot() (string, error) {
@@ -122,7 +126,7 @@ func Open(root, user, address string, port int, namespace string) (Identity, err
 	if err := os.Chmod(dir, 0700); err != nil {
 		return Identity{}, err
 	}
-	return Identity{DeviceID: device, HostID: host, Private: filepath.Join(dir, "id_ed25519"), Public: filepath.Join(dir, "id_ed25519.pub"), Metadata: filepath.Join(dir, "metadata.json")}, nil
+	return Identity{DeviceID: device, HostID: host, Private: filepath.Join(dir, "id_ed25519"), Public: filepath.Join(dir, "id_ed25519.pub"), Metadata: filepath.Join(dir, "metadata.json"), OpenSSHPrivate: filepath.Join(dir, "id_ed25519.openssh")}, nil
 }
 
 func (i Identity) Generate() error {
@@ -143,6 +147,13 @@ func (i Identity) Generate() error {
 	}
 	if err := atomicCreate(i.Public, pub); err != nil {
 		_ = os.Remove(i.Private)
+		return err
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "rdev")
+	if err != nil {
+		return err
+	}
+	if err := atomicCreate(i.OpenSSHPrivate, pemBytes(block)); err != nil {
 		return err
 	}
 	sum := sha256.Sum256(pub)
@@ -263,3 +274,5 @@ func atomicPrivate(path string, data []byte) error {
 	}
 	return os.Rename(tmpName, path)
 }
+
+func pemBytes(b *pem.Block) []byte { return pem.EncodeToMemory(b) }
