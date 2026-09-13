@@ -1333,9 +1333,12 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			Secrets    map[string]string `json:"secrets,omitempty"`
 			// Surfaced because it suppresses the downgrade refusal: a host that
 			// keeps flipping its agent should show why without reading the file.
-			ForceAgentUpload bool   `json:"force_agent_upload,omitempty"`
-			Scope            string `json:"scope"`
-			Source           string `json:"source"`
+			ForceAgentUpload      bool   `json:"force_agent_upload,omitempty"`
+			Scope                 string `json:"scope"`
+			Source                string `json:"source"`
+			Fingerprint           string `json:"fingerprint"`
+			ConnectionFingerprint string `json:"connection_fingerprint"`
+			Generation            uint64 `json:"generation"`
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
@@ -1347,7 +1350,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			rows = append(rows, row{
 				h.Name, h.Addr, h.Port, h.RemoteDir,
 				st.Cwd, st.Env, st.LoginShell, st.Secrets,
-				h.ForceAgentUpload, string(snapshot.Scope), sourceLabel(snapshot.Scope),
+				h.ForceAgentUpload, string(snapshot.Scope), sourceLabel(snapshot.Scope), snapshot.Fingerprint, snapshot.ConnectionFingerprint, snapshot.Generation,
 			})
 		}
 		return printJSON(c, rows)
