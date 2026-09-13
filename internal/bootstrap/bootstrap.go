@@ -57,7 +57,7 @@ func Revoke(ctx context.Context, cfg Config) error {
 		return err
 	}
 	payload := base64.StdEncoding.EncodeToString([]byte(pub))
-	cmd := `umask 077; f="$HOME/.ssh/authorized_keys"; test -f "$f"; t=$(mktemp); trap 'rm -f "$t" "$t.key"' EXIT; printf '%s' '` + payload + `' | base64 -d >"$t.key"; while IFS= read -r line || [ -n "$line" ]; do [ "$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/ && i<NF){print $i" "$(i+1); exit}}')" = "$(cat "$t.key")" ] || printf '%s\n' "$line"; done <"$f" >"$t" && chmod 600 "$t" && mv "$t" "$f"`
+	cmd := `umask 077; f="$HOME/.ssh/authorized_keys"; test -f "$f"; lock="$f.rdev.lock"; i=0; while ! mkdir "$lock" 2>/dev/null; do i=$((i+1)); [ "$i" -lt 200 ] || exit 75; sleep 0.05; done; t=$(mktemp); trap 'rm -f "$t" "$t.key"; rmdir "$lock" 2>/dev/null || :' EXIT; printf '%s' '` + payload + `' | base64 -d >"$t.key"; while IFS= read -r line || [ -n "$line" ]; do [ "$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/ && i<NF){print $i" "$(i+1); exit}}')" = "$(cat "$t.key")" ] || printf '%s\n' "$line"; done <"$f" >"$t" && chmod 600 "$t" && mv "$t" "$f"`
 	if err := s.Run(cmd); err != nil {
 		return fmt.Errorf("revoke dedicated key: %w", err)
 	}
@@ -195,7 +195,7 @@ func appendKey(client *ssh.Client, pub string) error {
 	}
 	defer s.Close()
 	payload := base64.StdEncoding.EncodeToString([]byte(pub + "\n"))
-	cmd := "umask 077; mkdir -p \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; chmod 600 \"$HOME/.ssh/authorized_keys\"; k=$(printf '%s' '" + payload + "' | base64 -d); grep -Fqx -- \"$k\" \"$HOME/.ssh/authorized_keys\" || printf '%s\\n' \"$k\" >> \"$HOME/.ssh/authorized_keys\""
+	cmd := "umask 077; mkdir -p \"$HOME/.ssh\"; f=\"$HOME/.ssh/authorized_keys\"; lock=\"$f.rdev.lock\"; i=0; while ! mkdir \"$lock\" 2>/dev/null; do i=$((i+1)); [ \"$i\" -lt 200 ] || exit 75; sleep 0.05; done; trap 'rmdir \"$lock\" 2>/dev/null || :' EXIT; touch \"$f\"; chmod 600 \"$f\"; k=$(printf '%s' '" + payload + "' | base64 -d); grep -Fqx -- \"$k\" \"$f\" || printf '%s\\n' \"$k\" >> \"$f\""
 	if err := s.Run(cmd); err != nil {
 		return fmt.Errorf("install dedicated key: %w", err)
 	}
