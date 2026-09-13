@@ -53,6 +53,10 @@ func Open(root, user, address string, port int, namespace string) (Identity, err
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return Identity{}, err
 	}
+	st, err = os.Lstat(dir)
+	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return Identity{}, errors.New("host key directory must be a real directory")
+	}
 	if err := os.Chmod(dir, 0700); err != nil {
 		return Identity{}, err
 	}
