@@ -153,3 +153,42 @@ Local logs are at `/data/tmp/rdev-phase9-final-check.log`,
 `/data/tmp/rdev-phase9-race.log`, `/data/tmp/rdev-phase9-agent-race.log` and
 `/data/tmp/rdev-phase9-build.log`. They are not repository artifacts and do not
 replace the required Windows/SSH evidence.
+
+## Repair execution (R12/R15)
+
+| Check | Result |
+|---|---|
+| Plan digest, explicit confirmation and strict transaction phases | Implemented in `internal/agentrepair`; unit tests pass |
+| Candidate byte validation and pre-mutation snapshot binding | Implemented and tested with synthetic bytes |
+| Transport mutation entrypoint and install lock | `Conn.RepairAgent` and `RepairAgentWithReconnect` reuse the existing atomic installer transaction |
+| Fresh dedicated-key reconnect and rollback on failed reconnect | Passed in disposable `home-ubuntu` container: real candidate install, `IdentitiesOnly` fresh-auth version probe, truncated-candidate health refusal, unchanged active SHA-256, and valid active agent after failure |
+| Password via inherited private FD; no TTY/MCP/job fallback | Existing bootstrap boundary retained; repair-specific end-to-end evidence pending |
+
+The isolated executable smoke entrypoint is `scripts/repair-fresh-auth-smoke.sh`; it runs synthetic-key fresh-auth repair hooks without touching a remote account.
+
+2026-09-13 `home-ubuntu` isolated container evidence: a disposable
+`rdev-onboarding-sandbox:port-test` container (`rdev-repair-ssh2`) was started
+with a synthetic Ed25519 key installed only in the container's `/root/.ssh`.
+`docker exec ... ssh -p 2222 -o IdentitiesOnly=yes -i /tmp/id root@127.0.0.1 true`
+returned `fresh-auth-ok`; no host `authorized_keys` or service was changed.
+
+The same disposable container then received the cached Linux amd64 agent,
+executed the real `-install-candidate` entrypoint with an in-container
+synthetic unsigned-dev decision, and reported the installed
+`/tmp/rdev-state/rdev-agent -version` identity. The container was stopped and
+removed immediately afterward.
+
+The standalone MCP repair tool is intentionally the mutation route; broker MCP
+does not expose password/key-bearing repair inputs and therefore remains a
+separate unsupported boundary until an administrator-owned broker credential
+transport is defined.
+
+Final container closure: the real candidate installer succeeded, and the
+installed agent was invoked over a new SSH connection using a synthetic
+dedicated key with `IdentitiesOnly=yes`; it returned the expected version and
+installer identity. A second run used a 128-byte truncated candidate; health
+verification failed with `RDEV_AGENT_INSTALL_NOT_SENT:verify`, the active and
+pre-install SHA-256 remained identical, and the active agent still reported a
+valid version. The disposable container was then removed.
+
+2026-09-13 service-deploy runtime evidence: `RDEV_RUN_REMOTE=1 RDEV_TEST_REMOTE=service-deploy go test ./cmd/rdevd -run '^TestRemotePhase8MasterDisappearance$'` passed. The owned SSH master was killed, a new serving agent reconnected, the detached supervisor and exact marker were retained, and cross-project access remained denied. This validates the reconnect/recovery substrate used by repair; it does not by itself prove dedicated-key repair authentication.
