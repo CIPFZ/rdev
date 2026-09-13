@@ -42,6 +42,8 @@ func schema(name string) commandSpec {
 		s.min, s.max = 1, 1
 	case "bootstrap-key", "setup":
 		s.min, s.max = 1, 1
+	case "bootstrap-key.remove":
+		s.min, s.max = 1, 1
 	case "fleet.plan", "fleet.inventory-update":
 		add("string", 0, "file")
 	case "fleet.approve", "fleet.execute":
@@ -313,7 +315,7 @@ func validateCLI(args []string) error {
 	}
 	name, rest := args[0], args[1:]
 	switch name {
-	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet", "policy", "agent":
+	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet", "policy", "agent", "bootstrap-key":
 		if len(rest) > 0 {
 			name += "." + rest[0]
 			rest = rest[1:]

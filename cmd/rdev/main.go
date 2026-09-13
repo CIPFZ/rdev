@@ -166,8 +166,14 @@ func main() {
 		err = cmdDoctor(ctx, c, os.Args[2:])
 	case "agent":
 		err = cmdAgent(ctx, c, os.Args[2:])
-	case "bootstrap-key", "setup":
-		err = cmdInteractiveSetup(os.Args[1], os.Args[2:])
+	case "bootstrap-key":
+		if len(os.Args) > 2 && os.Args[2] == "remove" {
+			err = cmdInteractiveSetup("bootstrap-key remove", os.Args[3:])
+		} else {
+			err = cmdInteractiveSetup("bootstrap-key", os.Args[2:])
+		}
+	case "setup":
+		err = cmdInteractiveSetup("setup", os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -745,6 +751,7 @@ USAGE
   rdev doctor   [host]                     read-only local/remote diagnosis
   rdev agent    status|plan <host>         read-only agent version/install plan
   rdev bootstrap-key <host>                interactive dedicated-key bootstrap
+  rdev bootstrap-key remove <host>        interactive exact-key revocation
   rdev setup   <host>                      interactive first-connection setup
   rdev compat                             machine-readable version and migration contracts
 
