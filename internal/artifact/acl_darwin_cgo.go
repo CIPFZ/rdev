@@ -21,6 +21,19 @@ static int rdev_acl_fd_entry_count(int fd, int *count) {
 	int rc;
 	*count = 0;
 	while ((rc = acl_get_entry(acl, entry_id, &entry)) == 0) {
+		acl_tag_t type;
+		if (acl_get_tag_type(entry, &type) != 0) {
+			int saved = errno == 0 ? EIO : errno;
+			acl_free(acl);
+			return saved;
+		}
+		// Restrictive ACL entries (for example, "everyone deny delete")
+		// narrow access and are safe to retain. An allow entry can grant
+		// access outside the owner/mode checks and must still fail closed.
+		if (type == ACL_EXTENDED_ALLOW) {
+			acl_free(acl);
+			return EACCES;
+		}
 		(*count)++;
 		entry_id = ACL_NEXT_ENTRY;
 	}
@@ -46,8 +59,7 @@ func rejectPolicyACL(fd int, path string) error {
 	if errno != 0 {
 		return fmt.Errorf("inspect fd-native ACL on %s: %w", path, syscall.Errno(errno))
 	}
-	if count != 0 {
-		return fmt.Errorf("security-sensitive path %s has an unsupported extended ACL", path)
-	}
+	// Deny-only ACLs are restrictive and therefore compatible with the
+	// owner/mode checks above. Allow entries fail in the native helper.
 	return nil
 }
