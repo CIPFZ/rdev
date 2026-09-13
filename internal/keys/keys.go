@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -71,10 +72,49 @@ func (i Identity) Generate() error {
 	if err != nil {
 		return err
 	}
-	if err := atomicPrivate(i.Private, priv); err != nil {
+	if err := atomicCreate(i.Private, priv); err != nil {
 		return err
 	}
-	return atomicPrivate(i.Public, pub)
+	if err := atomicCreate(i.Public, pub); err != nil {
+		_ = os.Remove(i.Private)
+		return err
+	}
+	sum := sha256.Sum256(pub)
+	meta, err := json.Marshal(struct {
+		DeviceID     string `json:"device_id"`
+		HostID       string `json:"host_id"`
+		PublicSHA256 string `json:"public_sha256"`
+	}{i.DeviceID, i.HostID, hex.EncodeToString(sum[:])})
+	if err != nil {
+		return err
+	}
+	if err := atomicCreate(i.Metadata, meta); err != nil {
+		_ = os.Remove(i.Private)
+		_ = os.Remove(i.Public)
+		return err
+	}
+	return nil
+}
+
+func atomicCreate(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+	}
+	return err
 }
 
 func readOrCreateID(path string) (string, error) {

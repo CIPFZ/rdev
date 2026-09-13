@@ -3,6 +3,7 @@ package keys
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -37,6 +38,9 @@ func TestOpenStableAndGenerateDoesNotAdoptExistingKey(t *testing.T) {
 			t.Fatalf("%s mode %o", p, st.Mode().Perm())
 		}
 	}
+	if _, err := os.Stat(a.Metadata); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestHostIDSeparatesConnectionIdentity(t *testing.T) {
@@ -58,5 +62,38 @@ func TestOpenRejectsPublicDeviceID(t *testing.T) {
 	}
 	if _, err := Open(root, "alice", "host", 22, "state"); err == nil {
 		t.Fatal("accepted public device id")
+	}
+}
+
+func TestConcurrentOpenAndGenerateKeepOneIdentity(t *testing.T) {
+	root, err := filepath.Abs(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	ids := make(chan Identity, 8)
+	for n := 0; n < 8; n++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			i, e := Open(root, "u", "h", 22, "s")
+			if e == nil {
+				_ = i.Generate()
+				ids <- i
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	var first Identity
+	for i := range ids {
+		if first.Private == "" {
+			first = i
+		} else if i.DeviceID != first.DeviceID || i.HostID != first.HostID {
+			t.Fatal("concurrent identity diverged")
+		}
+	}
+	if first.Private == "" {
+		t.Fatal("no identity created")
 	}
 }
