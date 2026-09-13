@@ -173,7 +173,9 @@ func (f *sshFixture) seed(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(f.home, ".ssh"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.home, ".ssh", "authorized_keys"), f.config.PublicKey, 0600); err != nil {
+	original := append([]byte{}, f.config.PublicKey...)
+	original = append(original, []byte("\nssh-ed25519 AAAA-unrelated retained-comment\n")...)
+	if err := os.WriteFile(filepath.Join(f.home, ".ssh", "authorized_keys"), original, 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -198,6 +200,10 @@ func TestRevokeSSHVerification(t *testing.T) {
 			if tt.want == "" {
 				if err != nil {
 					t.Fatal(err)
+				}
+				data, readErr := os.ReadFile(filepath.Join(f.home, ".ssh", "authorized_keys"))
+				if readErr != nil || !strings.Contains(string(data), "AAAA-unrelated retained-comment") {
+					t.Fatalf("unrelated authorized key was not preserved: %q (%v)", data, readErr)
 				}
 			} else if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("want %q, got %v", tt.want, err)
