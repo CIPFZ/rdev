@@ -56,3 +56,5 @@ agree. Time spent, old-code tests and documentation alone are not completion.
 2026-09-13: both worktrees clean; task detached at 52dbfa2, main at d456c8c.
 Created delivery branch at d456c8c. Existing dev-build, skill and ACL changes need
 validation rather than being assumed correct. No push or service restart performed.
+
+2026-09-13 isolated SSH negative evidence: `home-ubuntu` container `rdev-onboarding-sandbox` remained `Up`; after removing its temporary `/root/.ssh/authorized_keys`, `ssh -o BatchMode=yes -o IdentitiesOnly` to port 2222 exited 255. No fallback credential was accepted and the container remained isolated.
