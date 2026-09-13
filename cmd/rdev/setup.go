@@ -29,22 +29,26 @@ import (
 func cmdInteractiveSetup(c *client.Client, command string, args []string) error {
 	passwordFD := -1
 	confirmed := false
-	if len(args) >= 3 && args[1] == "-password-fd" {
-		var err error
-		passwordFD, err = strconv.Atoi(args[2])
-		if err != nil || passwordFD < 3 || passwordFD > 255 {
-			return errors.New("password-fd must be an inherited descriptor between 3 and 255")
+	if len(args) > 1 {
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "-confirm":
+				confirmed = true
+			case "-password-fd":
+				if i+1 >= len(args) {
+					return errors.New("-password-fd requires a descriptor")
+				}
+				var parseErr error
+				passwordFD, parseErr = strconv.Atoi(args[i+1])
+				if parseErr != nil || passwordFD < 3 || passwordFD > 255 {
+					return errors.New("password-fd must be an inherited descriptor between 3 and 255")
+				}
+				i++
+			default:
+				return fmt.Errorf("unknown setup flag %q", args[i])
+			}
 		}
 		args = args[:1]
-		if len(args) == 1 { /* retained below for the common form */
-		}
-	}
-	// Agent callers may authorize the displayed mutation with an explicit
-	// boolean flag; this replaces the human's literal "yes" line.
-	for _, a := range os.Args[1:] {
-		if a == "-confirm" {
-			confirmed = true
-		}
 	}
 	if len(args) != 1 || args[0] == "" {
 		return fmt.Errorf("usage: rdev %s <host> [-password-fd FD]", command)
@@ -56,7 +60,7 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 	if err != nil {
 		return err
 	}
-	if stdin.Mode()&os.ModeCharDevice == 0 && passwordFD < 0 {
+	if stdin.Mode()&os.ModeCharDevice == 0 && passwordFD < 0 && !confirmed {
 		return errors.New("interactive setup requires a real terminal; password bootstrap is refused in non-interactive CLI, jobs and MCP")
 	}
 	if strings.HasSuffix(command, " remove") {
