@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"encoding/pem"
@@ -84,11 +85,6 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 	if err := id.Validate(); err != nil {
 		return err
 	}
-	password, err := readBootstrapPassword(os.Stdin, os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer func() { password = "" }()
 	privRaw, err := os.ReadFile(id.Private)
 	if err != nil {
 		return err
@@ -106,6 +102,21 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 		return err
 	}
 	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pubKey)))
+	fmt.Fprintf(os.Stdout, "Target: %s@%s", user, sshAddr)
+	fmt.Fprintf(os.Stdout, "\nChange: append this dedicated key to %s@%s:$HOME/.ssh/authorized_keys", user, sshAddr)
+	fmt.Fprintf(os.Stdout, "\nFingerprint: %s\nType 'yes' to continue: ", bootstrap.Fingerprint(pubRaw))
+	confirmation, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return errors.New("could not read confirmation from terminal")
+	}
+	if strings.TrimSpace(confirmation) != "yes" {
+		return errors.New("bootstrap cancelled; type exactly yes to authorize the authorized_keys change")
+	}
+	password, err := readBootstrapPassword(os.Stdin, os.Stdout)
+	if err != nil {
+		return err
+	}
+	defer func() { password = "" }()
 	if err := bootstrap.Run(context.Background(), bootstrap.Config{Address: sshAddr, User: user, Password: password, PublicKey: []byte(pubLine), PrivateKey: pem.EncodeToMemory(privPEM), HostKeyCallback: cb}); err != nil {
 		return err
 	}
