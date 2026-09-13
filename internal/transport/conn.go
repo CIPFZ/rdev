@@ -24,11 +24,13 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/agentrepair"
 	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/framewriter"
@@ -1962,6 +1964,134 @@ func (c *Conn) stderrTail() string {
 
 // AgentPath is the absolute remote path of the installed agent binary.
 func (c *Conn) AgentPath() string { return c.agentPath }
+
+// RepairAgent performs the mutation half of an explicitly authorized repair.
+// The caller supplies the frozen preflight bytes and must establish a fresh
+// Conn for post-install authentication; this method never falls back to the
+// existing session or caches credentials.
+func (c *Conn) RepairAgent(ctx context.Context, plan agentrepair.Plan, tx *agentrepair.Transaction, candidate, current []byte, confirm bool, decision artifact.Decision) error {
+	if tx == nil {
+		return errors.New("repair transaction required")
+	}
+	if err := tx.Authorize(plan, confirm); err != nil {
+		return err
+	}
+	if err := plan.ValidateCandidate(current, candidate); err != nil {
+		_ = tx.Abort()
+		return err
+	}
+	if err := tx.Advance(agentrepair.Authorized); err != nil {
+		return err
+	}
+	if err := tx.Prepare(plan, current); err != nil {
+		_ = tx.Abort()
+		return err
+	}
+	if err := c.installAgentTransaction(ctx, candidate, plan.CandidateDigest, plan.CurrentDigest, decision); err != nil {
+		_ = tx.Abort()
+		return err
+	}
+	return tx.Advance(agentrepair.Committed)
+}
+
+// RepairAgentWithReconnect adds the mandatory fresh-authentication check. The
+// callback must create a new connection with dedicated-key-only options; a
+// failed check attempts an exact-byte rollback through the same installer.
+func (c *Conn) RepairAgentWithReconnect(ctx context.Context, plan agentrepair.Plan, tx *agentrepair.Transaction, candidate, current []byte, confirm bool, decision artifact.Decision, policy agentrepair.ReconnectPolicy, reconnect func(context.Context) error) error {
+	if reconnect == nil {
+		return errors.New("repair reconnect check required")
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	if tx == nil {
+		return errors.New("repair transaction required")
+	}
+	if err := tx.Authorize(plan, confirm); err != nil {
+		return err
+	}
+	if err := plan.ValidateCandidate(current, candidate); err != nil {
+		_ = tx.Abort()
+		return err
+	}
+	if err := tx.Advance(agentrepair.Authorized); err != nil {
+		return err
+	}
+	if err := tx.Prepare(plan, current); err != nil {
+		_ = tx.Abort()
+		return err
+	}
+	if err := c.installAgentTransaction(ctx, candidate, plan.CandidateDigest, plan.CurrentDigest, decision); err != nil {
+		_ = tx.Abort()
+		return err
+	}
+	if err := reconnect(ctx); err != nil {
+		if rb := c.installAgentTransaction(ctx, current, plan.CurrentDigest, plan.CandidateDigest, decision); rb != nil {
+			_ = tx.Abort()
+			return fmt.Errorf("repair reconnect failed: %w; rollback failed: %v", err, rb)
+		}
+		_ = tx.Abort()
+		return err
+	}
+	return tx.Advance(agentrepair.Committed)
+}
+
+// FreshAuthAgentVersion starts an independent SSH process with only keyPath.
+// It disables ControlMaster, agent forwarding and configured IdentityFile
+// entries, so a successful result proves dedicated-key authentication.
+func (c *Conn) FreshAuthAgentVersion(ctx context.Context, keyPath, knownHosts string) error {
+	if keyPath == "" || knownHosts == "" {
+		return errors.New("fresh auth requires key and known_hosts paths")
+	}
+	args := []string{"-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "ControlMaster=no", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts, "-i", keyPath}
+	user, host, port, err := resolveSSHTarget(ctx, c.host)
+	if err != nil {
+		return err
+	}
+	if port != 0 {
+		args = append(args, "-p", fmt.Sprint(port))
+	}
+	args = append(args, user+"@"+host, c.agentPath, "-version")
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("fresh dedicated-key authentication failed: %s", strings.TrimSpace(errOut.String()))
+	}
+	if !strings.Contains(out.String(), "rdev-installer 1") {
+		return errors.New("fresh auth reached an unexpected agent")
+	}
+	return nil
+}
+
+func resolveSSHTarget(ctx context.Context, h Host) (user, host string, port int, err error) {
+	cmd := exec.CommandContext(ctx, "ssh", "-G", h.Addr)
+	b, e := cmd.Output()
+	if e != nil {
+		return "", "", 0, e
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		switch f[0] {
+		case "user":
+			user = f[1]
+		case "hostname":
+			host = f[1]
+		case "port":
+			port, _ = strconv.Atoi(f[1])
+		}
+	}
+	if user == "" || host == "" {
+		return "", "", 0, errors.New("ssh config did not resolve user and host")
+	}
+	if h.Port != 0 {
+		port = h.Port
+	}
+	return user, host, port, nil
+}
 
 // Host returns the connection's host descriptor.
 func (c *Conn) Host() Host { return c.host }

@@ -25,6 +25,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/CIPFZ/rdev/internal/agentrepair"
+	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/secrets"
@@ -45,6 +47,11 @@ type remoteConnection interface {
 type negotiatedConnection interface {
 	NegotiatedVersion() int
 	SupportsFeature(proto.Feature) bool
+}
+
+type repairConnection interface {
+	RepairAgentWithReconnect(context.Context, agentrepair.Plan, *agentrepair.Transaction, []byte, []byte, bool, artifact.Decision, agentrepair.ReconnectPolicy, func(context.Context) error) error
+	FreshAuthAgentVersion(context.Context, string, string) error
 }
 
 type pooledConnection struct {
@@ -2363,6 +2370,39 @@ func (c *Client) StateRepair(ctx context.Context, host string, dryRun bool) (*pr
 		return nil, missingResultError(resp)
 	}
 	return resp.State, nil
+}
+
+// RepairAgent exposes the authorized transport repair path to higher-level
+// callers while retaining the client's connection pooling and redaction.
+func (c *Client) RepairAgent(ctx context.Context, host string, plan agentrepair.Plan, tx *agentrepair.Transaction, candidate, current []byte, confirm bool, decision artifact.Decision, policy agentrepair.ReconnectPolicy, reconnect func(context.Context) error) error {
+	pooled, _, release, err := c.leasedConn(ctx, host)
+	if err != nil {
+		return c.redactErr(err)
+	}
+	defer release()
+	rc, ok := pooled.conn.(repairConnection)
+	if !ok {
+		return errors.New("remote connection does not support agent repair")
+	}
+	return c.redactErr(rc.RepairAgentWithReconnect(ctx, plan, tx, candidate, current, confirm, decision, policy, reconnect))
+}
+
+// RepairAgentFreshAuth performs repair and verifies the installed agent over a
+// new SSH process restricted to the supplied dedicated key and known_hosts.
+func (c *Client) RepairAgentFreshAuth(ctx context.Context, host string, plan agentrepair.Plan, tx *agentrepair.Transaction, candidate, current []byte, confirm bool, decision artifact.Decision, keyPath, knownHosts string) error {
+	pooled, _, release, err := c.leasedConn(ctx, host)
+	if err != nil {
+		return c.redactErr(err)
+	}
+	defer release()
+	rc, ok := pooled.conn.(repairConnection)
+	if !ok {
+		return errors.New("remote connection does not support fresh-auth agent repair")
+	}
+	policy := agentrepair.ReconnectPolicy{DedicatedKeyOnly: true, DisableAgentCache: true}
+	return c.redactErr(rc.RepairAgentWithReconnect(ctx, plan, tx, candidate, current, confirm, decision, policy, func(reconnectCtx context.Context) error {
+		return rc.FreshAuthAgentVersion(reconnectCtx, keyPath, knownHosts)
+	}))
 }
 
 // JobRm deletes job records to reclaim disk.
