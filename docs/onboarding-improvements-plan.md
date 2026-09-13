@@ -31,6 +31,8 @@ The previous Phase 9 documentation refresh does not implement this plan.
 | R19 / delivery | Copy physical skill files to existing ~/.codex/skills/rdev and ~/.agents/skills/rdev; fix global relative references with self-contained references; verify usable references, not merely byte equality. | `Makefile install-skill` copies SKILL and references as regular files | `make install-skill`; destination references exist and SKILL files are not symlinks | b11df2c / partial; user-level copies installed and verified |
 | R20 / delivery | After acceptance rebuild/install user-local rdev/rdevd; verify executable paths/version/current dev policy and my-hk/dev-env ping. Do not restart unknown services. State worktree branch/main relationship precisely. | `Makefile`, built `bin/rdev`/`bin/rdevd`; installed to `$HOME/.local/bin` | `make all`; current `bin/rdev` installed to `$HOME/.local/bin`; `rdev version`; `dev-env ping` and `my-hk ping` both passed; no service restart or destructive host mutation | `2a8cb4c` plus 2026-09-13 service-deploy evidence / partial until remaining acceptance |
 
+2026-09-13 current branch `make check` passed: Go 1.25.0 vet, full test suite, and all five embedded agent integrity checks.
+
 ## Stage gates and evidence rules
 
 Execute M1 through M6 in order. Each implementation must be followed by code review,
