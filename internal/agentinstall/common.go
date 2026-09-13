@@ -112,7 +112,10 @@ func health(ctx context.Context, binary, root string, candidate bool) error {
 	if _, ok := proto.NegotiateVersion(proto.ProtocolRange{Min: proto.TypedProtocolVersion, Max: proto.Version}, proto.ProtocolRange{Min: min, Max: p.Version}); !ok {
 		return errors.New("candidate protocol incompatible")
 	}
-	required := proto.SupportedFeatures()
+	// Candidate health proves the mandatory protocol-3 baseline only. Optional
+	// features are negotiated per operation and must not make bootstrap reject a
+	// healthy agent (especially when the candidate is paired with an older host).
+	required := []proto.Feature{proto.FeatureOperationID, proto.FeatureErrorEnvelope}
 	if !candidate {
 		required = nil
 	} // Old agents need a valid handshake, not future features.
