@@ -282,7 +282,7 @@ func cmdInteractiveRevoke(c *client.Client, name string) error {
 	if err := bootstrap.Revoke(context.Background(), bootstrap.Config{Address: sshAddr, User: user, PublicKey: ssh.MarshalAuthorizedKey(pubKey), PrivateKey: pem.EncodeToMemory(priv), HostKeyCallback: cb}); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "dedicated key revoked for %s\n", name)
+	fmt.Fprintf(os.Stdout, "dedicated key revoked for %s\nLocal key retained at %s; rerun bootstrap-key for recovery if another login path is available.\n", name, id.Private)
 	return nil
 }
 
