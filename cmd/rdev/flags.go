@@ -136,7 +136,7 @@ func schema(name string) commandSpec {
 		s.min, s.max = 2, 2
 		add("bool", 0, "save", "global", "no-login", "force-agent-upload")
 		add("port", 65535, "port")
-		add("string", 0, "cwd", "remote-dir")
+		add("string", 0, "cwd", "remote-dir", "identity-file")
 		add("keyvalue", 0, "env", "secret")
 	case "capability.flags":
 		add("bool", 0, "refresh")

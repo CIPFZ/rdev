@@ -204,7 +204,7 @@ func wantsHelp(args []string) bool {
 
 func usageFor(args []string) {
 	if len(args) >= 2 && args[0] == "hosts" && args[1] == "add" {
-		fmt.Fprintln(os.Stdout, "usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
+		fmt.Fprintln(os.Stdout, "usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-identity-file PATH] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
 		fmt.Fprintln(os.Stdout, "scope defaults to this project; -global writes the all-projects registry")
 		return
 	}
@@ -1363,7 +1363,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		if len(fs.pos) < 2 {
-			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
+			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-identity-file PATH] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
 		}
 		// Project scope is the default: a host registered while working in a repo
 		// almost always belongs to that repo. -global opts into cross-project
@@ -1413,6 +1413,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		host := transport.Host{
 			Name: fs.pos[0], Addr: fs.pos[1], Port: port,
 			RemoteDir:        fs.str("remote-dir"),
+			IdentityFile:     fs.str("identity-file"),
 			ForceAgentUpload: fs.bools["force-agent-upload"],
 		}
 		result, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{
