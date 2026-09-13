@@ -23,6 +23,21 @@ type Identity struct {
 	Metadata string
 }
 
+func DefaultRoot() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(h, ".config")
+	}
+	if !filepath.IsAbs(base) {
+		return "", errors.New("key config root must be absolute")
+	}
+	return filepath.Join(base, "rdev", "keys"), nil
+}
+
 func (i Identity) Validate() error {
 	priv, err := os.ReadFile(i.Private)
 	if err != nil {

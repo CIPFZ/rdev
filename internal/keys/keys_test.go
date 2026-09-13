@@ -61,6 +61,14 @@ func TestHostIDSeparatesConnectionIdentity(t *testing.T) {
 	}
 }
 
+func TestDefaultRootUsesXDGConfigHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/rdev-config")
+	root, err := DefaultRoot()
+	if err != nil || root != "/tmp/rdev-config/rdev/keys" {
+		t.Fatalf("root=%q err=%v", root, err)
+	}
+}
+
 func TestOpenRejectsPublicDeviceID(t *testing.T) {
 	root, err := filepath.Abs(t.TempDir())
 	if err != nil {
