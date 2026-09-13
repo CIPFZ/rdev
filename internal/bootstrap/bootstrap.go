@@ -27,6 +27,40 @@ type Config struct {
 	Timeout         time.Duration
 }
 
+// Revoke removes exactly PublicKey from the target user's authorized_keys and
+// verifies that the key can no longer authenticate. It requires the dedicated
+// private key, so it never falls back to an agent or password.
+func Revoke(ctx context.Context, cfg Config) error {
+	if cfg.Address == "" || cfg.User == "" || len(cfg.PublicKey) == 0 || len(cfg.PrivateKey) == 0 {
+		return errors.New("revoke requires address, user and key pair")
+	}
+	if cfg.HostKeyCallback == nil {
+		return errors.New("revoke requires host-key verification")
+	}
+	priv, err := ssh.ParsePrivateKey(cfg.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("parse dedicated private key: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	client, err := dialSigner(ctx, cfg.Address, cfg.User, priv, cfg.HostKeyCallback)
+	if err != nil {
+		return fmt.Errorf("dedicated-key authentication: %w", err)
+	}
+	pub := strings.TrimSpace(string(cfg.PublicKey))
+	defer client.Close()
+	s, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	payload := base64.StdEncoding.EncodeToString([]byte(pub))
+	cmd := `umask 077; f="$HOME/.ssh/authorized_keys"; test -f "$f"; t=$(mktemp); trap 'rm -f "$t" "$t.key"' EXIT; printf '%s' '` + payload + `' | base64 -d >"$t.key"; while IFS= read -r line || [ -n "$line" ]; do [ "$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/ && i<NF){print $i" "$(i+1); exit}}')" = "$(cat "$t.key")" ] || printf '%s\n' "$line"; done <"$f" >"$t" && chmod 600 "$t" && mv "$t" "$f"`
+	if err := s.Run(cmd); err != nil {
+		return fmt.Errorf("revoke dedicated key: %w", err)
+	}
+	return nil
+}
+
 // Run installs PublicKey exactly once and proves that the matching private key
 // can authenticate afterwards. HostKeyCallback is mandatory; callers must not
 // disable host-key verification in production.
