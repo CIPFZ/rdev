@@ -39,7 +39,7 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 		return errors.New("interactive setup requires a real terminal; password bootstrap is refused in non-interactive CLI, jobs and MCP")
 	}
 	if strings.HasSuffix(command, " remove") {
-		return errors.New("bootstrap-key remove requires the explicit revocation flow, which is not yet wired")
+		return cmdInteractiveRevoke(c, args[0])
 	}
 	h, err := c.Hosts.Host(args[0])
 	if err != nil {
@@ -121,6 +121,73 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "dedicated key installed and verified for %s\n", args[0])
+	return nil
+}
+
+func cmdInteractiveRevoke(c *client.Client, name string) error {
+	h, err := c.Hosts.Host(name)
+	if err != nil {
+		return err
+	}
+	addr, port, err := transport.ParseDestination(h.Addr, h.Port)
+	if err != nil {
+		return err
+	}
+	user := os.Getenv("USER")
+	if before, _, ok := strings.Cut(addr, "@"); ok {
+		user, addr = before, strings.TrimPrefix(addr, before+"@")
+	}
+	if user == "" {
+		return errors.New("host must specify an SSH user (user@host)")
+	}
+	sshAddr := addr
+	if port != 0 {
+		sshAddr = fmt.Sprintf("%s:%d", addr, port)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	cb, err := bootstrap.KnownHostsCallback(filepath.Join(home, ".ssh", "known_hosts"))
+	if err != nil {
+		return err
+	}
+	root, err := keys.DefaultRoot()
+	if err != nil {
+		return err
+	}
+	id, err := keys.Open(root, user, addr, port, "default")
+	if err != nil {
+		return err
+	}
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	privRaw, err := os.ReadFile(id.Private)
+	if err != nil {
+		return err
+	}
+	pubRaw, err := os.ReadFile(id.Public)
+	if err != nil {
+		return err
+	}
+	priv, err := ssh.MarshalPrivateKey(ed25519.PrivateKey(privRaw), "rdev")
+	if err != nil {
+		return err
+	}
+	pubKey, err := ssh.NewPublicKey(ed25519.PublicKey(pubRaw))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "Target: %s@%s\nChange: remove only this rdev key from $HOME/.ssh/authorized_keys\nFingerprint: %s\nType 'yes' to continue: ", user, sshAddr, bootstrap.Fingerprint(pubRaw))
+	confirmation, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil || strings.TrimSpace(confirmation) != "yes" {
+		return errors.New("revocation cancelled; type exactly yes to authorize")
+	}
+	if err := bootstrap.Revoke(context.Background(), bootstrap.Config{Address: sshAddr, User: user, PublicKey: ssh.MarshalAuthorizedKey(pubKey), PrivateKey: pem.EncodeToMemory(priv), HostKeyCallback: cb}); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "dedicated key revoked for %s\n", name)
 	return nil
 }
 
