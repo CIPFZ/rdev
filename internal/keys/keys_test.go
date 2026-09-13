@@ -65,6 +65,23 @@ func TestOpenRejectsPublicDeviceID(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsSymlinkDeviceID(t *testing.T) {
+	root, err := filepath.Abs(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("0123456789abcdef\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "device-id")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(root, "u", "h", 22, "s"); err == nil {
+		t.Fatal("accepted symlink device id")
+	}
+}
+
 func TestConcurrentOpenAndGenerateKeepOneIdentity(t *testing.T) {
 	root, err := filepath.Abs(t.TempDir())
 	if err != nil {

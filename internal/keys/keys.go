@@ -130,8 +130,15 @@ func atomicCreate(path string, data []byte) error {
 }
 
 func readOrCreateID(path string) (string, error) {
+	return readOrCreateIDAttempt(path, 0)
+}
+
+func readOrCreateIDAttempt(path string, attempt int) (string, error) {
 	if b, err := os.ReadFile(path); err == nil {
-		st, statErr := os.Stat(path)
+		if attempt > 4 {
+			return "", errors.New("device id changed concurrently")
+		}
+		st, statErr := os.Lstat(path)
 		if statErr != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0600 {
 			return "", errors.New("device id file is not private")
 		}
@@ -149,7 +156,7 @@ func readOrCreateID(path string) (string, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return readOrCreateID(path)
+			return readOrCreateIDAttempt(path, attempt+1)
 		}
 		return "", err
 	}
