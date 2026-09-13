@@ -246,9 +246,18 @@ func cmdInteractiveRevoke(c *client.Client, name string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Target: %s@%s\nChange: remove only this rdev key from $HOME/.ssh/authorized_keys\nFingerprint: %s\nType 'yes' to continue: ", user, sshAddr, bootstrap.Fingerprint(pubRaw))
-	confirmation, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil || strings.TrimSpace(confirmation) != "yes" {
-		return errors.New("revocation cancelled; type exactly yes to authorize")
+	confirmed := false
+	for _, arg := range os.Args[1:] {
+		if arg == "-confirm" {
+			confirmed = true
+			break
+		}
+	}
+	if !confirmed {
+		confirmation, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+		if readErr != nil || strings.TrimSpace(confirmation) != "yes" {
+			return errors.New("revocation cancelled; type exactly yes to authorize")
+		}
 	}
 	if err := bootstrap.Revoke(context.Background(), bootstrap.Config{Address: sshAddr, User: user, PublicKey: ssh.MarshalAuthorizedKey(pubKey), PrivateKey: pem.EncodeToMemory(priv), HostKeyCallback: cb}); err != nil {
 		return err
