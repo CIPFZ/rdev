@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type Config struct {
@@ -112,4 +114,23 @@ func appendKey(client *ssh.Client, pub string) error {
 func Fingerprint(public []byte) string {
 	h := sha256.Sum256(public)
 	return fmt.Sprintf("SHA256:%x", h[:])
+}
+
+// KnownHostsCallback loads the user's OpenSSH known_hosts files. It refuses
+// an absent or empty set so bootstrap can never silently downgrade to an
+// insecure host-key policy.
+func KnownHostsCallback(paths ...string) (ssh.HostKeyCallback, error) {
+	var usable []string
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			usable = append(usable, p)
+		}
+	}
+	if len(usable) == 0 {
+		return nil, errors.New("no known_hosts file available; confirm the host key before bootstrap")
+	}
+	return knownhosts.New(usable...)
 }
