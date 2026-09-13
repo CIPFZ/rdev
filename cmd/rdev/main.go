@@ -1312,6 +1312,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			// keeps flipping its agent should show why without reading the file.
 			ForceAgentUpload bool   `json:"force_agent_upload,omitempty"`
 			Scope            string `json:"scope"`
+			Source           string `json:"source"`
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
@@ -1323,7 +1324,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			rows = append(rows, row{
 				h.Name, h.Addr, h.Port, h.RemoteDir,
 				st.Cwd, st.Env, st.LoginShell, st.Secrets,
-				h.ForceAgentUpload, string(snapshot.Scope),
+				h.ForceAgentUpload, string(snapshot.Scope), sourceLabel(snapshot.Scope),
 			})
 		}
 		return printJSON(c, rows)
@@ -1409,6 +1410,16 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		return cmdHosts(ctx, c, []string{"list"})
 	}
 	return fmt.Errorf("unknown hosts subcommand %q", args[0])
+}
+
+func sourceLabel(scope session.Scope) string {
+	if scope == session.ScopeGlobal {
+		return "global registry"
+	}
+	if scope == session.ScopeProject {
+		return "approved project registry"
+	}
+	return "unknown registry source"
 }
 
 type approvalOutput struct {
