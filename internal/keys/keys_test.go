@@ -47,3 +47,16 @@ func TestHostIDSeparatesConnectionIdentity(t *testing.T) {
 		t.Fatal("port not included")
 	}
 }
+
+func TestOpenRejectsPublicDeviceID(t *testing.T) {
+	root, err := filepath.Abs(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "device-id"), []byte("device\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(root, "alice", "host", 22, "state"); err == nil {
+		t.Fatal("accepted public device id")
+	}
+}
