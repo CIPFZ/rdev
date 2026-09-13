@@ -69,6 +69,16 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 		return cmdInteractiveRevoke(c, args[0])
 	}
 	if command == "setup" {
+		trust := c.Hosts.ProjectTrustStatus()
+		if trust.Path != "" && !trust.Approved {
+			if !confirmed {
+				return fmt.Errorf("setup stage project approval required for %s (sha256:%s); review it, then run `rdev hosts approve-project %s` or retry with agent -confirm", trust.Path, trust.Digest, trust.Digest)
+			}
+			if _, err := c.Hosts.ApproveProject(trust.Digest); err != nil {
+				return fmt.Errorf("setup stage project approval failed: %w", err)
+			}
+			fmt.Fprintln(os.Stdout, "setup stage project approval passed")
+		}
 		policy := artifact.DiagnosePolicy(time.Now())
 		if !policy.Valid {
 			return fmt.Errorf("setup stage policy failed: %s; action: %s", policy.Error, policy.Action)
