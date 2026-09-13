@@ -51,6 +51,15 @@ func (i Identity) Validate() error {
 	if err != nil || ps.Mode().Perm() != 0600 {
 		return errors.New("private key is not mode 0600")
 	}
+	if err := validateOwner(i.Private); err != nil {
+		return err
+	}
+	if err := validateOwner(i.Public); err != nil {
+		return err
+	}
+	if err := validateOwner(i.Metadata); err != nil {
+		return err
+	}
 	if len(priv) != ed25519.PrivateKeySize || len(pub) != ed25519.PublicKeySize {
 		return errors.New("key files have invalid length")
 	}
