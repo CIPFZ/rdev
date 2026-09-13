@@ -116,6 +116,7 @@ rdev fleet retry PLAN FAILED_HOST_ID
 | `rdev_secrets` | standalone 内存凭据；broker principal-owned 凭据 |
 | `rdev_session` | 仅 standalone 的 host/session 查询和编辑 |
 | `rdev_support` | 静态支持矩阵、前端边界及可选 runtime 探测 |
+| `rdev_agent_plan` | standalone/broker 的只读 agent 状态与安装计划；不可观测字段返回 `unknown`，不触发安装或修复 |
 | `rdev_compat` | 当前构建的协议、错误、config/state 兼容契约 |
 | `rdev_state` | 整个 host state root 的管理员检查、迁移和修复 |
 | `rdev_storage_status` / `rdev_storage_doctor` / `rdev_storage_gc` | standalone 的受管存储检查和清理；共享 MCP 未注册这些工具 |
