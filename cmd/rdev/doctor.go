@@ -37,7 +37,20 @@ type agentPlan struct {
 }
 
 func cmdAgent(ctx context.Context, c *client.Client, args []string) error {
-	if len(args) != 2 || (args[0] != "status" && args[0] != "plan") || args[1] == "" {
+	if len(args) < 2 || args[1] == "" || (args[0] != "status" && args[0] != "plan" && args[0] != "repair") {
+		return errors.New("usage: rdev agent status|plan <host>; agent repair <host> -dry-run")
+	}
+	if args[0] == "repair" {
+		if len(args) != 3 || args[2] != "-dry-run" {
+			return errors.New("agent repair requires -dry-run; applying repair is not available without a transaction and approval contract")
+		}
+		probe, err := c.CapabilityProbe(ctx, args[1], false)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(agentPlan{Host: args[1], Mode: "repair-preview", CurrentVersion: probe.ProbeVersion, CandidateVersion: "unknown", Policy: "unknown", Upload: "unknown", Transaction: "preview-only", Action: "no mutation; obtain an explicit transaction and approval before repair"})
+	}
+	if len(args) != 2 {
 		return errors.New("usage: rdev agent status|plan <host>")
 	}
 	probe, err := c.CapabilityProbe(ctx, args[1], false)

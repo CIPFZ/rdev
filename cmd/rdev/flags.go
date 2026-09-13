@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -40,6 +41,9 @@ func schema(name string) commandSpec {
 		s.min, s.max = 0, 1
 	case "agent.status", "agent.plan":
 		s.min, s.max = 1, 1
+	case "agent.repair":
+		s.min, s.max = 1, 1
+		add("bool", 0, "dry-run")
 	case "bootstrap-key", "setup":
 		s.min, s.max = 1, 1
 	case "bootstrap-key.remove":
@@ -300,6 +304,9 @@ func parseFlags(args []string, command string) (*flagSet, error) {
 	}
 	if command == "job.rm" && len(f.pos) == 2 && (seen["older-than"] || seen["keep-last"]) {
 		return nil, fmt.Errorf("job ID conflicts with sweep filters")
+	}
+	if command == "agent.repair" && !seen["dry-run"] {
+		return nil, errors.New("agent repair requires -dry-run")
 	}
 	if command == "job.events" && seen["after"] && !seen["stream"] {
 		return nil, fmt.Errorf("-after requires -stream")

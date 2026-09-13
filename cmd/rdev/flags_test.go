@@ -122,6 +122,9 @@ func TestAgentStatusPlanCLIValidation(t *testing.T) {
 		}
 	}
 	if err := validateCLI([]string{"agent", "repair", "dev"}); err == nil {
-		t.Fatal("accepted unsupported agent action")
+		t.Fatal("accepted agent repair without dry-run")
+	}
+	if err := validateCLI([]string{"agent", "repair", "dev", "-dry-run"}); err != nil {
+		t.Fatalf("rejected agent repair preview: %v", err)
 	}
 }
