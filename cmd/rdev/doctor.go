@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/agentrepair"
 	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
 )
 
@@ -20,12 +22,17 @@ type doctorItem struct {
 	Action string `json:"action,omitempty"`
 }
 type doctorReport struct {
-	Version      string      `json:"version"`
-	Mode         string      `json:"mode"`
-	Policy       doctorItem  `json:"policy"`
-	Host         string      `json:"host,omitempty"`
-	Connectivity doctorItem  `json:"connectivity,omitempty"`
-	Capability   *doctorItem `json:"capability,omitempty"`
+	Version       string      `json:"version"`
+	Mode          string      `json:"mode"`
+	Policy        doctorItem  `json:"policy"`
+	Host          string      `json:"host,omitempty"`
+	Connectivity  doctorItem  `json:"connectivity,omitempty"`
+	Capability    *doctorItem `json:"capability,omitempty"`
+	ConfigSource  string      `json:"config_source,omitempty"`
+	Scope         string      `json:"scope,omitempty"`
+	HostKeySource string      `json:"host_key_source,omitempty"`
+	RemoteDir     string      `json:"remote_dir,omitempty"`
+	Cwd           string      `json:"cwd,omitempty"`
 }
 
 type agentPlan struct {
@@ -135,6 +142,21 @@ func cmdDoctor(ctx context.Context, c *client.Client, args []string) error {
 	r := doctorReport{Version: "local", Mode: "standalone", Policy: item}
 	if len(fs.pos) == 1 {
 		r.Host = fs.pos[0]
+		if snap, e := c.Hosts.Inspect(r.Host); e == nil {
+			r.Scope = string(snap.Scope)
+			r.RemoteDir = snap.Host.RemoteDir
+			r.Cwd = snap.State.Cwd
+			if snap.Scope == session.ScopeProject {
+				if path, e := session.ProjectConfigPath(); e == nil {
+					r.ConfigSource = path
+				}
+			} else if path, e := session.ConfigPath(); e == nil {
+				r.ConfigSource = path
+			}
+		}
+		if home, e := os.UserHomeDir(); e == nil {
+			r.HostKeySource = filepath.Join(home, ".ssh", "known_hosts")
+		}
 		probe, e := c.CapabilityProbe(ctx, r.Host, false)
 		if e != nil {
 			r.Connectivity = doctorItem{Status: "FAIL", Detail: e.Error(), Action: "verify host trust and public-key authentication"}
