@@ -245,7 +245,7 @@ func cmdInteractiveRevoke(c *client.Client, name string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "Target: %s@%s\nChange: remove only this rdev key from $HOME/.ssh/authorized_keys\nFingerprint: %s\nType 'yes' to continue: ", user, sshAddr, bootstrap.Fingerprint(pubRaw))
+	fmt.Fprintf(os.Stdout, "Target: %s@%s\nChange: remove only this rdev key from $HOME/.ssh/authorized_keys\nFingerprint: %s\nWarning: if this is the last usable key, access may be lost; keep another login path available.\nType 'yes' to continue: ", user, sshAddr, bootstrap.Fingerprint(pubRaw))
 	confirmed := false
 	for _, arg := range os.Args[1:] {
 		if arg == "-confirm" {
