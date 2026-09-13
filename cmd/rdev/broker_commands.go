@@ -65,6 +65,8 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		return cmdCompat()
 	case "support":
 		return cmdBrokerSupport(ctx, args[1:])
+	case "doctor":
+		return fmt.Errorf("%w: doctor requires broker support diagnostics; use rdev support", proto.NewError(proto.CodeUnsupportedFeature, "", proto.StateNotSent))
 	case "version", "-version", "--version":
 		printVersion()
 		return nil

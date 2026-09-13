@@ -162,6 +162,8 @@ func main() {
 		err = cmdSupport(ctx, c, os.Args[2:])
 	case "policy":
 		err = cmdPolicy(ctx, os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(ctx, c, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:

@@ -36,6 +36,8 @@ func schema(name string) commandSpec {
 	}
 	switch name {
 	case "policy.check":
+	case "doctor":
+		s.min, s.max = 0, 1
 	case "fleet.plan", "fleet.inventory-update":
 		add("string", 0, "file")
 	case "fleet.approve", "fleet.execute":
