@@ -27,15 +27,18 @@ type Config struct {
 	Timeout         time.Duration
 }
 
-// Revoke removes exactly PublicKey from the target user's authorized_keys. It
-// requires the dedicated
-// private key, so it never falls back to an agent or password.
+// Revoke removes exactly PublicKey from the target user's authorized_keys, then
+// requires an explicit rejection on a new authenticated-host connection. It
+// never falls back to an agent or password.
 func Revoke(ctx context.Context, cfg Config) error {
 	if cfg.Address == "" || cfg.User == "" || len(cfg.PublicKey) == 0 || len(cfg.PrivateKey) == 0 {
 		return errors.New("revoke requires address, user and key pair")
 	}
 	if cfg.HostKeyCallback == nil {
 		return errors.New("revoke requires host-key verification")
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 30 * time.Second
 	}
 	priv, err := ssh.ParsePrivateKey(cfg.PrivateKey)
 	if err != nil {
@@ -59,15 +62,41 @@ func Revoke(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("revoke dedicated key: %w", err)
 	}
 	_ = client.Close()
-	// The server must reject the revoked key on a fresh connection. A
-	// successful authentication here means the remote mutation did not take
-	// effect and is reported as failure.
-	check, err := dialSigner(ctx, cfg.Address, cfg.User, priv, cfg.HostKeyCallback)
+	return verifyRevoked(ctx, cfg, priv)
+}
+
+// x/crypto/ssh has no exported client authentication-rejection type. Accept
+// only its exact terminal publickey-rejection result, after both host-key
+// verification and selection of our sole signer. Unknown results fail closed;
+// a dependency change must pass the wire-level rejection tests below.
+func verifyRevoked(ctx context.Context, cfg Config, signer ssh.Signer) error {
+	verifiedHost, offeredKey := false, false
+	check, err := dialConfig(ctx, cfg.Address, &ssh.ClientConfig{
+		User: cfg.User,
+		HostKeyCallback: func(host string, addr net.Addr, key ssh.PublicKey) error {
+			if err := cfg.HostKeyCallback(host, addr, key); err != nil {
+				return err
+			}
+			verifiedHost = true
+			return nil
+		},
+		Auth: []ssh.AuthMethod{ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+			offeredKey = true
+			return []ssh.Signer{signer}, nil
+		})},
+	})
 	if err == nil {
 		check.Close()
 		return errors.New("revocation verification failed: dedicated key still authenticates")
 	}
-	return nil
+	if ctx.Err() != nil {
+		return fmt.Errorf("key removal completed; revocation verification inconclusive: %w", ctx.Err())
+	}
+	const rejected = "ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain"
+	if verifiedHost && offeredKey && err.Error() == rejected {
+		return nil
+	}
+	return fmt.Errorf("key removal completed; revocation verification inconclusive: %w", err)
 }
 
 // Run installs PublicKey exactly once and proves that the matching private key
@@ -133,12 +162,31 @@ func dialConfig(ctx context.Context, address string, cfg *ssh.ClientConfig) (*ss
 	if err != nil {
 		return nil, err
 	}
-	cc, chans, reqs, err := ssh.NewClientConn(c, address, cfg)
+	// DialContext bounds TCP establishment only. Also bound SSH handshake and
+	// session I/O, including a server that accepts TCP but never sends a banner.
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := c.SetDeadline(deadline); err != nil {
+			c.Close()
+			return nil, err
+		}
+	}
+	conn := &contextConn{Conn: c, stop: context.AfterFunc(ctx, func() { c.Close() })}
+	cc, chans, reqs, err := ssh.NewClientConn(conn, address, cfg)
 	if err != nil {
-		c.Close()
+		conn.Close()
 		return nil, err
 	}
 	return ssh.NewClient(cc, chans, reqs), nil
+}
+
+type contextConn struct {
+	net.Conn
+	stop func() bool
+}
+
+func (c *contextConn) Close() error {
+	c.stop()
+	return c.Conn.Close()
 }
 func appendKey(client *ssh.Client, pub string) error {
 	s, err := client.NewSession()
