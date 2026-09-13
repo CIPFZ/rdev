@@ -19,6 +19,7 @@ import (
 	"github.com/CIPFZ/rdev/internal/bootstrap"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/keys"
+	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
@@ -172,6 +173,12 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 	defer func() { password = "" }()
 	if err := bootstrap.Run(context.Background(), bootstrap.Config{Address: sshAddr, User: user, Password: password, PublicKey: []byte(pubLine), PrivateKey: pem.EncodeToMemory(privPEM), HostKeyCallback: cb}); err != nil {
 		return err
+	}
+	if id.OpenSSHPrivate != "" {
+		h.IdentityFile = id.OpenSSHPrivate
+		if _, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{Name: args[0], Host: &h, Persist: true}); err != nil {
+			return fmt.Errorf("dedicated key installed but saving identity selection failed: %w", err)
+		}
 	}
 	fmt.Fprintf(os.Stdout, "dedicated key installed and verified for %s\n", args[0])
 	if command == "setup" {
