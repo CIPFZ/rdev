@@ -58,6 +58,15 @@ func Revoke(ctx context.Context, cfg Config) error {
 	if err := s.Run(cmd); err != nil {
 		return fmt.Errorf("revoke dedicated key: %w", err)
 	}
+	_ = client.Close()
+	// The server must reject the revoked key on a fresh connection. A
+	// successful authentication here means the remote mutation did not take
+	// effect and is reported as failure.
+	check, err := dialSigner(ctx, cfg.Address, cfg.User, priv, cfg.HostKeyCallback)
+	if err == nil {
+		check.Close()
+		return errors.New("revocation verification failed: dedicated key still authenticates")
+	}
 	return nil
 }
 
