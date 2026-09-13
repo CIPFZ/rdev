@@ -41,6 +41,15 @@ func TestOpenStableAndGenerateDoesNotAdoptExistingKey(t *testing.T) {
 	if _, err := os.Stat(a.Metadata); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.Public, []byte("bad"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Validate(); err == nil {
+		t.Fatal("accepted corrupted public key")
+	}
 }
 
 func TestHostIDSeparatesConnectionIdentity(t *testing.T) {

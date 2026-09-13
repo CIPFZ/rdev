@@ -23,6 +23,44 @@ type Identity struct {
 	Metadata string
 }
 
+func (i Identity) Validate() error {
+	priv, err := os.ReadFile(i.Private)
+	if err != nil {
+		return fmt.Errorf("read private key: %w", err)
+	}
+	pub, err := os.ReadFile(i.Public)
+	if err != nil {
+		return fmt.Errorf("read public key: %w", err)
+	}
+	ps, err := os.Stat(i.Private)
+	if err != nil || ps.Mode().Perm() != 0600 {
+		return errors.New("private key is not mode 0600")
+	}
+	if len(priv) != ed25519.PrivateKeySize || len(pub) != ed25519.PublicKeySize {
+		return errors.New("key files have invalid length")
+	}
+	if !ed25519.PublicKey(priv[32:]).Equal(ed25519.PublicKey(pub)) {
+		return errors.New("private and public keys do not match")
+	}
+	meta, err := os.ReadFile(i.Metadata)
+	if err != nil {
+		return fmt.Errorf("read key metadata: %w", err)
+	}
+	var m struct {
+		DeviceID     string `json:"device_id"`
+		HostID       string `json:"host_id"`
+		PublicSHA256 string `json:"public_sha256"`
+	}
+	if json.Unmarshal(meta, &m) != nil || m.DeviceID != i.DeviceID || m.HostID != i.HostID {
+		return errors.New("key metadata does not match identity")
+	}
+	sum := sha256.Sum256(pub)
+	if m.PublicSHA256 != hex.EncodeToString(sum[:]) {
+		return errors.New("key fingerprint does not match metadata")
+	}
+	return nil
+}
+
 func HostID(user, address string, port int, namespace string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "user=%s\x00address=%s\x00port=%d\x00namespace=%s", user, address, port, namespace)
