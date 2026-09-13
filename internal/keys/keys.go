@@ -100,8 +100,14 @@ func atomicCreate(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.CreateTemp(filepath.Dir(path), ".rdev-key-")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
 		return err
 	}
 	if _, err = f.Write(data); err == nil {
@@ -112,9 +118,11 @@ func atomicCreate(path string, data []byte) error {
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		return err
 	}
-	return err
+	// Link publishes the fully written inode without replacing an existing key.
+	// This gives concurrent creators one winner and leaves no partial destination.
+	return os.Link(tmp, path)
 }
 
 func readOrCreateID(path string) (string, error) {
