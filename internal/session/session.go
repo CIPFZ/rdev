@@ -355,11 +355,12 @@ func (e *UntrustedProjectError) Error() string {
 }
 
 type hostEntry struct {
-	Name      string `json:"name"`
-	Addr      string `json:"addr"`
-	Port      int    `json:"port,omitempty"`
-	RemoteDir string `json:"remote_dir,omitempty"`
-	Cwd       string `json:"cwd,omitempty"`
+	Name         string `json:"name"`
+	Addr         string `json:"addr"`
+	Port         int    `json:"port,omitempty"`
+	IdentityFile string `json:"identity_file,omitempty"`
+	RemoteDir    string `json:"remote_dir,omitempty"`
+	Cwd          string `json:"cwd,omitempty"`
 	// ForceAgentUpload installs the local agent even when the installed one was
 	// built later. Persisted per host because the situation that calls for it --
 	// a shared box where agents are stamped from another branch -- is a property
@@ -560,7 +561,7 @@ func (r *Registry) parseCandidates(path string, b []byte) ([]hostCandidate, erro
 			r.reject(observe.ReasonConfigInvalid, path)
 			return nil, fmt.Errorf("parse %s: every host requires non-empty name and addr", path)
 		}
-		h := transport.Host{Name: e.Name, Addr: e.Addr, Port: e.Port, RemoteDir: e.RemoteDir, ForceAgentUpload: e.ForceAgentUpload}
+		h := transport.Host{Name: e.Name, Addr: e.Addr, Port: e.Port, IdentityFile: e.IdentityFile, RemoteDir: e.RemoteDir, ForceAgentUpload: e.ForceAgentUpload}
 		normalized, err := transport.NormalizeHost(h)
 		if err != nil {
 			reason := observe.ReasonRemoteDir
@@ -797,7 +798,7 @@ func (r *Registry) marshalScopeSnapshot(s registrySnapshot, scope Scope) (string
 			continue
 		}
 		e := hostEntry{
-			Name: name, Addr: h.Addr, Port: h.Port, RemoteDir: h.RemoteDir,
+			Name: name, Addr: h.Addr, Port: h.Port, IdentityFile: h.IdentityFile, RemoteDir: h.RemoteDir,
 			ForceAgentUpload: h.ForceAgentUpload,
 		}
 		if st, ok := s.state[name]; ok {

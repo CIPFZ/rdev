@@ -46,6 +46,8 @@ type Host struct {
 	Addr string
 	// Port is the ssh port. 0 means the ssh default.
 	Port int
+	// IdentityFile optionally selects an rdev-owned private key for SSH.
+	IdentityFile string
 	// RemoteDir holds agent state. Defaults to "~/.cache/rdev".
 	RemoteDir string
 	// GOOS and GOARCH select which agent build to upload. Detected on first
@@ -447,6 +449,9 @@ func (c *Conn) sshBase() []string {
 		"-o", "ControlPersist=300",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=4",
+	}
+	if c.host.IdentityFile != "" {
+		args = append(args, "-o", "IdentitiesOnly=yes", "-i", c.host.IdentityFile)
 	}
 	if c.host.Port != 0 {
 		args = append(args, "-p", fmt.Sprint(c.host.Port))

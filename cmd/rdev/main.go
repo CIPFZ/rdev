@@ -1323,14 +1323,15 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if len(args) == 0 || args[0] == "list" {
 		type row struct {
-			Name       string            `json:"name"`
-			Addr       string            `json:"addr"`
-			Port       int               `json:"port,omitempty"`
-			RemoteDir  string            `json:"remote_dir,omitempty"`
-			Cwd        string            `json:"cwd,omitempty"`
-			Env        map[string]string `json:"env,omitempty"`
-			LoginShell bool              `json:"login_shell"`
-			Secrets    map[string]string `json:"secrets,omitempty"`
+			Name         string            `json:"name"`
+			Addr         string            `json:"addr"`
+			Port         int               `json:"port,omitempty"`
+			IdentityFile string            `json:"identity_file,omitempty"`
+			RemoteDir    string            `json:"remote_dir,omitempty"`
+			Cwd          string            `json:"cwd,omitempty"`
+			Env          map[string]string `json:"env,omitempty"`
+			LoginShell   bool              `json:"login_shell"`
+			Secrets      map[string]string `json:"secrets,omitempty"`
 			// Surfaced because it suppresses the downgrade refusal: a host that
 			// keeps flipping its agent should show why without reading the file.
 			ForceAgentUpload      bool   `json:"force_agent_upload,omitempty"`
@@ -1348,7 +1349,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			}
 			h, st := snapshot.Host, snapshot.State
 			rows = append(rows, row{
-				h.Name, h.Addr, h.Port, h.RemoteDir,
+				h.Name, h.Addr, h.Port, h.IdentityFile, h.RemoteDir,
 				st.Cwd, st.Env, st.LoginShell, st.Secrets,
 				h.ForceAgentUpload, string(snapshot.Scope), sourceLabel(snapshot.Scope), snapshot.Fingerprint, snapshot.ConnectionFingerprint, snapshot.Generation,
 			})
