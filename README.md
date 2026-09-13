@@ -31,6 +31,8 @@ rdev ping dev
 rdev exec dev -- printf '%s\n' '中文 "quoted" $(not-run)'
 ```
 
+本地源码开发也可以使用 `make dev-build`：它会在缺少时创建一个权限为 0600、七天后过期的 `dev` unsigned policy，然后按正确顺序构建嵌入 agent、CLI 和 daemon。已有的管理员 policy 不会被覆盖；正式或共享环境应改用管理员签名 policy。
+
 首次连接自动选择并上传 agent，无需远端安装 Go。Linux/macOS bootstrap 使用 POSIX shell、`uname`、`dd`、`chmod`、`mv` 及 SHA-256 工具；实验性的 Windows amd64 远端使用 OpenSSH Server 与 Windows PowerShell 5.1。SSH host key 和认证由用户管理。Windows 操作及验收边界见 [Phase9](docs/phase9-acceptance.md)。
 
 多人或多个 AI 客户端共享主机时，按 [rdevd 运维说明](docs/rdevd-operations.md) 配置 daemon、principal 凭证和默认拒绝的 policy。客户端设置 `RDEV_BROKER_SOCKET`、`RDEV_CLIENT_ID`、`RDEV_PROJECT_ID`、`RDEV_PRINCIPAL_TOKEN` 后，同一 CLI 或 `rdev serve` 使用共享模式。身份令牌只证明身份，不自动授予业务权限；管理员签名密钥不能交给客户端。

@@ -34,9 +34,16 @@ COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%
 VERSION     ?= 0.1.0-dev.0
 STAMP       := -X $(PKG).Version=$(VERSION) -X $(PKG).ReleaseIdentity=rdev-release-identity-v1[$(VERSION)] -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-routes remote-lane-traffic remote-connection-diagnostics remote-secrets remote-secret-import remote-secret-qos remote-approval remote-qos remote-ingress remote-frontends remote-warm-pool remote-mux-capacity remote-audit-continuity remote-audit-routes remote-audit-soak remote-audit-upgrade stress-broker
+.PHONY: all agents build dev-policy dev-build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-routes remote-lane-traffic remote-connection-diagnostics remote-secrets remote-secret-import remote-secret-qos remote-approval remote-qos remote-ingress remote-frontends remote-warm-pool remote-mux-capacity remote-audit-continuity remote-audit-routes remote-audit-soak remote-audit-upgrade stress-broker
 
 all: agents build
+
+# Prepare a user-level, expiring unsigned-dev policy without overwriting an
+# existing administrator policy, then build all embedded agents and binaries.
+dev-policy:
+	sh scripts/init-dev-policy.sh
+
+dev-build: dev-policy all daemon
 
 # Local artifact/vulnerability/SBOM/provenance gate. Does not publish or sign.
 .PHONY: release-gate verify-release daemon
