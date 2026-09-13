@@ -1,12 +1,21 @@
 package main
 
 import (
+	"context"
+	"crypto/ed25519"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/CIPFZ/rdev/internal/bootstrap"
+	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/keys"
+	"github.com/CIPFZ/rdev/internal/transport"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
 
@@ -14,7 +23,7 @@ import (
 // parser never accepts a password value, and MCP/broker callers cannot invoke
 // this path. The actual controlled terminal exchange is supplied by the host
 // integration layer when available.
-func cmdInteractiveSetup(command string, args []string) error {
+func cmdInteractiveSetup(c *client.Client, command string, args []string) error {
 	if len(args) != 1 || args[0] == "" {
 		return fmt.Errorf("usage: rdev %s <host>", command)
 	}
@@ -28,7 +37,80 @@ func cmdInteractiveSetup(command string, args []string) error {
 	if stdin.Mode()&os.ModeCharDevice == 0 {
 		return errors.New("interactive setup requires a real terminal; password bootstrap is refused in non-interactive CLI, jobs and MCP")
 	}
-	return errors.New("interactive setup terminal flow is not available in this build; no password was read or transmitted; verify host key and use the documented dedicated-key bootstrap")
+	if strings.HasSuffix(command, " remove") {
+		return errors.New("bootstrap-key remove requires the explicit revocation flow, which is not yet wired")
+	}
+	h, err := c.Hosts.Host(args[0])
+	if err != nil {
+		return err
+	}
+	addr, port, err := transport.ParseDestination(h.Addr, h.Port)
+	if err != nil {
+		return err
+	}
+	user := os.Getenv("USER")
+	if before, _, ok := strings.Cut(addr, "@"); ok {
+		user, addr = before, strings.TrimPrefix(addr, before+"@")
+	}
+	if user == "" {
+		return errors.New("host must specify an SSH user (user@host)")
+	}
+	sshAddr := addr
+	if port != 0 {
+		sshAddr = fmt.Sprintf("%s:%d", addr, port)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	known := filepath.Join(home, ".ssh", "known_hosts")
+	cb, err := bootstrap.KnownHostsCallback(known)
+	if err != nil {
+		return err
+	}
+	root, err := keys.DefaultRoot()
+	if err != nil {
+		return err
+	}
+	id, err := keys.Open(root, user, addr, port, "default")
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(id.Private); errors.Is(err, os.ErrNotExist) {
+		if err := id.Generate(); err != nil {
+			return err
+		}
+	}
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	password, err := readBootstrapPassword(os.Stdin, os.Stdout)
+	if err != nil {
+		return err
+	}
+	defer func() { password = "" }()
+	privRaw, err := os.ReadFile(id.Private)
+	if err != nil {
+		return err
+	}
+	pubRaw, err := os.ReadFile(id.Public)
+	if err != nil {
+		return err
+	}
+	privPEM, err := ssh.MarshalPrivateKey(ed25519.PrivateKey(privRaw), "rdev")
+	if err != nil {
+		return err
+	}
+	pubKey, err := ssh.NewPublicKey(ed25519.PublicKey(pubRaw))
+	if err != nil {
+		return err
+	}
+	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pubKey)))
+	if err := bootstrap.Run(context.Background(), bootstrap.Config{Address: sshAddr, User: user, Password: password, PublicKey: []byte(pubLine), PrivateKey: pem.EncodeToMemory(privPEM), HostKeyCallback: cb}); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "dedicated key installed and verified for %s\n", args[0])
+	return nil
 }
 
 // readBootstrapPassword is deliberately usable only with a terminal file

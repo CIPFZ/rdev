@@ -168,12 +168,12 @@ func main() {
 		err = cmdAgent(ctx, c, os.Args[2:])
 	case "bootstrap-key":
 		if len(os.Args) > 2 && os.Args[2] == "remove" {
-			err = cmdInteractiveSetup("bootstrap-key remove", os.Args[3:])
+			err = cmdInteractiveSetup(c, "bootstrap-key remove", os.Args[3:])
 		} else {
-			err = cmdInteractiveSetup("bootstrap-key", os.Args[2:])
+			err = cmdInteractiveSetup(c, "bootstrap-key", os.Args[2:])
 		}
 	case "setup":
-		err = cmdInteractiveSetup("setup", os.Args[2:])
+		err = cmdInteractiveSetup(c, "setup", os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
