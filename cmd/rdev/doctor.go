@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/agentrepair"
 	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/transport"
 )
 
 type doctorItem struct {
@@ -41,8 +44,50 @@ func cmdAgent(ctx context.Context, c *client.Client, args []string) error {
 		return errors.New("usage: rdev agent status|plan <host>; agent repair <host> -dry-run")
 	}
 	if args[0] == "repair" {
-		if len(args) != 3 || args[2] != "-dry-run" {
-			return errors.New("agent repair requires -dry-run; applying repair is not available without a transaction and approval contract")
+		fs, err := parseFlags(args[2:], "agent.repair")
+		if err != nil {
+			return err
+		}
+		if !fs.bools["dry-run"] && !(fs.bools["confirm"] && fs.str("transaction") != "" && fs.str("plan-digest") != "" && fs.str("candidate") != "" && fs.str("current") != "") {
+			return errors.New("agent repair requires -dry-run or explicit -confirm with -transaction, -plan-digest, -candidate and -current")
+		}
+		if fs.bools["confirm"] {
+			candidate, err := os.ReadFile(fs.str("candidate"))
+			if err != nil {
+				return fmt.Errorf("read candidate: %w", err)
+			}
+			current, err := os.ReadFile(fs.str("current"))
+			if err != nil {
+				return fmt.Errorf("read current snapshot: %w", err)
+			}
+			cap, err := c.CapabilityProbe(ctx, args[1], true)
+			if err != nil {
+				return err
+			}
+			hostSnap, err := c.Hosts.Inspect(args[1])
+			if err != nil {
+				return err
+			}
+			dir, err := transport.ValidateRemoteDir(hostSnap.Host.RemoteDir)
+			if err != nil {
+				return err
+			}
+			plan := agentrepair.Plan{Host: args[1], CurrentDigest: agentrepair.DigestBytes(current), CandidateDigest: agentrepair.DigestBytes(candidate)}
+			if fs.str("plan-digest") != agentrepair.Digest(plan) {
+				return errors.New("repair plan digest mismatch")
+			}
+			tx := &agentrepair.Transaction{ID: fs.str("transaction"), PlanDigest: fs.str("plan-digest"), Phase: agentrepair.Planned}
+			decision, err := artifact.AuthorizeAgent(ctx, candidate, cap.OS, cap.Arch, artifact.TargetKey(hostSnap.Host.Addr, hostSnap.Host.Port, dir), true)
+			if err != nil {
+				return err
+			}
+			if fs.str("key") == "" || fs.str("known-hosts") == "" {
+				return errors.New("repair requires -key and -known-hosts for fresh authentication")
+			}
+			if err := c.RepairAgentFreshAuth(ctx, args[1], plan, tx, candidate, current, true, decision, fs.str("key"), fs.str("known-hosts")); err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"host": args[1], "transaction": tx.ID, "plan_digest": agentrepair.Digest(plan), "phase": tx.Phase, "committed": true})
 		}
 		probe, err := c.CapabilityProbe(ctx, args[1], false)
 		if err != nil {
@@ -57,10 +102,11 @@ func cmdAgent(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	p := artifact.DiagnosePolicy(time.Now())
 	policy := "invalid"
-	if p.Valid {
-		policy = "valid"
+	if path, e := artifact.DefaultPolicyPath(); e == nil {
+		if p, e := artifact.LoadPolicy(path, time.Now()); e == nil && p.Validate(time.Now()) == nil {
+			policy = "valid"
+		}
 	}
 	r := agentPlan{Host: args[1], Mode: args[0], CurrentVersion: probe.ProbeVersion, CandidateVersion: "unknown", Policy: policy, Upload: "unknown", Transaction: "unknown", Action: "read-only; no installation requested"}
 	return json.NewEncoder(os.Stdout).Encode(r)
@@ -74,10 +120,17 @@ func cmdDoctor(ctx context.Context, c *client.Client, args []string) error {
 	if len(fs.pos) > 1 {
 		return errors.New("usage: rdev doctor [host]")
 	}
-	p := artifact.DiagnosePolicy(time.Now())
-	item := doctorItem{Status: "FAIL", Detail: p.Error, Action: p.Action}
-	if p.Valid {
-		item = doctorItem{Status: "PASS", Detail: "policy is valid"}
+	item := doctorItem{Status: "FAIL", Detail: "release policy unavailable", Action: "configure an administrator release policy"}
+	if path, e := artifact.DefaultPolicyPath(); e == nil {
+		if p, e := artifact.LoadPolicy(path, time.Now()); e == nil {
+			if e = p.Validate(time.Now()); e == nil {
+				item = doctorItem{Status: "PASS", Detail: "policy is valid"}
+			} else {
+				item.Detail = e.Error()
+			}
+		} else {
+			item.Detail = e.Error()
+		}
 	}
 	r := doctorReport{Version: "local", Mode: "standalone", Policy: item}
 	if len(fs.pos) == 1 {

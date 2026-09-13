@@ -43,14 +43,12 @@ func schema(name string) commandSpec {
 		s.min, s.max = 1, 1
 	case "agent.repair":
 		s.min, s.max = 1, 1
-		add("bool", 0, "dry-run")
+		add("bool", 0, "dry-run", "confirm")
+		add("string", 0, "transaction", "plan-digest", "candidate", "current", "key", "known-hosts")
 	case "bootstrap-key", "setup":
 		s.min, s.max = 1, 1
-		add("int", 255, "password-fd")
-		add("bool", 0, "confirm")
 	case "bootstrap-key.remove":
 		s.min, s.max = 1, 1
-		add("bool", 0, "confirm")
 	case "fleet.plan", "fleet.inventory-update":
 		add("string", 0, "file")
 	case "fleet.approve", "fleet.execute":
@@ -309,7 +307,9 @@ func parseFlags(args []string, command string) (*flagSet, error) {
 		return nil, fmt.Errorf("job ID conflicts with sweep filters")
 	}
 	if command == "agent.repair" && !seen["dry-run"] {
-		return nil, errors.New("agent repair requires -dry-run")
+		if !f.bools["confirm"] || f.str("transaction") == "" || f.str("plan-digest") == "" || f.str("candidate") == "" || f.str("current") == "" || f.str("key") == "" || f.str("known-hosts") == "" {
+			return nil, errors.New("agent repair requires -dry-run or explicit -confirm with transaction, plan-digest, candidate, current, key and known-hosts")
+		}
 	}
 	if command == "job.events" && seen["after"] && !seen["stream"] {
 		return nil, fmt.Errorf("-after requires -stream")
@@ -325,14 +325,9 @@ func validateCLI(args []string) error {
 	}
 	name, rest := args[0], args[1:]
 	switch name {
-	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet", "policy", "agent":
+	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet", "policy", "agent", "bootstrap-key":
 		if len(rest) > 0 {
 			name += "." + rest[0]
-			rest = rest[1:]
-		}
-	case "bootstrap-key":
-		if len(rest) > 0 && rest[0] == "remove" {
-			name += ".remove"
 			rest = rest[1:]
 		}
 	}

@@ -127,4 +127,7 @@ func TestAgentStatusPlanCLIValidation(t *testing.T) {
 	if err := validateCLI([]string{"agent", "repair", "dev", "-dry-run"}); err != nil {
 		t.Fatalf("rejected agent repair preview: %v", err)
 	}
+	if err := validateCLI([]string{"agent", "repair", "dev", "-confirm", "-transaction", "tx", "-plan-digest", "abc", "-candidate", "c", "-current", "p", "-key", "k", "-known-hosts", "kh"}); err != nil {
+		t.Fatalf("rejected explicit agent repair: %v", err)
+	}
 }

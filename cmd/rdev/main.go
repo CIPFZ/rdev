@@ -738,6 +738,7 @@ USAGE
   rdev write   <host> <path> [-mode 644]        (content from stdin)
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run | -prepare | -plan ID] [-delete]
   rdev state   inspect|migrate|repair <host> [-dry-run]
+  rdev agent   status|plan <host>; repair <host> [-dry-run] | [-confirm -transaction ID -plan-digest SHA -candidate FILE -current FILE -key FILE -known-hosts FILE]
   rdev hosts   [list|trust|approve-project <sha256>|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
                                        [-env K=V]... [-secret NAME=PATH]...
                                        [-no-login] [-force-agent-upload]
