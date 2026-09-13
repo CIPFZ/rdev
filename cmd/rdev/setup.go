@@ -121,6 +121,12 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "dedicated key installed and verified for %s\n", args[0])
+	if command == "setup" {
+		if _, err := c.Ping(context.Background(), args[0]); err != nil {
+			return fmt.Errorf("setup stage ping failed after key bootstrap: %w; key remains installed, retry ping after configuring SSH key selection", err)
+		}
+		fmt.Fprintf(os.Stdout, "setup stage ping passed for %s\n", args[0])
+	}
 	return nil
 }
 
