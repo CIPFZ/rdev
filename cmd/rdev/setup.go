@@ -24,10 +24,11 @@ import (
 	"golang.org/x/term"
 )
 
-// Password bootstrap is intentionally a terminal-only boundary. The CLI
-// parser never accepts a password value, and MCP/broker callers cannot invoke
-// this path. The actual controlled terminal exchange is supplied by the host
-// integration layer when available.
+// Password bootstrap never accepts a password value in argv, env, stdin,
+// logs, or protocol output. Agents provide it through an inherited private
+// pipe descriptor; terminals remain supported for local diagnostics.
+const minAgentPasswordFD = 10
+
 func cmdInteractiveSetup(c *client.Client, command string, args []string) error {
 	passwordFD := -1
 	confirmed := false
@@ -42,8 +43,8 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 				}
 				var parseErr error
 				passwordFD, parseErr = strconv.Atoi(args[i+1])
-				if parseErr != nil || passwordFD < 3 || passwordFD > 255 {
-					return errors.New("password-fd must be an inherited descriptor between 3 and 255")
+				if parseErr != nil || passwordFD < minAgentPasswordFD || passwordFD > 255 {
+					return fmt.Errorf("password-fd must be an inherited descriptor between %d and 255", minAgentPasswordFD)
 				}
 				i++
 			default:
@@ -63,7 +64,7 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 		return err
 	}
 	if stdin.Mode()&os.ModeCharDevice == 0 && passwordFD < 0 && !confirmed {
-		return errors.New("interactive setup requires a real terminal; password bootstrap is refused in non-interactive CLI, jobs and MCP")
+		return errors.New("agent setup requires -password-fd FD and -confirm when stdin is not a terminal")
 	}
 	if strings.HasSuffix(command, " remove") {
 		return cmdInteractiveRevoke(c, args[0])
@@ -187,7 +188,7 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 // logs or a file. A bounded read prevents an agent from smuggling a large
 // payload into the bootstrap process.
 func readBootstrapPasswordFD(fd int) (string, error) {
-	if fd < 3 || fd > 255 {
+	if fd < minAgentPasswordFD || fd > 255 {
 		return "", errors.New("invalid password pipe descriptor")
 	}
 	f := os.NewFile(uintptr(fd), "rdev-bootstrap-password")
