@@ -89,6 +89,10 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if wantsHelp(os.Args[1:]) {
+		usageFor(os.Args[1:])
+		return
+	}
 	if err := validateCLI(os.Args[1:]); err != nil {
 		printCLIError(err)
 		os.Exit(2)
@@ -175,6 +179,24 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+func usageFor(args []string) {
+	if len(args) >= 2 && args[0] == "hosts" && args[1] == "add" {
+		fmt.Fprintln(os.Stdout, "usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
+		fmt.Fprintln(os.Stdout, "scope defaults to this project; -global writes the all-projects registry")
+		return
+	}
+	usage()
 }
 
 func cmdPolicy(ctx context.Context, args []string) error {
