@@ -863,6 +863,16 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 		Cwd:        fs.str("cwd"),
 		TimeoutSec: fs.num("timeout"), Env: fs.env(),
 	}
+	// Preserve pipe composition for agents and automation. Interactive TTYs
+	// remain untouched; a non-TTY stdin is bounded and forwarded as request
+	// data, never logged or interpreted by the CLI.
+	if st, statErr := os.Stdin.Stat(); statErr == nil && st.Mode()&os.ModeCharDevice == 0 {
+		body, readErr := readAllStdin()
+		if readErr != nil {
+			return readErr
+		}
+		opts.Stdin = body
+	}
 	if fs.bools["no-login"] {
 		no := false
 		opts.LoginShell = &no
