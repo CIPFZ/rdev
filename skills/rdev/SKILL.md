@@ -39,6 +39,6 @@ When only the CLI is available, consult the repository README for the exact comm
 
 Read only the reference needed for the current operation:
 
-- [README.md](../../README.md) for installation, standalone setup, CLI syntax, and the MCP tool overview.
-- [Broker operations](../../docs/rdevd-operations.md) for shared mode, principals, policy, approvals, Fleet, and recovery.
-- [Compatibility contract](../../docs/phase8-acceptance.md) when protocol, release, upgrade, or compatibility behavior is involved.
+- [CLI and setup reference](references/cli-and-setup.md) for installation, setup, CLI syntax, and MCP boundaries.
+- [Broker operations](references/broker-operations.md) for shared mode, principals, policy, approvals, Fleet, and recovery.
+- [Compatibility contract](references/compatibility.md) when protocol, release, upgrade, or compatibility behavior is involved.
