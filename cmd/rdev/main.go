@@ -750,6 +750,7 @@ USAGE
   rdev policy   check                      inspect the selected local release policy (standalone)
   rdev doctor   [host]                     read-only local/remote diagnosis
   rdev agent    status|plan <host>         read-only agent version/install plan
+  rdev agent    repair <host> -dry-run     preview only; never mutates
   rdev bootstrap-key <host>                interactive dedicated-key bootstrap
   rdev bootstrap-key remove <host>        interactive exact-key revocation
   rdev setup   <host>                      interactive first-connection setup
