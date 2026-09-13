@@ -61,6 +61,7 @@ func newServer(c *client.Client, approveProject func(string) (session.ProjectTru
 	registerSupport(s, c)
 	registerAgentDiagnostics(s, c)
 	registerState(s, c)
+	registerAgentRepair(s, c)
 	registerExec(s, c)
 	registerJobs(s, c)
 	registerFiles(s, c)
