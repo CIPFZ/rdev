@@ -46,7 +46,11 @@ func TestReadBootstrapPasswordFDRejectsOversize(t *testing.T) {
 }
 
 func dupHigh(src int) (int, error) {
-	return syscall.Dup2(src, minAgentPasswordFD+1)
+	fd := minAgentPasswordFD + 1
+	if err := syscall.Dup2(src, fd); err != nil {
+		return -1, err
+	}
+	return fd, nil
 }
 
 func TestReadBootstrapPasswordFDRejectsRuntimeDescriptors(t *testing.T) {
