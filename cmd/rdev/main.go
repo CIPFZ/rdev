@@ -23,7 +23,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
@@ -154,6 +156,8 @@ func main() {
 		err = cmdCompat()
 	case "support":
 		err = cmdSupport(ctx, c, os.Args[2:])
+	case "policy":
+		err = cmdPolicy(ctx, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -171,6 +175,21 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func cmdPolicy(ctx context.Context, args []string) error {
+	if len(args) != 1 || args[0] != "check" {
+		return errors.New("usage: rdev policy check")
+	}
+	_ = ctx
+	d := artifact.DiagnosePolicy(time.Now())
+	if err := json.NewEncoder(os.Stdout).Encode(d); err != nil {
+		return err
+	}
+	if !d.Valid {
+		return proto.NewError(proto.CodeReleasePolicy, "", proto.StateNotSent)
+	}
+	return nil
 }
 
 func brokerMutation(ctx context.Context, args []string) error {
@@ -694,6 +713,7 @@ USAGE
   rdev secrets list
   rdev version                            build id + every embedded agent's SHA-256
   rdev support [host] [-refresh]           static support, current capabilities and own grants
+  rdev policy   check                      inspect the selected local release policy (standalone)
   rdev compat                             machine-readable version and migration contracts
 
 HOST

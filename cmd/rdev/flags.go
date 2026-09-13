@@ -35,6 +35,7 @@ func schema(name string) commandSpec {
 		}
 	}
 	switch name {
+	case "policy.check":
 	case "fleet.plan", "fleet.inventory-update":
 		add("string", 0, "file")
 	case "fleet.approve", "fleet.execute":
@@ -306,7 +307,7 @@ func validateCLI(args []string) error {
 	}
 	name, rest := args[0], args[1:]
 	switch name {
-	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet":
+	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet", "policy":
 		if len(rest) > 0 {
 			name += "." + rest[0]
 			rest = rest[1:]
