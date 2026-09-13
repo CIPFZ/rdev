@@ -7,9 +7,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/CIPFZ/rdev/internal/bootstrap"
@@ -25,8 +27,27 @@ import (
 // this path. The actual controlled terminal exchange is supplied by the host
 // integration layer when available.
 func cmdInteractiveSetup(c *client.Client, command string, args []string) error {
+	passwordFD := -1
+	confirmed := false
+	if len(args) >= 3 && args[1] == "-password-fd" {
+		var err error
+		passwordFD, err = strconv.Atoi(args[2])
+		if err != nil || passwordFD < 3 || passwordFD > 255 {
+			return errors.New("password-fd must be an inherited descriptor between 3 and 255")
+		}
+		args = args[:1]
+		if len(args) == 1 { /* retained below for the common form */
+		}
+	}
+	// Agent callers may authorize the displayed mutation with an explicit
+	// boolean flag; this replaces the human's literal "yes" line.
+	for _, a := range os.Args[1:] {
+		if a == "-confirm" {
+			confirmed = true
+		}
+	}
 	if len(args) != 1 || args[0] == "" {
-		return fmt.Errorf("usage: rdev %s <host>", command)
+		return fmt.Errorf("usage: rdev %s <host> [-password-fd FD]", command)
 	}
 	if runtime.GOOS == "windows" {
 		return errors.New("interactive password bootstrap is unsupported on Windows controller; configure the dedicated key manually")
@@ -35,7 +56,7 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 	if err != nil {
 		return err
 	}
-	if stdin.Mode()&os.ModeCharDevice == 0 {
+	if stdin.Mode()&os.ModeCharDevice == 0 && passwordFD < 0 {
 		return errors.New("interactive setup requires a real terminal; password bootstrap is refused in non-interactive CLI, jobs and MCP")
 	}
 	if strings.HasSuffix(command, " remove") {
@@ -105,14 +126,22 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 	fmt.Fprintf(os.Stdout, "Target: %s@%s", user, sshAddr)
 	fmt.Fprintf(os.Stdout, "\nChange: append this dedicated key to %s@%s:$HOME/.ssh/authorized_keys", user, sshAddr)
 	fmt.Fprintf(os.Stdout, "\nFingerprint: %s\nType 'yes' to continue: ", bootstrap.Fingerprint(pubRaw))
-	confirmation, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		return errors.New("could not read confirmation from terminal")
+	if !confirmed {
+		confirmation, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return errors.New("could not read confirmation from terminal")
+		}
+		confirmed = strings.TrimSpace(confirmation) == "yes"
 	}
-	if strings.TrimSpace(confirmation) != "yes" {
+	if !confirmed {
 		return errors.New("bootstrap cancelled; type exactly yes to authorize the authorized_keys change")
 	}
-	password, err := readBootstrapPassword(os.Stdin, os.Stdout)
+	var password string
+	if passwordFD >= 0 {
+		password, err = readBootstrapPasswordFD(passwordFD)
+	} else {
+		password, err = readBootstrapPassword(os.Stdin, os.Stdout)
+	}
 	if err != nil {
 		return err
 	}
@@ -128,6 +157,33 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 		fmt.Fprintf(os.Stdout, "setup stage ping passed for %s\n", args[0])
 	}
 	return nil
+}
+
+// readBootstrapPasswordFD is the agent boundary. The caller must explicitly
+// inherit a private pipe descriptor; the secret is never in argv, env, stdin,
+// logs or a file. A bounded read prevents an agent from smuggling a large
+// payload into the bootstrap process.
+func readBootstrapPasswordFD(fd int) (string, error) {
+	if fd < 3 || fd > 255 {
+		return "", errors.New("invalid password pipe descriptor")
+	}
+	f := os.NewFile(uintptr(fd), "rdev-bootstrap-password")
+	if f == nil {
+		return "", errors.New("password pipe descriptor is unavailable")
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil {
+		return "", errors.New("could not read password from agent pipe")
+	}
+	if len(b) > 4096 {
+		return "", errors.New("agent password payload is too large")
+	}
+	p := strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
+	if p == "" {
+		return "", errors.New("password cannot be empty")
+	}
+	return p, nil
 }
 
 func cmdInteractiveRevoke(c *client.Client, name string) error {

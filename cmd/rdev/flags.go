@@ -46,6 +46,8 @@ func schema(name string) commandSpec {
 		add("bool", 0, "dry-run")
 	case "bootstrap-key", "setup":
 		s.min, s.max = 1, 1
+		add("int", 255, "password-fd")
+		add("bool", 0, "confirm")
 	case "bootstrap-key.remove":
 		s.min, s.max = 1, 1
 	case "fleet.plan", "fleet.inventory-update":

@@ -751,9 +751,9 @@ USAGE
   rdev doctor   [host]                     read-only local/remote diagnosis
   rdev agent    status|plan <host>         read-only agent version/install plan
   rdev agent    repair <host> -dry-run     preview only; never mutates
-  rdev bootstrap-key <host>                interactive dedicated-key bootstrap
+  rdev bootstrap-key <host>                dedicated-key bootstrap (terminal or agent password FD)
   rdev bootstrap-key remove <host>        interactive exact-key revocation
-  rdev setup   <host>                      interactive first-connection setup
+  rdev setup   <host> [-password-fd FD -confirm] first-connection setup
   rdev compat                             machine-readable version and migration contracts
 
 HOST
