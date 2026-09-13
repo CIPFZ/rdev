@@ -27,8 +27,8 @@ type Config struct {
 	Timeout         time.Duration
 }
 
-// Revoke removes exactly PublicKey from the target user's authorized_keys and
-// verifies that the key can no longer authenticate. It requires the dedicated
+// Revoke removes exactly PublicKey from the target user's authorized_keys. It
+// requires the dedicated
 // private key, so it never falls back to an agent or password.
 func Revoke(ctx context.Context, cfg Config) error {
 	if cfg.Address == "" || cfg.User == "" || len(cfg.PublicKey) == 0 || len(cfg.PrivateKey) == 0 {
