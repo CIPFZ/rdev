@@ -17,12 +17,12 @@ type doctorItem struct {
 	Action string `json:"action,omitempty"`
 }
 type doctorReport struct {
-	Version      string     `json:"version"`
-	Mode         string     `json:"mode"`
-	Policy       doctorItem `json:"policy"`
-	Host         string     `json:"host,omitempty"`
-	Connectivity doctorItem `json:"connectivity,omitempty"`
-	Capability   doctorItem `json:"capability,omitempty"`
+	Version      string      `json:"version"`
+	Mode         string      `json:"mode"`
+	Policy       doctorItem  `json:"policy"`
+	Host         string      `json:"host,omitempty"`
+	Connectivity doctorItem  `json:"connectivity,omitempty"`
+	Capability   *doctorItem `json:"capability,omitempty"`
 }
 
 func cmdDoctor(ctx context.Context, c *client.Client, args []string) error {
@@ -46,7 +46,8 @@ func cmdDoctor(ctx context.Context, c *client.Client, args []string) error {
 			r.Connectivity = doctorItem{Status: "FAIL", Detail: e.Error(), Action: "verify host trust and public-key authentication"}
 		} else {
 			r.Connectivity = doctorItem{Status: "PASS", Detail: "agent responded"}
-			r.Capability = doctorItem{Status: "PASS", Detail: probe.ProbeVersion}
+			x := doctorItem{Status: "PASS", Detail: probe.ProbeVersion}
+			r.Capability = &x
 		}
 	} else {
 		r.Connectivity = doctorItem{Status: "SKIP", Detail: "no host supplied"}
