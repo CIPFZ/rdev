@@ -13,7 +13,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/bootstrap"
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/keys"
@@ -65,6 +67,13 @@ func cmdInteractiveSetup(c *client.Client, command string, args []string) error 
 	}
 	if strings.HasSuffix(command, " remove") {
 		return cmdInteractiveRevoke(c, args[0])
+	}
+	if command == "setup" {
+		policy := artifact.DiagnosePolicy(time.Now())
+		if !policy.Valid {
+			return fmt.Errorf("setup stage policy failed: %s; action: %s", policy.Error, policy.Action)
+		}
+		fmt.Fprintln(os.Stdout, "setup stage policy passed")
 	}
 	h, err := c.Hosts.Host(args[0])
 	if err != nil {
