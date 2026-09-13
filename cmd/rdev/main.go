@@ -164,6 +164,8 @@ func main() {
 		err = cmdPolicy(ctx, os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(ctx, c, os.Args[2:])
+	case "agent":
+		err = cmdAgent(ctx, c, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -738,6 +740,8 @@ USAGE
   rdev version                            build id + every embedded agent's SHA-256
   rdev support [host] [-refresh]           static support, current capabilities and own grants
   rdev policy   check                      inspect the selected local release policy (standalone)
+  rdev doctor   [host]                     read-only local/remote diagnosis
+  rdev agent    status|plan <host>         read-only agent version/install plan
   rdev compat                             machine-readable version and migration contracts
 
 HOST

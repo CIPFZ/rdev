@@ -67,6 +67,8 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		return cmdBrokerSupport(ctx, args[1:])
 	case "doctor":
 		return fmt.Errorf("%w: doctor requires broker support diagnostics; use rdev support", proto.NewError(proto.CodeUnsupportedFeature, "", proto.StateNotSent))
+	case "agent":
+		return fmt.Errorf("%w: agent status/plan is not available in shared mode", proto.NewError(proto.CodeUnsupportedFeature, "", proto.StateNotSent))
 	case "version", "-version", "--version":
 		printVersion()
 		return nil

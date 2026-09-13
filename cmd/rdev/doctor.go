@@ -25,6 +25,34 @@ type doctorReport struct {
 	Capability   *doctorItem `json:"capability,omitempty"`
 }
 
+type agentPlan struct {
+	Host             string `json:"host"`
+	Mode             string `json:"mode"`
+	CurrentVersion   string `json:"current_version"`
+	CandidateVersion string `json:"candidate_version"`
+	Policy           string `json:"policy"`
+	Upload           string `json:"upload"`
+	Transaction      string `json:"transaction"`
+	Action           string `json:"action"`
+}
+
+func cmdAgent(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) != 2 || (args[0] != "status" && args[0] != "plan") || args[1] == "" {
+		return errors.New("usage: rdev agent status|plan <host>")
+	}
+	probe, err := c.CapabilityProbe(ctx, args[1], false)
+	if err != nil {
+		return err
+	}
+	p := artifact.DiagnosePolicy(time.Now())
+	policy := "invalid"
+	if p.Valid {
+		policy = "valid"
+	}
+	r := agentPlan{Host: args[1], Mode: args[0], CurrentVersion: probe.ProbeVersion, CandidateVersion: "unknown", Policy: policy, Upload: "unknown", Transaction: "unknown", Action: "read-only; no installation requested"}
+	return json.NewEncoder(os.Stdout).Encode(r)
+}
+
 func cmdDoctor(ctx context.Context, c *client.Client, args []string) error {
 	fs, err := parseFlags(args, "doctor")
 	if err != nil {
