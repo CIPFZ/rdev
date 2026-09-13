@@ -129,16 +129,17 @@ inheritance, and install the actual agent through the framed stdin loader.
 End-to-end signature/channel
 rollback on Windows and OS/power-loss fault drills still need native evidence.
 
-## Local results (2026-09-10)
+## Local results (2026-09-13)
 
-Environment: Linux amd64, Go 1.26.8, main at
-`1baadd0` with the uncommitted Phase 9 changes. These are local engineering
-results, not signed release or hosted CI evidence.
+Environment: macOS controller workspace, pinned Go toolchain selected by the
+repository Makefile, main at `52dbfa2`. These are local engineering results,
+not signed release or hosted CI evidence.
 
 | Check | Result |
 |---|---|
 | `make all daemon check` with the pinned Go toolchain | Passed: CLI/broker, all package tests, vet and five embedded agent checks |
 | `go test -race ./... -count=1 -timeout=20m` | Passed |
+| `make test` on the current checkout | Passed |
 | `go test -race ./cmd/rdev-agent -count=1 -timeout=5m` after the log-handle change | Passed |
 | Final `make all daemon check-agents` after Windows device-name validation | Passed |
 | Windows amd64 agent and winutil/windowsruntime/agentinstall/transport test executables | Cross-compiled successfully; not executed |
