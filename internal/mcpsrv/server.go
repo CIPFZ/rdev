@@ -59,6 +59,7 @@ func newServer(c *client.Client, approveProject func(string) (session.ProjectTru
 	registerFleet(s, "", broker.Owner{})
 	registerCompat(s)
 	registerSupport(s, c)
+	registerAgentDiagnostics(s, c)
 	registerState(s, c)
 	registerExec(s, c)
 	registerJobs(s, c)
