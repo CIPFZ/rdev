@@ -47,6 +47,13 @@ type agentPlan struct {
 }
 
 func cmdAgent(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) == 2 && args[0] == "reinstall" {
+		out, err := c.AgentReinstall(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return printJSON(c, out)
+	}
 	if len(args) < 2 || args[1] == "" || (args[0] != "status" && args[0] != "plan" && args[0] != "repair") {
 		return errors.New("usage: rdev agent status|plan <host>; agent repair <host> -dry-run")
 	}

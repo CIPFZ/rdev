@@ -174,8 +174,6 @@ func main() {
 		}
 	case "setup":
 		err = cmdInteractiveSetup(c, "setup", os.Args[2:])
-	case "agent":
-		err = cmdAgent(ctx, c, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -791,17 +789,6 @@ NOTES
   registered by a CLI command is gone when it exits. The MCP rdev_secrets tool
   does offer it, because "rdev serve" stays alive to use the value.
 `)
-}
-
-func cmdAgent(ctx context.Context, c *client.Client, args []string) error {
-	if len(args) != 2 || args[0] != "reinstall" {
-		return errors.New("usage: rdev agent reinstall <host>")
-	}
-	out, err := c.AgentReinstall(ctx, args[1])
-	if err != nil {
-		return err
-	}
-	return printJSON(c, out)
 }
 
 func cmdState(ctx context.Context, c *client.Client, args []string) error {
