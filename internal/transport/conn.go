@@ -347,6 +347,14 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		return nil, err
 	}
 	c.ctlPath = ctl
+	// Reinstall must be able to recover before an old agent can participate in
+	// protocol negotiation. The probe uses plain SSH, so perform the same
+	// whitelist cleanup at this point when a forced upload was requested.
+	if host.ForceAgentUpload && host.GOOS != "windows" {
+		if err := c.precleanAgent(ctx); err != nil {
+			return nil, fmt.Errorf("pre-clean remote agent: %w", err)
+		}
+	}
 
 	// One probe replaces four sequential round trips (connect, uname, $HOME,
 	// sha256sum). On a jump host every trip is a full RTT, and they were strictly
@@ -437,6 +445,18 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 		}
 	}
 	return c, nil
+}
+
+func (c *Conn) precleanAgent(ctx context.Context) error {
+	dir, err := ValidateRemoteDir(c.host.RemoteDir)
+	if err != nil {
+		return err
+	}
+	_, err = c.runShell(ctx, `set -eu
+root="$HOME/$1"
+rm -f -- "$root/rdev-agent"
+rm -rf -- "$root"/.rdev-upload-slot-0 "$root"/.rdev-upload-slot-1 "$root"/.rdev-upload-slot-2 "$root"/.rdev-upload-slot-3`, dir)
+	return err
 }
 
 // sshBase returns the ssh args shared by every invocation, including the
