@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -173,6 +174,8 @@ func CapabilityForOperation(operation string) string {
 	case "secret.set", "secret.delete", "secret.list", "secret.use", "secret.set_from_file":
 		return "secret"
 	case "fleet.inventory.import", "fleet.inventory.update", "fleet.inventory.list":
+		return "broker.admin"
+	case "policy.inspect":
 		return "broker.admin"
 	case "fleet.plan", "fleet.execute", "fleet.approve", "fleet.status", "fleet.results", "fleet.list", "fleet.pause", "fleet.resume", "fleet.cancel", "fleet.retry", "fleet.reconcile":
 		return "fleet"
@@ -369,4 +372,26 @@ func (s *Service) DecideBrokerRequest(req Request) Decision {
 		return s.policy.decision(true, "support", req.Host)
 	}
 	return s.policy.decideWireRequest(req.Owner.Key(), req.Operation, req.Host, wireUsesSecrets(req.Wire), isSyncOperation(req.Operation) && req.Sync != nil && req.Sync.Delete)
+}
+
+// PolicyDiagnostic returns only the broker's in-memory management policy. The
+// owner identifiers are one-way references so callers cannot enumerate other
+// principals; client-local policy files are never consulted.
+func (s *Service) PolicyDiagnostic() PolicyDiagnostic {
+	s.policy.mu.RLock()
+	defer s.policy.mu.RUnlock()
+	out := PolicyDiagnostic{Digest: s.policy.digest}
+	for owner, grants := range s.policy.grants {
+		ops := make([]string, 0, len(grants))
+		for op, allowed := range grants {
+			if allowed {
+				ops = append(ops, op)
+			}
+		}
+		sort.Strings(ops)
+		sum := sha256.Sum256([]byte(owner))
+		out.Grants = append(out.Grants, PolicyGrantEntry{OwnerRef: hex.EncodeToString(sum[:8]), Operations: ops})
+	}
+	sort.Slice(out.Grants, func(i, j int) bool { return out.Grants[i].OwnerRef < out.Grants[j].OwnerRef })
+	return out
 }

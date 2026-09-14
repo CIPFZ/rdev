@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -222,6 +223,70 @@ func TestServeConnPolicyAdministrationRequiresGrant(t *testing.T) {
 	}
 	if targetResp.OK || targetResp.Error == "" {
 		t.Fatalf("owner switch was accepted: %+v", targetResp)
+	}
+}
+
+func TestServeConnPolicyInspectRequiresCapability(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	service := broker.NewService(nil)
+	admin := broker.Owner{ClientID: "admin", ProjectID: "p"}
+	viewer := broker.Owner{ClientID: "viewer", ProjectID: "p"}
+	if err := service.Grant(admin, "policy.grant"); err != nil {
+		t.Fatal(err)
+	}
+	go serveConn(b, service)
+	_ = json.NewEncoder(a).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion})
+	var hello proto.BrokerHelloResponse
+	if err := json.NewDecoder(a).Decode(&hello); err != nil || !hello.OK {
+		t.Fatal(err)
+	}
+	_ = json.NewEncoder(a).Encode(broker.Request{ID: "inspect", Owner: viewer, Operation: "policy.inspect", Capability: "broker.admin"})
+	var denied broker.Response
+	if err := json.NewDecoder(a).Decode(&denied); err != nil {
+		t.Fatal(err)
+	}
+	if denied.OK {
+		t.Fatal("viewer policy inspect was accepted without grant")
+	}
+	if denied.Error == "" {
+		t.Fatal("policy.inspect denial omitted reason")
+	}
+
+	adminConn, adminServer := net.Pipe()
+	defer adminConn.Close()
+	go serveConn(adminServer, service)
+	_ = json.NewEncoder(adminConn).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion})
+	if err := json.NewDecoder(adminConn).Decode(&hello); err != nil || !hello.OK {
+		t.Fatal(err)
+	}
+	_ = json.NewEncoder(adminConn).Encode(broker.Request{ID: "grant", Owner: admin, Operation: "policy.grant", GrantOwner: viewer, GrantCapability: "broker.admin", GrantOperation: "policy.inspect"})
+	var granted broker.Response
+	if err := json.NewDecoder(adminConn).Decode(&granted); err != nil || !granted.OK {
+		t.Fatalf("granting policy.inspect failed: %v %s", err, granted.Error)
+	}
+
+	viewerConn, viewerServer := net.Pipe()
+	defer viewerConn.Close()
+	go serveConn(viewerServer, service)
+	_ = json.NewEncoder(viewerConn).Encode(proto.BrokerHello{Version: proto.BrokerProtocolVersion, MinVersion: proto.BrokerMinVersion})
+	if err := json.NewDecoder(viewerConn).Decode(&hello); err != nil || !hello.OK {
+		t.Fatal(err)
+	}
+	_ = json.NewEncoder(viewerConn).Encode(broker.Request{ID: "inspect", Owner: viewer, Operation: "policy.inspect", Capability: "broker.admin"})
+	var allowed broker.Response
+	if err := json.NewDecoder(viewerConn).Decode(&allowed); err != nil {
+		t.Fatal(err)
+	}
+	if !allowed.OK || allowed.Policy == nil {
+		t.Fatalf("policy.inspect failed after grant: %+v", allowed)
+	}
+	body, err := json.Marshal(allowed.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), admin.Key()) || strings.Contains(string(body), viewer.Key()) {
+		t.Fatalf("policy.inspect returned raw owner keys: %s", body)
 	}
 }
 
