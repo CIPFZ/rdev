@@ -455,7 +455,8 @@ func (c *Conn) precleanAgent(ctx context.Context) error {
 	_, err = c.runShell(ctx, `set -eu
 root="$HOME/$1"
 rm -f -- "$root/rdev-agent"
-rm -rf -- "$root"/.rdev-upload-slot-0 "$root"/.rdev-upload-slot-1 "$root"/.rdev-upload-slot-2 "$root"/.rdev-upload-slot-3`, dir)
+rm -rf -- "$root"/.rdev-upload-slot-0 "$root"/.rdev-upload-slot-1 "$root"/.rdev-upload-slot-2 "$root"/.rdev-upload-slot-3
+rm -f -- "$root"/.rdev-upgrade.json "$root"/.rdev-upgrade.lock "$root"/.rdev-release.json "$root"/.migration.lock "$root"/.migration.lock.init`, dir)
 	return err
 }
 
