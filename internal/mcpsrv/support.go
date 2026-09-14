@@ -107,6 +107,23 @@ func registerState(s *mcp.Server, c *client.Client) {
 	})
 }
 
+type agentReinstallIn struct {
+	Host string `json:"host"`
+}
+
+func registerAgentReinstall(s *mcp.Server, c *client.Client) {
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_agent_reinstall", Description: "Clean rdev-owned remote agent files and reinstall the current agent transactionally."}, func(ctx context.Context, _ *mcp.CallToolRequest, in agentReinstallIn) (*mcp.CallToolResult, proto.PingResult, error) {
+		if in.Host == "" {
+			return nil, proto.PingResult{}, errors.New("host is required")
+		}
+		result, err := c.AgentReinstall(ctx, in.Host)
+		if err != nil {
+			return nil, proto.PingResult{}, err
+		}
+		return nil, *result, nil
+	})
+}
+
 func registerBrokerState(s *mcp.Server, socket string, owner broker.Owner) {
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_state", Description: "Host-wide state administration through the broker. Requires a separate state_inspect/state_migrate/state_repair grant; exact-host grants are recommended. Migration and repair, including previews, require digest-bound approval. Reports may include every owner's state record paths; grant only to administrators."}, func(ctx context.Context, _ *mcp.CallToolRequest, in stateIn) (*mcp.CallToolResult, proto.StateResult, error) {
 		req, err := in.request()

@@ -2225,6 +2225,23 @@ func (c *Client) Ping(ctx context.Context, host string) (*proto.PingResult, erro
 	return resp.Ping, nil
 }
 
+// AgentReinstall clears the published connection, marks the host for a
+// forced agent upload, and reconnects. The transport performs the bounded
+// cleanup and transactional install before Ping can succeed.
+func (c *Client) AgentReinstall(ctx context.Context, host string) (*proto.PingResult, error) {
+	resolved, err := c.Hosts.Resolve(host)
+	if err != nil {
+		return nil, c.redactErr(err)
+	}
+	resolved.Host.ForceAgentUpload = true
+	if _, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{Name: resolved.Host.Name, Host: &resolved.Host}); err != nil {
+		return nil, c.redactErr(err)
+	}
+	closeDetached := c.DetachHostConnections(host)
+	closeDetached()
+	return c.Ping(ctx, host)
+}
+
 // CapabilityProbe asks the remote agent for its verified resource controls and
 // execution profile. The result is intentionally read-only; callers can use
 // it to decide whether a requested policy is supported before starting work.

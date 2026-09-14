@@ -774,6 +774,17 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 	if c.host.GOOS == "windows" {
 		return c.ensureWindowsAgent(ctx, bin, want, installedSHA, decision)
 	}
+	// A forced upload is also an explicit request to recover from a potentially
+	// incompatible or corrupted installation. Remove only rdev-owned agent and
+	// staging paths before bootstrapping; job records and unrelated files remain
+	// untouched. The subsequent install path performs the normal hash and health
+	// checks, so cleanup never bypasses verification.
+	if c.host.ForceAgentUpload {
+		if err := c.cleanAgentInstall(ctx); err != nil {
+			return fmt.Errorf("clean remote agent install: %w", err)
+		}
+		installedSHA = ""
+	}
 	if installedSHA != "" && installedSHA == want {
 		if bin.Authorize != nil {
 			return c.reconcileAgent(ctx, decision, installedSHA)
@@ -808,6 +819,15 @@ func (c *Conn) ensureAgent(ctx context.Context, bin *AgentBinary, installedSHA s
 		return c.installAgentTransaction(ctx, bin.Data, want, installedSHA, decision)
 	}
 	return c.installAgent(ctx, bin.Data, want)
+}
+
+func (c *Conn) cleanAgentInstall(ctx context.Context) error {
+	_, err := c.runShell(ctx, `set -eu
+target=$1
+root=$(dirname "$target")
+rm -f -- "$target"
+rm -rf -- "$root"/.rdev-upload-slot-0 "$root"/.rdev-upload-slot-1 "$root"/.rdev-upload-slot-2 "$root"/.rdev-upload-slot-3`, c.agentPath)
+	return err
 }
 
 // agentVersionTimeout bounds the installed agent's -version call.

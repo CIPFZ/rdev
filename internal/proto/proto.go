@@ -48,8 +48,12 @@ const (
 	OpStateMigrate    = "state_migrate"
 	OpStateRepair     = "state_repair"
 	OpCapabilityProbe = "capability_probe"
-	OpList            = "list"
-	OpCancel          = "cancel"
+	// OpAgentReinstall requests a controlled cleanup and reinstall of the
+	// remote agent. It is handled by the host transport during bootstrap; the
+	// wire agent never executes this operation itself.
+	OpAgentReinstall = "agent_reinstall"
+	OpList           = "list"
+	OpCancel         = "cancel"
 )
 
 // Job states reported by the agent.
