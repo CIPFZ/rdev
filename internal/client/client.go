@@ -2233,10 +2233,21 @@ func (c *Client) AgentReinstall(ctx context.Context, host string) (*proto.PingRe
 	if err != nil {
 		return nil, c.redactErr(err)
 	}
+	// ForceAgentUpload is a one-shot transport control for this operation.  It
+	// is part of the persisted host definition for the explicit `-force-agent-
+	// upload` escape hatch, so leaving it set here makes every later connection
+	// delete and reinstall the agent again.  That can race another connection's
+	// negotiation and surface as protocol.unsupported_feature.  Preserve the
+	// user's prior setting and restore it after this reinstall attempt.
+	previousForce := resolved.Host.ForceAgentUpload
 	resolved.Host.ForceAgentUpload = true
 	if _, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{Name: resolved.Host.Name, Host: &resolved.Host}); err != nil {
 		return nil, c.redactErr(err)
 	}
+	defer func() {
+		resolved.Host.ForceAgentUpload = previousForce
+		_, _ = c.Hosts.ApplyHostUpdate(session.HostUpdate{Name: resolved.Host.Name, Host: &resolved.Host})
+	}()
 	closeDetached := c.DetachHostConnections(host)
 	closeDetached()
 	return c.Ping(ctx, host)
