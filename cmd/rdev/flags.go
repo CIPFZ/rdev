@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -35,6 +36,21 @@ func schema(name string) commandSpec {
 		}
 	}
 	switch name {
+	case "policy.check":
+	case "doctor":
+		s.min, s.max = 0, 1
+	case "agent.status", "agent.plan":
+		s.min, s.max = 1, 1
+	case "agent.repair":
+		s.min, s.max = 1, 1
+		add("bool", 0, "dry-run", "confirm")
+		add("string", 0, "transaction", "plan-digest", "candidate", "current", "key", "known-hosts")
+	case "bootstrap-key", "setup":
+		s.min, s.max = 1, 1
+		add("int", 255, "password-fd")
+		add("bool", 0, "confirm")
+	case "bootstrap-key.remove":
+		s.min, s.max = 1, 1
 	case "fleet.plan", "fleet.inventory-update":
 		add("string", 0, "file")
 	case "fleet.approve", "fleet.execute":
@@ -122,7 +138,7 @@ func schema(name string) commandSpec {
 		s.min, s.max = 2, 2
 		add("bool", 0, "save", "global", "no-login", "force-agent-upload")
 		add("port", 65535, "port")
-		add("string", 0, "cwd", "remote-dir")
+		add("string", 0, "cwd", "remote-dir", "identity-file")
 		add("keyvalue", 0, "env", "secret")
 	case "capability.flags":
 		add("bool", 0, "refresh")
@@ -292,6 +308,11 @@ func parseFlags(args []string, command string) (*flagSet, error) {
 	if command == "job.rm" && len(f.pos) == 2 && (seen["older-than"] || seen["keep-last"]) {
 		return nil, fmt.Errorf("job ID conflicts with sweep filters")
 	}
+	if command == "agent.repair" && !seen["dry-run"] {
+		if !f.bools["confirm"] || f.str("transaction") == "" || f.str("plan-digest") == "" || f.str("candidate") == "" || f.str("current") == "" || f.str("key") == "" || f.str("known-hosts") == "" {
+			return nil, errors.New("agent repair requires -dry-run or explicit -confirm with transaction, plan-digest, candidate, current, key and known-hosts")
+		}
+	}
 	if command == "job.events" && seen["after"] && !seen["stream"] {
 		return nil, fmt.Errorf("-after requires -stream")
 	}
@@ -306,9 +327,14 @@ func validateCLI(args []string) error {
 	}
 	name, rest := args[0], args[1:]
 	switch name {
-	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet":
+	case "job", "hosts", "state", "env", "secrets", "secret", "mutation", "broker", "fleet", "policy", "agent":
 		if len(rest) > 0 {
 			name += "." + rest[0]
+			rest = rest[1:]
+		}
+	case "bootstrap-key":
+		if len(rest) > 0 && rest[0] == "remove" {
+			name += ".remove"
 			rest = rest[1:]
 		}
 	}

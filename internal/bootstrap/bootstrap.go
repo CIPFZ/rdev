@@ -1,0 +1,227 @@
+// Package bootstrap performs one-shot, password-authenticated installation of
+// an rdev-owned SSH public key. Passwords are accepted only in memory.
+package bootstrap
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
+)
+
+type Config struct {
+	Address         string
+	User            string
+	Password        string
+	PublicKey       []byte
+	PrivateKey      []byte
+	HostKeyCallback ssh.HostKeyCallback
+	Timeout         time.Duration
+}
+
+// Revoke removes exactly PublicKey from the target user's authorized_keys, then
+// requires an explicit rejection on a new authenticated-host connection. It
+// never falls back to an agent or password.
+func Revoke(ctx context.Context, cfg Config) error {
+	if cfg.Address == "" || cfg.User == "" || len(cfg.PublicKey) == 0 || len(cfg.PrivateKey) == 0 {
+		return errors.New("revoke requires address, user and key pair")
+	}
+	if cfg.HostKeyCallback == nil {
+		return errors.New("revoke requires host-key verification")
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 30 * time.Second
+	}
+	priv, err := ssh.ParsePrivateKey(cfg.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("parse dedicated private key: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	client, err := dialSigner(ctx, cfg.Address, cfg.User, priv, cfg.HostKeyCallback)
+	if err != nil {
+		return fmt.Errorf("dedicated-key authentication: %w", err)
+	}
+	pub := strings.TrimSpace(string(cfg.PublicKey))
+	defer client.Close()
+	s, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	payload := base64.StdEncoding.EncodeToString([]byte(pub))
+	cmd := `umask 077; f="$HOME/.ssh/authorized_keys"; test -f "$f"; lock="$f.rdev.lock"; i=0; while ! mkdir "$lock" 2>/dev/null; do i=$((i+1)); [ "$i" -lt 200 ] || exit 75; sleep 0.05; done; t=$(mktemp); trap 'rm -f "$t" "$t.key"; rmdir "$lock" 2>/dev/null || :' EXIT; printf '%s' '` + payload + `' | base64 -d >"$t.key"; while IFS= read -r line || [ -n "$line" ]; do [ "$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/ && i<NF){print $i" "$(i+1); exit}}')" = "$(cat "$t.key")" ] || printf '%s\n' "$line"; done <"$f" >"$t" && chmod 600 "$t" && mv "$t" "$f"`
+	if err := s.Run(cmd); err != nil {
+		return fmt.Errorf("revoke dedicated key: %w", err)
+	}
+	_ = client.Close()
+	return verifyRevoked(ctx, cfg, priv)
+}
+
+// x/crypto/ssh has no exported client authentication-rejection type. Accept
+// only its exact terminal publickey-rejection result, after both host-key
+// verification and selection of our sole signer. Unknown results fail closed;
+// a dependency change must pass the wire-level rejection tests below.
+func verifyRevoked(ctx context.Context, cfg Config, signer ssh.Signer) error {
+	verifiedHost, offeredKey := false, false
+	check, err := dialConfig(ctx, cfg.Address, &ssh.ClientConfig{
+		User: cfg.User,
+		HostKeyCallback: func(host string, addr net.Addr, key ssh.PublicKey) error {
+			if err := cfg.HostKeyCallback(host, addr, key); err != nil {
+				return err
+			}
+			verifiedHost = true
+			return nil
+		},
+		Auth: []ssh.AuthMethod{ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+			offeredKey = true
+			return []ssh.Signer{signer}, nil
+		})},
+	})
+	if err == nil {
+		check.Close()
+		return errors.New("revocation verification failed: dedicated key still authenticates")
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("key removal completed; revocation verification inconclusive: %w", ctx.Err())
+	}
+	const rejected = "ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain"
+	if verifiedHost && offeredKey && err.Error() == rejected {
+		return nil
+	}
+	return fmt.Errorf("key removal completed; revocation verification inconclusive: %w", err)
+}
+
+// Run installs PublicKey exactly once and proves that the matching private key
+// can authenticate afterwards. HostKeyCallback is mandatory; callers must not
+// disable host-key verification in production.
+func Run(ctx context.Context, cfg Config) error {
+	if cfg.Address == "" || cfg.User == "" || cfg.Password == "" || len(cfg.PublicKey) == 0 || len(cfg.PrivateKey) == 0 {
+		return errors.New("bootstrap requires address, user, password and key pair")
+	}
+	if cfg.HostKeyCallback == nil {
+		return errors.New("bootstrap requires host-key verification")
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 30 * time.Second
+	}
+	pub := strings.TrimSpace(string(cfg.PublicKey))
+	if strings.ContainsAny(pub, "\r\n") {
+		return errors.New("public key must be one line")
+	}
+	priv, err := ssh.ParsePrivateKey(cfg.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("parse dedicated private key: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	password := cfg.Password
+	defer func() { password = ""; cfg.Password = "" }()
+	client, err := dial(ctx, cfg.Address, cfg.User, password, cfg.HostKeyCallback)
+	if err != nil {
+		return fmt.Errorf("password authentication: %w", err)
+	}
+	if err := appendKey(client, pub); err != nil {
+		client.Close()
+		return err
+	}
+	client.Close()
+	// Reconnect with the dedicated signer only; no password and no agent.
+	client, err = dialSigner(ctx, cfg.Address, cfg.User, priv, cfg.HostKeyCallback)
+	if err != nil {
+		return fmt.Errorf("dedicated-key verification: %w", err)
+	}
+	defer client.Close()
+	s, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if err := s.Run("true"); err != nil {
+		return fmt.Errorf("dedicated-key command: %w", err)
+	}
+	return nil
+}
+
+func dial(ctx context.Context, address, user, password string, cb ssh.HostKeyCallback) (*ssh.Client, error) {
+	return dialConfig(ctx, address, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.Password(password)}, HostKeyCallback: cb, Timeout: 10 * time.Second})
+}
+func dialSigner(ctx context.Context, address, user string, signer ssh.Signer, cb ssh.HostKeyCallback) (*ssh.Client, error) {
+	return dialConfig(ctx, address, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: cb, Timeout: 10 * time.Second})
+}
+func dialConfig(ctx context.Context, address string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	d := net.Dialer{}
+	c, err := d.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	// DialContext bounds TCP establishment only. Also bound SSH handshake and
+	// session I/O, including a server that accepts TCP but never sends a banner.
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := c.SetDeadline(deadline); err != nil {
+			c.Close()
+			return nil, err
+		}
+	}
+	conn := &contextConn{Conn: c, stop: context.AfterFunc(ctx, func() { c.Close() })}
+	cc, chans, reqs, err := ssh.NewClientConn(conn, address, cfg)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return ssh.NewClient(cc, chans, reqs), nil
+}
+
+type contextConn struct {
+	net.Conn
+	stop func() bool
+}
+
+func (c *contextConn) Close() error {
+	c.stop()
+	return c.Conn.Close()
+}
+func appendKey(client *ssh.Client, pub string) error {
+	s, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	payload := base64.StdEncoding.EncodeToString([]byte(pub + "\n"))
+	cmd := "umask 077; mkdir -p \"$HOME/.ssh\"; f=\"$HOME/.ssh/authorized_keys\"; lock=\"$f.rdev.lock\"; i=0; while ! mkdir \"$lock\" 2>/dev/null; do i=$((i+1)); [ \"$i\" -lt 200 ] || exit 75; sleep 0.05; done; trap 'rmdir \"$lock\" 2>/dev/null || :' EXIT; touch \"$f\"; chmod 600 \"$f\"; k=$(printf '%s' '" + payload + "' | base64 -d); grep -Fqx -- \"$k\" \"$f\" || printf '%s\\n' \"$k\" >> \"$f\""
+	if err := s.Run(cmd); err != nil {
+		return fmt.Errorf("install dedicated key: %w", err)
+	}
+	return nil
+}
+
+func Fingerprint(public []byte) string {
+	h := sha256.Sum256(public)
+	return fmt.Sprintf("SHA256:%x", h[:])
+}
+
+// KnownHostsCallback loads the user's OpenSSH known_hosts files. It refuses
+// an absent or empty set so bootstrap can never silently downgrade to an
+// insecure host-key policy.
+func KnownHostsCallback(paths ...string) (ssh.HostKeyCallback, error) {
+	var usable []string
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			usable = append(usable, p)
+		}
+	}
+	if len(usable) == 0 {
+		return nil, errors.New("no known_hosts file available; confirm the host key before bootstrap")
+	}
+	return knownhosts.New(usable...)
+}

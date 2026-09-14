@@ -632,6 +632,19 @@ unsupported shared commands.
 
 ## Administrative warm pool health
 
+## Broker policy diagnostics
+
+The read-only `policy.inspect` route is an agent-callable management diagnostic.
+It requires the caller's explicit `broker.admin` capability grant (or an exact
+`policy.inspect` grant) and accepts no host, wire, approval, or client policy
+arguments. The response contains the current policy digest and a sorted list of
+one-way owner references with their granted operation keys. Owner identifiers,
+policy paths, credential values, client-local configuration, and raw policy
+contents are never returned. Authorization is evaluated by the broker before
+the route handler; denial is reported as a structured `permission_denied`
+response and does not access SSH or local client policy. The MCP frontend exposes
+this as `rdev_broker_policy`.
+
 `rdev broker status --pool` and MCP `rdev_broker_pool` require a separate
 `pool.health` grant. They return global reserved/active/closing host counts,
 active host leases, pending host requests, current retained base/bulk transport

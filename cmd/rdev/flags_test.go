@@ -114,3 +114,20 @@ func TestStdinFailureCannotDispatchPartialWrite(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentStatusPlanCLIValidation(t *testing.T) {
+	for _, args := range [][]string{{"agent", "status", "dev"}, {"agent", "plan", "dev"}} {
+		if err := validateCLI(args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if err := validateCLI([]string{"agent", "repair", "dev"}); err == nil {
+		t.Fatal("accepted agent repair without dry-run")
+	}
+	if err := validateCLI([]string{"agent", "repair", "dev", "-dry-run"}); err != nil {
+		t.Fatalf("rejected agent repair preview: %v", err)
+	}
+	if err := validateCLI([]string{"agent", "repair", "dev", "-confirm", "-transaction", "tx", "-plan-digest", "abc", "-candidate", "c", "-current", "p", "-key", "k", "-known-hosts", "kh"}); err != nil {
+		t.Fatalf("rejected explicit agent repair: %v", err)
+	}
+}

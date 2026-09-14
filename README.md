@@ -58,6 +58,8 @@ claude mcp add rdev --scope user -- "$HOME/.local/bin/rdev" serve
 
 第一次使用建议依次执行 `rdev hosts add`、`rdev hosts trust`、`rdev hosts approve-project`、`rdev ping`，再运行 `rdev exec` 或 `rdev sync`。共享 broker、审批和多主机编排属于进阶部署，不影响 standalone 单机使用。
 
+首次接入可先运行 `rdev policy check`（只读、本地）和 `rdev doctor [host]`；后者仅在给出 host 时执行 agent capability 探测，不会上传、安装、写入 key 或修改信任。`rdev agent status <host>` 与 `rdev agent plan <host>` 同样只读，无法从当前协议观察的上传、事务和候选版本字段会返回 `unknown`。`bootstrap-key`、`setup` 及 `bootstrap-key remove` 支持 agent 通过继承的私有 `-password-fd FD -confirm` 全自动执行；密码绝不出现在 argv、环境变量、普通 stdin、日志、job 或 MCP 参数中。没有私有 FD 和确认标志的非交互调用会明确失败。exec/job 使用继承的 stdin/stdout/stderr，不提供 PTY、TUI 或持久 session 承诺。
+
 ## 两层配置：工具全局，主机按项目
 
 standalone 的主机配置分两层：
@@ -114,6 +116,7 @@ rdev fleet retry PLAN FAILED_HOST_ID
 | `rdev_secrets` | standalone 内存凭据；broker principal-owned 凭据 |
 | `rdev_session` | 仅 standalone 的 host/session 查询和编辑 |
 | `rdev_support` | 静态支持矩阵、前端边界及可选 runtime 探测 |
+| `rdev_agent_plan` | standalone/broker 的只读 agent 状态与安装计划；不可观测字段返回 `unknown`，不触发安装或修复 |
 | `rdev_compat` | 当前构建的协议、错误、config/state 兼容契约 |
 | `rdev_state` | 整个 host state root 的管理员检查、迁移和修复 |
 | `rdev_storage_status` / `rdev_storage_doctor` / `rdev_storage_gc` | standalone 的受管存储检查和清理；共享 MCP 未注册这些工具 |

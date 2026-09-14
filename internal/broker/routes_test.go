@@ -6,7 +6,7 @@ import (
 )
 
 func TestRouteEnvelopes(t *testing.T) {
-	for _, op := range []string{"status", "pool.health", "audit.health", "audit_query", "mutation.status", "job.events", "policy.grant", "approval.create"} {
+	for _, op := range []string{"status", "pool.health", "audit.health", "audit_query", "mutation.status", "job.events", "policy.grant", "policy.inspect", "approval.create"} {
 		t.Run(op, func(t *testing.T) {
 			if err := ValidateRoute(Request{Operation: op}); err != nil {
 				t.Fatal(err)
@@ -47,7 +47,7 @@ func TestRouteEnvelopes(t *testing.T) {
 			t.Fatalf("absent handler %s accepted", op)
 		}
 	}
-	for _, op := range []string{"status", "pool.health", "audit.health", "audit_query"} {
+	for _, op := range []string{"status", "pool.health", "audit.health", "audit_query", "policy.inspect"} {
 		if ValidateRoute(Request{Operation: op, Host: "a"}) == nil {
 			t.Fatalf("global query %s accepted a scope it does not filter", op)
 		}

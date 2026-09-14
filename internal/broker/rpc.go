@@ -32,6 +32,7 @@ type Request struct {
 	Since           time.Time           `json:"since,omitempty"`
 }
 type Response struct {
+	Policy          *PolicyDiagnostic    `json:"policy,omitempty"`
 	Fleet           *FleetPlan           `json:"fleet,omitempty"`
 	Fleets          *FleetPage           `json:"fleets,omitempty"`
 	Inventory       *FleetInventory      `json:"inventory,omitempty"`
@@ -55,4 +56,15 @@ type Response struct {
 	Approval        *Approval            `json:"approval,omitempty"`
 	PolicyDigest    string               `json:"policy_digest,omitempty"`
 	AuditIncomplete bool                 `json:"audit_incomplete,omitempty"`
+}
+
+// PolicyDiagnostic is a redacted, broker-side policy snapshot. It never
+// contains the policy file path, credentials, or client-local configuration.
+type PolicyDiagnostic struct {
+	Digest string             `json:"digest"`
+	Grants []PolicyGrantEntry `json:"grants"`
+}
+type PolicyGrantEntry struct {
+	OwnerRef   string   `json:"owner_ref"`
+	Operations []string `json:"operations"`
 }

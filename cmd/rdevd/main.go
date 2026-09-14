@@ -498,6 +498,13 @@ func serveIngressConn(conn net.Conn, service *broker.Service, lease *broker.Ingr
 			endRequest()
 			continue
 		}
+		if req.Operation == "policy.inspect" {
+			recordResult("completed")
+			diagnostic := service.PolicyDiagnostic()
+			_ = respond(broker.Response{ID: req.ID, PolicyDigest: decision.Digest, OK: true, Policy: &diagnostic})
+			endRequest()
+			continue
+		}
 		if req.Operation == "policy.grant" {
 			var policyErr error
 			if req.GrantHost != "" {

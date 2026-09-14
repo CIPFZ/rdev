@@ -55,7 +55,7 @@ func ValidateRoute(req Request) error {
 			return validateSecretParams(req.Operation, &validation)
 		}
 		return validateSecretParams(req.Operation, req.Secret)
-	case "status", "pool.health", "audit.health", "audit_query":
+	case "status", "pool.health", "audit.health", "audit_query", "policy.inspect":
 		if req.Wire != nil || req.Host != "" {
 			return errors.New("this broker query requires an unscoped local request")
 		}

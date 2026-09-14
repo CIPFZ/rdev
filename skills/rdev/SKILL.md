@@ -30,7 +30,7 @@ When an MCP server is available, use the corresponding structured operation:
 - `rdev_job_start`, `rdev_job_wait`, `rdev_job_status`, and `rdev_job_logs` for bounded background work.
 - `rdev_read`, `rdev_write`, and `rdev_list` for files and directories.
 - `rdev_sync` for push/pull operations; use preview and approval in broker mode.
-- `rdev_session`, `rdev_ping`, `rdev_capability`, and `rdev_support` for setup and support checks.
+- `rdev_session`, `rdev_ping`, `rdev_capability`, `rdev_agent_plan`, and `rdev_support` for setup and support checks.
 - `rdev_fleet` only for broker-managed multi-host job plans.
 
 When only the CLI is available, consult the repository README for the exact command syntax and use the same decision rules. Do not assume that a CLI command or MCP tool exists in both standalone and broker modes; check the active support matrix when the mode is unclear.
@@ -39,6 +39,6 @@ When only the CLI is available, consult the repository README for the exact comm
 
 Read only the reference needed for the current operation:
 
-- [README.md](../../README.md) for installation, standalone setup, CLI syntax, and the MCP tool overview.
-- [Broker operations](../../docs/rdevd-operations.md) for shared mode, principals, policy, approvals, Fleet, and recovery.
-- [Compatibility contract](../../docs/phase8-acceptance.md) when protocol, release, upgrade, or compatibility behavior is involved.
+- [CLI and setup reference](references/cli-and-setup.md) for installation, setup, CLI syntax, and MCP boundaries.
+- [Broker operations](references/broker-operations.md) for shared mode, principals, policy, approvals, Fleet, and recovery.
+- [Compatibility contract](references/compatibility.md) when protocol, release, upgrade, or compatibility behavior is involved.

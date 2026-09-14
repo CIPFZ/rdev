@@ -41,6 +41,19 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		status, err := broker.ProjectStatus(resp)
 		return nil, status, err
 	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_policy", Description: "Read a redacted broker management policy diagnostic. Requires the capability-scoped policy.inspect grant; never reads client-local policy."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.PolicyDiagnostic, error) {
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "policy.inspect", Capability: "broker.admin"})
+		if err != nil {
+			return nil, broker.PolicyDiagnostic{}, err
+		}
+		if !resp.OK || resp.Policy == nil {
+			if resp.Error != "" {
+				return nil, broker.PolicyDiagnostic{}, errors.New(resp.Error)
+			}
+			return nil, broker.PolicyDiagnostic{}, errors.New("broker policy diagnostic unavailable")
+		}
+		return nil, *resp.Policy, nil
+	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_list", Description: "List a remote directory through the shared broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListIn) (*mcp.CallToolResult, proto.ListResult, error) {
 		path := in.Path
 		if path == "" {
@@ -119,6 +132,19 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 			return nil, proto.CapabilityResult{}, errors.New("broker capability returned no result")
 		}
 		return nil, *resp.Wire.Capability, nil
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "rdev_agent_plan", Description: "Read-only agent status and installation plan through the shared broker. Reports only broker-observable capability data; never reads client policy or triggers installation, repair, or trust changes."}, func(ctx context.Context, _ *mcp.CallToolRequest, in agentDiagnosticsIn) (*mcp.CallToolResult, agentDiagnosticsOut, error) {
+		if in.Host == "" {
+			return nil, agentDiagnosticsOut{}, errors.New("host is required")
+		}
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "capability_probe", Host: in.Host, Wire: &proto.Request{Op: proto.OpCapabilityProbe, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Capability: &proto.CapabilityParams{Refresh: false}}})
+		if err != nil {
+			return nil, agentDiagnosticsOut{}, err
+		}
+		if resp.Wire == nil || resp.Wire.Capability == nil {
+			return nil, agentDiagnosticsOut{}, errors.New("broker capability returned no result")
+		}
+		return nil, agentDiagnosticsOut{Host: in.Host, Mode: "status-plan", CurrentVersion: resp.Wire.Capability.ProbeVersion, CandidateVersion: "unknown", Policy: "unknown", Upload: "unknown", Transaction: "unknown", Action: "read-only; no installation requested"}, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_job_start", Description: "Start a supervised background job through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobStartIn) (*mcp.CallToolResult, JobOut, error) {
 		if len(in.Argv) == 0 {

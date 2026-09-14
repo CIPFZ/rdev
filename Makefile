@@ -34,7 +34,7 @@ COMMIT_TIME := $(shell TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%
 VERSION     ?= 0.1.0-dev.0
 STAMP       := -X $(PKG).Version=$(VERSION) -X $(PKG).ReleaseIdentity=rdev-release-identity-v1[$(VERSION)] -X $(PKG).Commit=$(COMMIT) -X $(PKG).CommitTime=$(COMMIT_TIME)
 
-.PHONY: all agents build dev-policy dev-build test vet fmt clean install check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-routes remote-lane-traffic remote-connection-diagnostics remote-secrets remote-secret-import remote-secret-qos remote-approval remote-qos remote-ingress remote-frontends remote-warm-pool remote-mux-capacity remote-audit-continuity remote-audit-routes remote-audit-soak remote-audit-upgrade stress-broker
+.PHONY: all agents build dev-policy dev-build test vet fmt clean install install-skill check-agents check smoke-rdevd remote-smoke remote-service-smoke remote-phase5-runtime remote-session-benchmark remote-lifecycle remote-policy remote-routes remote-lane-traffic remote-connection-diagnostics remote-secrets remote-secret-import remote-secret-qos remote-approval remote-qos remote-ingress remote-frontends remote-warm-pool remote-mux-capacity remote-audit-continuity remote-audit-routes remote-audit-soak remote-audit-upgrade stress-broker
 
 all: agents build
 
@@ -73,6 +73,14 @@ build: agents
 
 install: agents
 	$(GO) install -trimpath -ldflags='$(STAMP)' ./cmd/rdev
+
+install-skill:
+	@set -eu; for root in "$(HOME)/.codex/skills" "$(HOME)/.agents/skills"; do \
+		dst="$$root/rdev"; mkdir -p "$$dst/references"; \
+		install -m 0644 skills/rdev/SKILL.md "$$dst/SKILL.md"; \
+		for f in skills/rdev/references/*.md; do install -m 0644 "$$f" "$$dst/references/$$(basename "$$f")"; done; \
+		test -f "$$dst/SKILL.md" && test -f "$$dst/references/cli-and-setup.md"; \
+		done
 
 # check-agents verifies the embedded agents were built from the current source.
 #

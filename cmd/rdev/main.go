@@ -23,7 +23,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/CIPFZ/rdev/internal/artifact"
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
@@ -86,6 +88,10 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+	if wantsHelp(os.Args[1:]) {
+		usageFor(os.Args[1:])
+		return
 	}
 	if err := validateCLI(os.Args[1:]); err != nil {
 		printCLIError(err)
@@ -154,6 +160,20 @@ func main() {
 		err = cmdCompat()
 	case "support":
 		err = cmdSupport(ctx, c, os.Args[2:])
+	case "policy":
+		err = cmdPolicy(ctx, os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(ctx, c, os.Args[2:])
+	case "agent":
+		err = cmdAgent(ctx, c, os.Args[2:])
+	case "bootstrap-key":
+		if len(os.Args) > 2 && os.Args[2] == "remove" {
+			err = cmdInteractiveSetup(c, "bootstrap-key remove", os.Args[3:])
+		} else {
+			err = cmdInteractiveSetup(c, "bootstrap-key", os.Args[2:])
+		}
+	case "setup":
+		err = cmdInteractiveSetup(c, "setup", os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -171,6 +191,39 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+func usageFor(args []string) {
+	if len(args) >= 2 && args[0] == "hosts" && args[1] == "add" {
+		fmt.Fprintln(os.Stdout, "usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-identity-file PATH] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
+		fmt.Fprintln(os.Stdout, "scope defaults to this project; -global writes the all-projects registry")
+		return
+	}
+	usage()
+}
+
+func cmdPolicy(ctx context.Context, args []string) error {
+	if len(args) != 1 || args[0] != "check" {
+		return errors.New("usage: rdev policy check")
+	}
+	_ = ctx
+	d := artifact.DiagnosePolicy(time.Now())
+	if err := json.NewEncoder(os.Stdout).Encode(d); err != nil {
+		return err
+	}
+	if !d.Valid {
+		return proto.NewError(proto.CodeReleasePolicy, "", proto.StateNotSent)
+	}
+	return nil
 }
 
 func brokerMutation(ctx context.Context, args []string) error {
@@ -685,6 +738,7 @@ USAGE
   rdev write   <host> <path> [-mode 644]        (content from stdin)
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run | -prepare | -plan ID] [-delete]
   rdev state   inspect|migrate|repair <host> [-dry-run]
+  rdev agent   status|plan <host>; repair <host> [-dry-run] | [-confirm -transaction ID -plan-digest SHA -candidate FILE -current FILE -key FILE -known-hosts FILE]
   rdev hosts   [list|trust|approve-project <sha256>|add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D]
                                        [-env K=V]... [-secret NAME=PATH]...
                                        [-no-login] [-force-agent-upload]
@@ -694,6 +748,13 @@ USAGE
   rdev secrets list
   rdev version                            build id + every embedded agent's SHA-256
   rdev support [host] [-refresh]           static support, current capabilities and own grants
+  rdev policy   check                      inspect the selected local release policy (standalone)
+  rdev doctor   [host]                     read-only local/remote diagnosis
+  rdev agent    status|plan <host>         read-only agent version/install plan
+  rdev agent    repair <host> -dry-run     preview only; never mutates
+  rdev bootstrap-key <host>                dedicated-key bootstrap (terminal or agent password FD)
+  rdev bootstrap-key remove <host>        interactive exact-key revocation
+  rdev setup   <host> [-password-fd FD -confirm] first-connection setup
   rdev compat                             machine-readable version and migration contracts
 
 HOST
@@ -802,6 +863,16 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 		Argv:       argv,
 		Cwd:        fs.str("cwd"),
 		TimeoutSec: fs.num("timeout"), Env: fs.env(),
+	}
+	// Preserve pipe composition for agents and automation. Interactive TTYs
+	// remain untouched; a non-TTY stdin is bounded and forwarded as request
+	// data, never logged or interpreted by the CLI.
+	if st, statErr := os.Stdin.Stat(); statErr == nil && st.Mode()&os.ModeCharDevice == 0 {
+		body, readErr := readAllStdin()
+		if readErr != nil {
+			return readErr
+		}
+		opts.Stdin = body
 	}
 	if fs.bools["no-login"] {
 		no := false
@@ -1252,18 +1323,23 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if len(args) == 0 || args[0] == "list" {
 		type row struct {
-			Name       string            `json:"name"`
-			Addr       string            `json:"addr"`
-			Port       int               `json:"port,omitempty"`
-			RemoteDir  string            `json:"remote_dir,omitempty"`
-			Cwd        string            `json:"cwd,omitempty"`
-			Env        map[string]string `json:"env,omitempty"`
-			LoginShell bool              `json:"login_shell"`
-			Secrets    map[string]string `json:"secrets,omitempty"`
+			Name         string            `json:"name"`
+			Addr         string            `json:"addr"`
+			Port         int               `json:"port,omitempty"`
+			IdentityFile string            `json:"identity_file,omitempty"`
+			RemoteDir    string            `json:"remote_dir,omitempty"`
+			Cwd          string            `json:"cwd,omitempty"`
+			Env          map[string]string `json:"env,omitempty"`
+			LoginShell   bool              `json:"login_shell"`
+			Secrets      map[string]string `json:"secrets,omitempty"`
 			// Surfaced because it suppresses the downgrade refusal: a host that
 			// keeps flipping its agent should show why without reading the file.
-			ForceAgentUpload bool   `json:"force_agent_upload,omitempty"`
-			Scope            string `json:"scope"`
+			ForceAgentUpload      bool   `json:"force_agent_upload,omitempty"`
+			Scope                 string `json:"scope"`
+			Source                string `json:"source"`
+			Fingerprint           string `json:"fingerprint"`
+			ConnectionFingerprint string `json:"connection_fingerprint"`
+			Generation            uint64 `json:"generation"`
 		}
 		var rows []row
 		for _, n := range c.Hosts.Names() {
@@ -1273,9 +1349,9 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			}
 			h, st := snapshot.Host, snapshot.State
 			rows = append(rows, row{
-				h.Name, h.Addr, h.Port, h.RemoteDir,
+				h.Name, h.Addr, h.Port, h.IdentityFile, h.RemoteDir,
 				st.Cwd, st.Env, st.LoginShell, st.Secrets,
-				h.ForceAgentUpload, string(snapshot.Scope),
+				h.ForceAgentUpload, string(snapshot.Scope), sourceLabel(snapshot.Scope), snapshot.Fingerprint, snapshot.ConnectionFingerprint, snapshot.Generation,
 			})
 		}
 		return printJSON(c, rows)
@@ -1287,7 +1363,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		if len(fs.pos) < 2 {
-			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
+			return errors.New("usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-identity-file PATH] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
 		}
 		// Project scope is the default: a host registered while working in a repo
 		// almost always belongs to that repo. -global opts into cross-project
@@ -1337,6 +1413,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		host := transport.Host{
 			Name: fs.pos[0], Addr: fs.pos[1], Port: port,
 			RemoteDir:        fs.str("remote-dir"),
+			IdentityFile:     fs.str("identity-file"),
 			ForceAgentUpload: fs.bools["force-agent-upload"],
 		}
 		result, err := c.Hosts.ApplyHostUpdate(session.HostUpdate{
@@ -1361,6 +1438,16 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		return cmdHosts(ctx, c, []string{"list"})
 	}
 	return fmt.Errorf("unknown hosts subcommand %q", args[0])
+}
+
+func sourceLabel(scope session.Scope) string {
+	if scope == session.ScopeGlobal {
+		return "global registry"
+	}
+	if scope == session.ScopeProject {
+		return "approved project registry"
+	}
+	return "unknown registry source"
 }
 
 type approvalOutput struct {
