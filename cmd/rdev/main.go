@@ -140,6 +140,8 @@ func main() {
 		err = cmdList(ctx, c, os.Args[2:])
 	case "write":
 		err = cmdWrite(ctx, c, os.Args[2:])
+	case "edit":
+		err = cmdEdit(ctx, c, os.Args[2:])
 	case "secrets":
 		err = cmdSecrets(ctx, c, os.Args[2:])
 	case "sync":
@@ -365,9 +367,9 @@ func brokerRead(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(fs.pos) < 2 {
-		return errors.New("usage: rdev read <host> <path> [-limit N]")
+		return errors.New("usage: rdev read <host> <path> [-limit N] [-offset N] [-include-digest]")
 	}
-	resp, err := brokerWire(ctx, "read_file", fs.pos[0], &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: fs.pos[1], Offset: int64(fs.num("offset")), Limit: int64(fs.num("limit"))}})
+	resp, err := brokerWire(ctx, "read_file", fs.pos[0], &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: fs.pos[1], Offset: int64(fs.num("offset")), Limit: int64(fs.num("limit")), IncludeDigest: fs.bools["include-digest"]}})
 	if err != nil {
 		return err
 	}
@@ -376,6 +378,9 @@ func brokerRead(ctx context.Context, args []string) error {
 	}
 	if resp.Read.ContentB64 {
 		return errors.New("remote file contains binary data; use rdev sync to fetch it")
+	}
+	if fs.bools["include-digest"] {
+		return json.NewEncoder(os.Stdout).Encode(resp.Read)
 	}
 	fmt.Print(resp.Read.Content)
 	if resp.Read.Truncation.Truncated {
@@ -416,6 +421,27 @@ func brokerWriteInput(ctx context.Context, args []string, input io.Reader) error
 		return errors.New("broker write returned no result")
 	}
 	return json.NewEncoder(os.Stdout).Encode(resp.Cat)
+}
+
+func brokerEdit(ctx context.Context, args []string) error {
+	fs, err := parseFlags(args, "edit")
+	if err != nil {
+		return err
+	}
+	p, err := readEditParams(fs, os.Stdin)
+	if err != nil {
+		return err
+	}
+	resp, err := brokerWire(ctx, proto.OpEditFile, fs.pos[0], &proto.Request{
+		Op: proto.OpEditFile, OperationID: fs.str("operation-id"), Edit: &p,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Edit == nil {
+		return errors.New("broker edit returned no result")
+	}
+	return json.NewEncoder(os.Stdout).Encode(resp.Edit)
 }
 
 func brokerCapability(ctx context.Context, args []string) error {
@@ -733,9 +759,10 @@ USAGE
   rdev job     wait   <host> <job-id>... [-any] [-timeout N] [-tail N]
   rdev job     stop   <host> <job-id> [-signal TERM|KILL] [-grace N]
   rdev job     rm     <host> [<job-id>] [-older-than SEC] [-keep-last N]
-  rdev read    <host> <path> [-limit N]
+  rdev read    <host> <path> [-limit N] [-offset N] [-include-digest]
   rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
+  rdev edit    <host> <path> -kind patch|lines|replace -base-digest SHA < payload
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run | -prepare | -plan ID] [-delete]
   rdev state   inspect|migrate|repair <host> [-dry-run]
   rdev agent   status|plan <host>; repair <host> [-dry-run] | [-confirm -transaction ID -plan-digest SHA -candidate FILE -current FILE -key FILE -known-hosts FILE]
@@ -779,10 +806,10 @@ NOTES
   accept leading-dash operands after --. Your local shell still needs quoting.
   Stdin read errors fail writes without submitting partial input.
 
-  Agent source editing is available as MCP rdev_edit through `rdev serve`:
+  Agent source editing is available as rdev edit or MCP rdev_edit through rdev serve:
   read with include_digest=true, then submit a digest-bound patch, line edit or
-  replacement. The CLI currently exposes read/write only and has no `rdev edit`
-  subcommand.
+  replacement. For CLI lines edits, stdin is a JSON array of line edit objects;
+  patch and replace read their literal payload from stdin.
 
   Timeout seconds: omitted/0 => exec 60, job wait 300, new job wall 3600.
   Positive values are 1..3600; negative/infinite timeouts are rejected.
@@ -1155,7 +1182,14 @@ func cmdRead(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(fs.pos) < 2 {
-		return errors.New("usage: rdev read <host> <path> [-limit N]")
+		return errors.New("usage: rdev read <host> <path> [-limit N] [-offset N] [-include-digest]")
+	}
+	if fs.bools["include-digest"] {
+		res, err := c.ReadFileSnapshot(ctx, fs.pos[0], fs.pos[1], int64(fs.num("offset")), int64(fs.num("limit")))
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(res)
 	}
 	res, err := c.ReadFile(ctx, fs.pos[0], fs.pos[1], int64(fs.num("offset")), int64(fs.num("limit")))
 	if err != nil {
@@ -1206,6 +1240,51 @@ func cmdWriteInput(ctx context.Context, c *client.Client, args []string, input i
 		return err
 	}
 	return printJSON(c, res)
+}
+
+func cmdEdit(ctx context.Context, c *client.Client, args []string) error {
+	fs, err := parseFlags(args, "edit")
+	if err != nil {
+		return err
+	}
+	p, err := readEditParams(fs, os.Stdin)
+	if err != nil {
+		return err
+	}
+	res, err := c.EditFile(ctx, fs.pos[0], p, fs.str("operation-id"))
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(res)
+}
+
+func readEditParams(fs *flagSet, input io.Reader) (proto.EditParams, error) {
+	if len(fs.pos) != 2 {
+		return proto.EditParams{}, errors.New("usage: rdev edit <host> <path> -kind patch|lines|replace -base-digest SHA < payload")
+	}
+	kind, digest := fs.str("kind"), fs.str("base-digest")
+	if kind != "patch" && kind != "lines" && kind != "replace" {
+		return proto.EditParams{}, errors.New("-kind must be patch, lines, or replace")
+	}
+	if digest == "" {
+		return proto.EditParams{}, errors.New("-base-digest is required")
+	}
+	body, err := readAllInput(input)
+	if err != nil {
+		return proto.EditParams{}, err
+	}
+	p := proto.EditParams{Path: fs.pos[1], Kind: kind, BaseDigest: digest}
+	switch kind {
+	case "replace":
+		p.Content = &body
+	case "patch":
+		p.Patch = body
+	case "lines":
+		if err := json.Unmarshal([]byte(body), &p.Lines); err != nil {
+			return proto.EditParams{}, fmt.Errorf("lines payload must be a JSON array: %w", err)
+		}
+	}
+	return p, nil
 }
 
 func readAllStdin() (string, error) { return readAllInput(os.Stdin) }

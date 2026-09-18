@@ -99,10 +99,14 @@ func schema(name string) commandSpec {
 		s.min, s.max = 2, 2
 		add("int", proto.AbsoluteReadBytes, "limit")
 		add("int", math.MaxInt64-proto.AbsoluteReadBytes, "offset")
+		add("bool", 0, "include-digest")
 	case "write":
 		s.min, s.max = 2, 2
 		add("mode", 0777, "mode")
 		add("bool", 0, "append")
+	case "edit":
+		s.min, s.max = 2, 2
+		add("string", 0, "kind", "base-digest", "operation-id")
 	case "job.status":
 		s.min, s.max = 2, 2
 	case "job.logs":

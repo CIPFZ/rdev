@@ -40,6 +40,8 @@ func runBrokerCommand(ctx context.Context, args []string) error {
 		return brokerList(ctx, args[1:])
 	case "write":
 		return brokerWrite(ctx, args[1:])
+	case "edit":
+		return brokerEdit(ctx, args[1:])
 	case "state":
 		return cmdBrokerState(ctx, args[1:])
 	case "env":
