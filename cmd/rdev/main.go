@@ -779,6 +779,11 @@ NOTES
   accept leading-dash operands after --. Your local shell still needs quoting.
   Stdin read errors fail writes without submitting partial input.
 
+  Agent source editing is available as MCP rdev_edit through `rdev serve`:
+  read with include_digest=true, then submit a digest-bound patch, line edit or
+  replacement. The CLI currently exposes read/write only and has no `rdev edit`
+  subcommand.
+
   Timeout seconds: omitted/0 => exec 60, job wait 300, new job wall 3600.
   Positive values are 1..3600; negative/infinite timeouts are rejected.
   Wait expiry ends observation only; job runtime has its own wall budget.
