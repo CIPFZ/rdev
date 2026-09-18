@@ -73,7 +73,7 @@ func TestBrokerServerRegistersSharedTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"rdev_sync": false, "rdev_secrets": false, "rdev_broker_pool": false, "rdev_broker_status": false, "rdev_list": false, "rdev_ping": false, "rdev_exec": false, "rdev_read": false, "rdev_write": false, "rdev_capability": false, "rdev_job_start": false, "rdev_job_list": false, "rdev_job_status": false, "rdev_job_logs": false, "rdev_job_stop": false, "rdev_job_rm": false, "rdev_job_wait": false, "rdev_mutation_status": false, "rdev_job_events": false}
+	want := map[string]bool{"rdev_sync": false, "rdev_secrets": false, "rdev_broker_pool": false, "rdev_broker_status": false, "rdev_list": false, "rdev_ping": false, "rdev_exec": false, "rdev_read": false, "rdev_write": false, "rdev_edit": false, "rdev_capability": false, "rdev_job_start": false, "rdev_job_list": false, "rdev_job_status": false, "rdev_job_logs": false, "rdev_job_stop": false, "rdev_job_rm": false, "rdev_job_wait": false, "rdev_mutation_status": false, "rdev_job_events": false}
 	for _, tool := range tools.Tools {
 		if _, ok := want[tool.Name]; ok {
 			want[tool.Name] = true
@@ -141,7 +141,7 @@ func TestAllToolsAreRegistered(t *testing.T) {
 		"rdev_exec",
 		"rdev_job_start", "rdev_job_list", "rdev_job_status",
 		"rdev_job_logs", "rdev_job_stop", "rdev_job_wait", "rdev_job_rm",
-		"rdev_read", "rdev_write", "rdev_list",
+		"rdev_read", "rdev_write", "rdev_edit", "rdev_list",
 		"rdev_sync", "rdev_session", "rdev_secrets",
 		"rdev_storage_status", "rdev_storage_gc", "rdev_storage_doctor",
 		"rdev_support", "rdev_compat", "rdev_state", "rdev_fleet", "rdev_agent_plan", "rdev_agent_repair",

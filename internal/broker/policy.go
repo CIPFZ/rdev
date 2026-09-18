@@ -165,7 +165,7 @@ func CapabilityForOperation(operation string) string {
 		return "exec"
 	case "read_file", "list":
 		return "file.read"
-	case "write_file":
+	case "write_file", "edit_file":
 		return "file.write"
 	case "job_start", "job_list", "job_status", "job_logs", "job_stop", "job_wait", "job_rm":
 		return "job"

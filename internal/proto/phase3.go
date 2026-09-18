@@ -65,6 +65,7 @@ type OperationDescriptor struct {
 }
 
 var operationRegistry = map[string]OperationDescriptor{
+	OpEditFile:        operation(OpEditFile, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication, FeatureEditFile),
 	OpSyncInspect:     operation(OpSyncInspect, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
 	OpSyncStage:       operation(OpSyncStage, ClassIdempotent, RetrySafe, ExecutionImmediate, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
 	OpSyncCommit:      operation(OpSyncCommit, ClassMutating, RetryNever, ExecutionForeground, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
@@ -136,6 +137,8 @@ func RequireOperation(name string) (OperationDescriptor, error) {
 // security-sensitive callers must check the required known set explicitly.
 type Feature string
 
+const FeatureEditFile Feature = "edit_file_v1"
+
 const (
 	FeatureJobResourceEnvelope Feature = "job_resource_envelope"
 	FeatureSyncPlan            Feature = "sync_plan_v1"
@@ -152,6 +155,7 @@ const (
 )
 
 var supportedFeatures = [...]Feature{
+	FeatureEditFile,
 	FeatureJobResourceEnvelope,
 	FeatureSyncPlan,
 	FeatureJobFilterIDs,
@@ -337,6 +341,10 @@ const (
 	CodeQueueFull            ErrorCode = "resource.queue_full"
 	CodeWatcherLimit         ErrorCode = "resource.watcher_limit"
 	CodeSlowConsumer         ErrorCode = "resource.slow_consumer"
+	CodeEditConflict         ErrorCode = "edit.conflict"
+	CodeEditMismatch         ErrorCode = "edit.mismatch"
+	CodeEditOverlap          ErrorCode = "edit.overlap"
+	CodeEditText             ErrorCode = "edit.not_text"
 	CodeObjectNotFound       ErrorCode = "object.not_found"
 	CodeProcessStartFailure  ErrorCode = "process.start_failed"
 	CodeProcessInvalidState  ErrorCode = "process.invalid_state"
@@ -353,6 +361,10 @@ type ErrorDescriptor struct {
 }
 
 var errorRegistry = map[ErrorCode]ErrorDescriptor{
+	CodeEditConflict:         errorDescriptor(CodeEditConflict, CategoryStorage, "file snapshot changed; read again and regenerate the edit", RetryDispositionNever, false, true),
+	CodeEditMismatch:         errorDescriptor(CodeEditMismatch, CategoryStorage, "edit range or context does not match the snapshot", RetryDispositionNever, false, true),
+	CodeEditOverlap:          errorDescriptor(CodeEditOverlap, CategoryStorage, "edit ranges overlap; combine them against the original snapshot", RetryDispositionNever, false, true),
+	CodeEditText:             errorDescriptor(CodeEditText, CategoryStorage, "edit requires UTF-8 text without NUL bytes", RetryDispositionNever, false, true),
 	CodeReleasePolicy:        errorDescriptor(CodeReleasePolicy, CategoryPolicy, "administrator release policy is required", RetryDispositionAfterUserAction, false, true),
 	CodeReleaseUntrusted:     errorDescriptor(CodeReleaseUntrusted, CategoryAuth, "release signature or artifact identity is untrusted", RetryDispositionAfterUserAction, false, true),
 	CodeReleaseChannel:       errorDescriptor(CodeReleaseChannel, CategoryPolicy, "release channel is not allowed", RetryDispositionAfterUserAction, false, true),
@@ -739,6 +751,7 @@ func CanonicalRequestDigest(request *Request) (string, error) {
 		Exec              *ExecParams       `json:"exec,omitempty"`
 		Read              *ReadParams       `json:"read,omitempty"`
 		Cat               *WriteParams      `json:"write,omitempty"`
+		Edit              *EditParams       `json:"edit,omitempty"`
 		Job               *JobParams        `json:"job,omitempty"`
 		List              *ListParams       `json:"list,omitempty"`
 		Storage           *StorageParams    `json:"storage,omitempty"`
@@ -747,7 +760,7 @@ func CanonicalRequestDigest(request *Request) (string, error) {
 	}{
 		Sync: request.Sync, Op: request.Op, DeadlineUnixMilli: request.DeadlineUnixMilli, StreamWindowBytes: request.StreamWindowBytes,
 		Hello: request.Hello, Cancel: request.Cancel, Exec: request.Exec,
-		Read: request.Read, Cat: request.Cat, Job: request.Job, List: request.List, Storage: request.Storage,
+		Read: request.Read, Cat: request.Cat, Edit: request.Edit, Job: request.Job, List: request.List, Storage: request.Storage,
 		State: request.State, Capability: request.Capability,
 	}
 	encoded, err := json.Marshal(canonical)

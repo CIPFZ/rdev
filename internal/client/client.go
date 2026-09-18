@@ -828,6 +828,13 @@ func (c *Client) doBuiltForLane(ctx context.Context, hostName, target string, bu
 
 		// Older peers can ignore unknown resource fields. Never launch a new job
 		// unless negotiation proves the bounded runtime envelope is enforced.
+		if built.Request.Op == proto.OpEditFile || built.Request.Read != nil && built.Request.Read.IncludeDigest {
+			negotiated, ok := pooled.conn.(negotiatedConnection)
+			if !ok || negotiated.NegotiatedVersion() < 3 || !negotiated.SupportsFeature(proto.FeatureEditFile) {
+				release()
+				return nil, nil, rejectBeforeSend(proto.NewError(proto.CodeUnsupportedFeature, operationID, proto.StateNotSent))
+			}
+		}
 		if built.Request.Op == proto.OpJobStart {
 			negotiated, ok := pooled.conn.(negotiatedConnection)
 			if !ok || negotiated.NegotiatedVersion() < proto.TypedProtocolVersion || !negotiated.SupportsFeature(proto.FeatureJobResourceEnvelope) {
@@ -990,6 +997,9 @@ func stampResponseMetadata(response *proto.Response) {
 	if response.Read != nil {
 		stamp(&response.Read.OperationID, &response.Read.Terminal, &response.Read.Execution)
 	}
+	if response.Edit != nil {
+		stamp(&response.Edit.OperationID, &response.Edit.Terminal, &response.Edit.Execution)
+	}
 	if response.Cat != nil {
 		stamp(&response.Cat.OperationID, &response.Cat.Terminal, &response.Cat.Execution)
 	}
@@ -1063,6 +1073,10 @@ func (c *Client) redactResponseWith(snapshot *secrets.Store, resp *proto.Respons
 	out := c.Secrets.RedactValue(value).(*proto.Response)
 	if resp.Read != nil && out.Read != nil {
 		out.Read.Content, out.Read.ContentB64 = c.redactWirePayload(snapshot, resp.Read.Content, resp.Read.ContentB64)
+		if out.Read.Content != resp.Read.Content || out.Read.ContentB64 != resp.Read.ContentB64 {
+			out.Read.Digest = ""
+			out.Read.Redacted = true
+		}
 	}
 	if resp.Exec != nil && out.Exec != nil {
 		out.Exec.Stdout, out.Exec.StdoutB64 = c.redactWirePayload(snapshot, resp.Exec.Stdout, resp.Exec.StdoutB64)

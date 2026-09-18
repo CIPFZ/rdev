@@ -25,6 +25,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 	registerBrokerState(s, socket, owner)
 	registerBrokerSecrets(s, socket, owner)
 	registerBrokerSync(s, socket, owner)
+	registerBrokerEdit(s, socket, owner)
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_pool", Description: "Read global shared connection capacity, active leases and eviction reasons. Requires a separate pool.health grant."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.PoolHealth, error) {
 		r, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "pool.health"})
 		if err != nil {
@@ -99,7 +100,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 		return nil, toExecOut(&client.ExecResult{ExecResult: resp.Wire.Exec, Cwd: in.Cwd}), nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_read", Description: "Read a remote file through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in ReadIn) (*mcp.CallToolResult, ReadOut, error) {
-		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "read_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpReadFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Read: &proto.ReadParams{Path: in.Path, Offset: in.Offset, Limit: in.Limit}}})
+		resp, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "read_file", Host: in.Host, Wire: &proto.Request{Op: proto.OpReadFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Read: &proto.ReadParams{Path: in.Path, Offset: in.Offset, Limit: in.Limit, IncludeDigest: in.IncludeDigest}}})
 		if err != nil {
 			return nil, ReadOut{}, err
 		}
@@ -107,7 +108,7 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 			return nil, ReadOut{}, errors.New("broker read returned no result")
 		}
 		r := resp.Wire.Read
-		return nil, ReadOut{Content: r.Content, Base64: r.ContentB64, Size: r.Size, EOF: r.EOF, Truncation: r.Truncation, OperationID: r.OperationID, Terminal: r.Terminal, ExecutionState: r.Execution}, nil
+		return nil, ReadOut{Digest: r.Digest, Redacted: r.Redacted, Content: r.Content, Base64: r.ContentB64, Size: r.Size, EOF: r.EOF, Truncation: r.Truncation, OperationID: r.OperationID, Terminal: r.Terminal, ExecutionState: r.Execution}, nil
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_write", Description: "Write a remote file through the shared local broker."}, func(ctx context.Context, _ *mcp.CallToolRequest, in WriteIn) (*mcp.CallToolResult, WriteOut, error) {
 		resp, err := callBroker(ctx, socket, owner, broker.Request{Approval: in.ApprovalToken, Owner: owner, Operation: "write_file", Host: in.Host, Wire: &proto.Request{OperationID: in.OperationID, Op: proto.OpWriteFile, ClientID: owner.ClientID, ProjectID: owner.ProjectID, Cat: &proto.WriteParams{Path: in.Path, Content: in.Content, Mode: in.Mode, Append: in.Append}}})

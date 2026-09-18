@@ -34,6 +34,7 @@ const (
 	OpExec            = "exec"
 	OpReadFile        = "read_file"
 	OpWriteFile       = "write_file"
+	OpEditFile        = "edit_file"
 	OpJobStart        = "job_start"
 	OpJobList         = "job_list"
 	OpJobStatus       = "job_status"
@@ -96,6 +97,7 @@ type Request struct {
 	Exec              *ExecParams       `json:"exec,omitempty"`
 	Read              *ReadParams       `json:"read,omitempty"`
 	Cat               *WriteParams      `json:"write,omitempty"`
+	Edit              *EditParams       `json:"edit,omitempty"`
 	Job               *JobParams        `json:"job,omitempty"`
 	List              *ListParams       `json:"list,omitempty"`
 	Storage           *StorageParams    `json:"storage,omitempty"`
@@ -140,7 +142,8 @@ type ExecParams struct {
 
 // ReadParams reads a slice of a remote file.
 type ReadParams struct {
-	Path string `json:"path"`
+	IncludeDigest bool   `json:"include_digest,omitempty"`
+	Path          string `json:"path"`
 	// Offset is a byte offset from the start of the file.
 	Offset int64 `json:"offset,omitempty"`
 	// Limit caps the number of bytes returned. 0 means the agent default.
@@ -167,6 +170,39 @@ type WriteParams struct {
 	TotalSize  int64  `json:"total_size,omitempty"`
 	Digest     string `json:"digest,omitempty"`
 	Final      bool   `json:"final,omitempty"`
+}
+
+// EditParams edits one existing UTF-8 text file against a complete snapshot.
+// Exactly one payload is selected by Kind: replace, patch, or lines.
+type EditParams struct {
+	Path       string     `json:"path"`
+	Kind       string     `json:"kind"`
+	BaseDigest string     `json:"base_digest"`
+	Content    *string    `json:"content,omitempty"`
+	Patch      string     `json:"patch,omitempty"`
+	Lines      []LineEdit `json:"lines,omitempty"`
+}
+
+// LineEdit uses inclusive one-based source lines. EndLine=0 inserts before
+// StartLine, including line_count+1 (EOF). All ranges refer to the original
+// snapshot. Replacement bytes are literal; no newline is added automatically.
+type LineEdit struct {
+	StartLine   int     `json:"start_line"`
+	EndLine     int     `json:"end_line,omitempty"`
+	Expected    *string `json:"expected,omitempty"`
+	Replacement string  `json:"replacement"`
+}
+
+type EditResult struct {
+	OperationID string         `json:"operation_id,omitempty"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	OldDigest   string         `json:"old_digest"`
+	NewDigest   string         `json:"new_digest"`
+	BytesBefore int            `json:"bytes_before"`
+	BytesAfter  int            `json:"bytes_after"`
+	Changed     bool           `json:"changed"`
+	Committed   bool           `json:"committed"`
 }
 
 // JobParams covers the job lifecycle ops.
@@ -262,6 +298,7 @@ type Response struct {
 	Ping       *PingResult       `json:"ping,omitempty"`
 	Exec       *ExecResult       `json:"exec,omitempty"`
 	Read       *ReadResult       `json:"read,omitempty"`
+	Edit       *EditResult       `json:"edit,omitempty"`
 	Cat        *WriteResult      `json:"write,omitempty"`
 	Job        *JobResult        `json:"job,omitempty"`
 	Storage    *StorageResult    `json:"storage,omitempty"`
@@ -437,6 +474,8 @@ type ExecResult struct {
 
 // ReadResult carries a slice of file content.
 type ReadResult struct {
+	Digest      string         `json:"digest,omitempty"`
+	Redacted    bool           `json:"redacted,omitempty"`
 	OperationID string         `json:"operation_id,omitempty"`
 	Terminal    bool           `json:"terminal"`
 	Execution   ExecutionState `json:"execution_state"`

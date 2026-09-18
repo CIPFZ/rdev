@@ -110,7 +110,7 @@ rdev fleet retry PLAN FAILED_HOST_ID
 |---|---|
 | `rdev_exec` | `argv` 数组形式的前台命令 |
 | `rdev_job_start` / `_wait` / `_list` / `_status` / `_logs` / `_stop` / `_rm` | 有界后台任务、观察和清理 |
-| `rdev_read` / `rdev_write` / `rdev_list` | 文件读写和目录列表 |
+| `rdev_read` / `rdev_write` / `rdev_edit` / `rdev_list` | 文件读写、受保护的 agent 编辑和目录列表；编辑先 `rdev_read(include_digest=true)`，再用 `base_digest` 提交 `lines`、`patch` 或 `replace` |
 | `rdev_fleet` | broker 持久 job_start 编排：预览、审批、执行、分页查询、暂停/恢复/取消及明确失败子集重试；standalone 明确拒绝 |
 | `rdev_sync` | push/pull；broker 使用预览、保留计划及审批执行 |
 | `rdev_secrets` | standalone 内存凭据；broker principal-owned 凭据 |

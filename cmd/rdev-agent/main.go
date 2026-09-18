@@ -451,6 +451,9 @@ func doRead(p *proto.ReadParams) (*proto.ReadResult, error) {
 	if limit == 0 {
 		limit = defaultReadLimit
 	}
+	if p.IncludeDigest {
+		return readSnapshot(p, f, limit)
+	}
 	if p.Offset > 0 {
 		if _, err := f.Seek(p.Offset, 0); err != nil {
 			return nil, err

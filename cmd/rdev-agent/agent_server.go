@@ -361,6 +361,9 @@ func stampResultMetadata(response *proto.Response) {
 	if response.Read != nil {
 		stamp(&response.Read.OperationID, &response.Read.Terminal, &response.Read.Execution)
 	}
+	if response.Edit != nil {
+		stamp(&response.Edit.OperationID, &response.Edit.Terminal, &response.Edit.Execution)
+	}
 	if response.Cat != nil {
 		stamp(&response.Cat.OperationID, &response.Cat.Terminal, &response.Cat.Execution)
 	}
@@ -576,6 +579,8 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 		} else {
 			response.Read, err = doRead(request.Read)
 		}
+	case proto.OpEditFile:
+		response.Edit, err = doEdit(ctx, request.Edit)
 	case proto.OpWriteFile:
 		if request.Cat == nil {
 			err = proto.NewError(proto.CodeInvalidRequest, request.OperationID, proto.StateNotSent)

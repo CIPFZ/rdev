@@ -605,13 +605,16 @@ func toJobLogsOut(res *proto.JobResult) JobLogsOut {
 
 // ---------- files ----------
 type ReadIn struct {
-	Host   string `json:"host"`
-	Path   string `json:"path" jsonschema:"Remote path. Supports a leading ~."`
-	Offset int64  `json:"offset,omitempty"`
-	Limit  int64  `json:"limit,omitempty" jsonschema:"Max bytes to return. Default 65536."`
+	IncludeDigest bool   `json:"include_digest,omitempty" jsonschema:"Return SHA-256 of a consistent complete UTF-8 snapshot for rdev_edit (max 4 MiB), even for a partial read."`
+	Host          string `json:"host"`
+	Path          string `json:"path" jsonschema:"Remote path. Supports a leading ~."`
+	Offset        int64  `json:"offset,omitempty"`
+	Limit         int64  `json:"limit,omitempty" jsonschema:"Max bytes to return. Default 65536."`
 }
 
 type ReadOut struct {
+	Digest         string               `json:"digest,omitempty"`
+	Redacted       bool                 `json:"redacted,omitempty"`
 	Content        string               `json:"content"`
 	Base64         bool                 `json:"base64,omitempty" jsonschema:"True when the content is binary and base64-encoded."`
 	Size           int64                `json:"size"`
@@ -668,6 +671,7 @@ type ListOut struct {
 const defaultReadLimit = 65536
 
 func registerFiles(s *mcp.Server, c *client.Client) {
+	registerEdit(s, c)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "rdev_read",
 		Description: "Read a remote file. Binary content comes back base64-encoded.",
@@ -676,12 +680,16 @@ func registerFiles(s *mcp.Server, c *client.Client) {
 		if limit == 0 {
 			limit = defaultReadLimit
 		}
-		res, err := c.ReadFile(ctx, in.Host, in.Path, in.Offset, limit)
+		read := c.ReadFile
+		if in.IncludeDigest {
+			read = c.ReadFileSnapshot
+		}
+		res, err := read(ctx, in.Host, in.Path, in.Offset, limit)
 		if err != nil {
 			return nil, ReadOut{}, err
 		}
 		return nil, ReadOut{
-			Content: res.Content, Base64: res.ContentB64, Size: res.Size, EOF: res.EOF,
+			Digest: res.Digest, Redacted: res.Redacted, Content: res.Content, Base64: res.ContentB64, Size: res.Size, EOF: res.EOF,
 			Truncation: res.Truncation, OperationID: res.OperationID,
 			Terminal: res.Terminal, ExecutionState: res.Execution,
 		}, nil

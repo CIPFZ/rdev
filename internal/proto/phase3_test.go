@@ -11,7 +11,7 @@ import (
 
 func TestOperationRegistryIsCompleteAndConservative(t *testing.T) {
 	want := []string{
-		OpPing, OpExec, OpReadFile, OpWriteFile, OpJobStart, OpJobList,
+		OpPing, OpExec, OpReadFile, OpWriteFile, OpEditFile, OpJobStart, OpJobList,
 		OpJobStatus, OpJobLogs, OpJobStop, OpJobWait, OpJobRm, OpList, OpCancel,
 		OpStorageStatus, OpStorageGC, OpStorageDoctor,
 		OpStateInspect, OpStateMigrate, OpStateRepair,
@@ -331,6 +331,24 @@ func TestCanonicalRequestDigestBindsStateDryRunAndCapabilityRefresh(t *testing.T
 		if first == second {
 			t.Fatalf("%s semantic controls missing from replay digest", op)
 		}
+	}
+}
+
+func TestCanonicalRequestDigestBindsEditPayload(t *testing.T) {
+	content := "one\n"
+	a := &Request{Op: OpEditFile, Edit: &EditParams{Path: "x", Kind: "replace", BaseDigest: strings.Repeat("a", 64), Content: &content}}
+	b := &Request{Op: OpEditFile, Edit: &EditParams{Path: "x", Kind: "replace", BaseDigest: strings.Repeat("a", 64), Content: &content}}
+	one, err := CanonicalRequestDigest(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = "two\n"
+	two, err := CanonicalRequestDigest(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one == two {
+		t.Fatal("edit content was not bound to replay digest")
 	}
 }
 
