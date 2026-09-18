@@ -12,9 +12,12 @@ as `unknown` and no upload or repair is triggered. `bootstrap-key`, `setup` and 
 Never pass a password through argv, environment, ordinary stdin, logs, jobs or MCP. exec/job inherit
 standard streams and do not provide PTY, TUI or persistent-session guarantees.
 
-For source files, the MCP edit surface is the preferred agent workflow: call
-`rdev_read` with `include_digest=true`, then call `rdev_edit` with the returned
-`base_digest`. It supports strict `patch`, one-based inclusive `lines`, and
-complete `replace` edits. A conflict or hunk mismatch requires a fresh read and
-regenerated edit. The CLI currently has no `rdev edit` subcommand; use the
-documented `rdev_write` path only when MCP is unavailable.
+For source files, use the same digest-bound edit workflow through either
+interface. MCP callers use `rdev_read(include_digest=true)` followed by
+`rdev_edit(base_digest=...)`. CLI callers use
+`rdev read HOST PATH -include-digest`, followed by
+`rdev edit HOST PATH -kind patch|lines|replace -base-digest DIGEST < payload`.
+Patch and replace read literal stdin; lines reads a JSON array of `LineEdit`
+objects. Both paths support strict patching, one-based inclusive line ranges,
+complete replacement, and the same conflict recovery. A conflict or hunk
+mismatch requires a fresh read and regenerated edit.

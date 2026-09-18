@@ -156,6 +156,9 @@ rdev job logs dev <id> -grep ERROR -tail 50
 rdev job stop dev <id> -signal TERM -grace 5
 rdev job rm dev -keep-last 5 -older-than 86400
 rdev read dev '~/app/config.yaml'
+rdev read dev '~/app/config.yaml' -include-digest
+rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 < change.diff
+rdev edit dev '~/app/config.yaml' -kind lines -base-digest SHA256 < line-edits.json
 rdev ls dev '~/app' -limit 50
 printf '%s\n' content | rdev write dev /tmp/f.txt
 rdev sync dev push -exclude .git -dry-run -- -leading-local /remote/dst

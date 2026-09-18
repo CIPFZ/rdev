@@ -210,6 +210,19 @@ func usageFor(args []string) {
 		fmt.Fprintln(os.Stdout, "scope defaults to this project; -global writes the all-projects registry")
 		return
 	}
+	if len(args) >= 1 && args[0] == "edit" {
+		fmt.Fprintln(os.Stdout, "usage: rdev edit <host> <path> -kind patch|lines|replace -base-digest SHA [-operation-id ID] < payload")
+		fmt.Fprintln(os.Stdout, "  patch:  strict unified diff or bare @@ hunks from stdin")
+		fmt.Fprintln(os.Stdout, "  lines:  JSON array of {start_line,end_line,expected,replacement} from stdin")
+		fmt.Fprintln(os.Stdout, "  replace: complete UTF-8 file content from stdin")
+		fmt.Fprintln(os.Stdout, "  first run: rdev read <host> <path> -include-digest")
+		return
+	}
+	if len(args) >= 1 && args[0] == "read" {
+		fmt.Fprintln(os.Stdout, "usage: rdev read <host> <path> [-limit N] [-offset N] [-include-digest]")
+		fmt.Fprintln(os.Stdout, "  -include-digest returns JSON with the complete-snapshot digest for rdev edit")
+		return
+	}
 	usage()
 }
 

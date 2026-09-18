@@ -34,7 +34,7 @@ Use `rdev_edit` as a read-compare-edit transaction. It is designed for an agent 
 5. If the edit reports `edit.conflict`, `edit.mismatch`, or `edit.overlap`, reread the file and regenerate the edit from the new snapshot. Never replay the old request blindly. If transport fails after the server may have applied the edit, reread and compare the result before retrying.
 6. Treat the successful `new_digest` as the next base for a follow-up edit, then run a focused read or test. For binary or non-UTF-8 files, use `rdev_write`/`rdev_sync` instead of `rdev_edit`.
 
-The current `rdev_edit` surface is exposed through MCP. The CLI has no equivalent edit subcommand; when only the CLI is available, use the documented `rdev_write` flow and verify the result carefully.
+The same edit operation is available through MCP as `rdev_edit` and through the CLI as `rdev edit`. With the CLI, first run `rdev read HOST PATH -include-digest` and take the returned `digest`; then pass `-kind patch|lines|replace -base-digest DIGEST` and send the payload on stdin. Patch and replace consume literal stdin; lines consumes a JSON array of `LineEdit` objects. Both interfaces use the same conflict and validation rules.
 
 ## Selecting an interface
 
