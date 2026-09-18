@@ -11,3 +11,10 @@ as `unknown` and no upload or repair is triggered. `bootstrap-key`, `setup` and 
 `-password-fd FD -confirm`; without those flags a noninteractive call fails.
 Never pass a password through argv, environment, ordinary stdin, logs, jobs or MCP. exec/job inherit
 standard streams and do not provide PTY, TUI or persistent-session guarantees.
+
+For source files, the MCP edit surface is the preferred agent workflow: call
+`rdev_read` with `include_digest=true`, then call `rdev_edit` with the returned
+`base_digest`. It supports strict `patch`, one-based inclusive `lines`, and
+complete `replace` edits. A conflict or hunk mismatch requires a fresh read and
+regenerated edit. The CLI currently has no `rdev edit` subcommand; use the
+documented `rdev_write` path only when MCP is unavailable.

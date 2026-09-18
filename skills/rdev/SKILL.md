@@ -15,12 +15,26 @@ Use this skill when the user asks you to work on a remote development machine th
 - Before the first remote operation, verify availability with `rdev version` (or the client equivalent), inspect the registered hosts, and establish the required host trust and project approval. Then run `rdev ping <host>`.
 - If no usable host is configured, ask the user for an SSH alias or `user@host`, port when non-default, and remote working directory. Do not proceed by guessing.
 - Choose the narrowest operation that fits the task: foreground exec for short commands, a bounded background job for long-running work, read/write/list for individual files, and sync for directory changes.
+- For source changes, prefer the agent-oriented edit transaction below over shell heredocs or whole-file rewrites. Use `rdev_write` for binary data, new files, or an intentional complete replacement.
 - Use explicit timeouts. A foreground exec defaults to 60 seconds; job observation defaults to 300 seconds; a new job's wall timeout defaults to 3600 seconds. A timeout while waiting does not cancel a job.
 - For file or directory changes, preview synchronization before applying it when the mode supports previews. Preserve the user's requested direction (`push` or `pull`) and exclusions.
 - In shared/broker mode, use only operations advertised by the current server. Fleet operations require a plan, digest-bound approval, and execution; never fall back to a local SSH loop when the broker rejects Fleet.
 - Treat permission, trust, approval, compatibility, and capability errors as actionable state. Explain the error and the smallest next step instead of retrying blindly.
 - Never expose secrets in command output or logs. Use the rdev secrets mechanism when credentials are needed, and keep credentials out of argv, environment values, and files unless the user explicitly requests that handling.
 - After mutations, verify the resulting state with a focused read, status, job result, or sync preview. Report the host, operation, result, and any unresolved ambiguity.
+
+## Agent file editing
+
+Use `rdev_edit` as a read-compare-edit transaction. It is designed for an agent to make a small, reviewable change without losing concurrent work:
+
+1. Read the complete text snapshot with `rdev_read` and `include_digest=true`. Set a `limit` large enough for the whole file and confirm `eof=true`; the returned digest covers the whole file, not only a truncated response.
+2. Send one `rdev_edit` request with that digest as `base_digest`. Use `kind=patch` for normal code changes, `kind=lines` when the user gives explicit line ranges, and `kind=replace` when deliberately rebuilding the complete file. Do not mix edit kinds in one request.
+3. For `lines`, line numbers are one-based and ranges are inclusive. `end_line=0` inserts before `start_line`; a start line after the final line appends. `expected`, when supplied, must match the selected original text exactly. Replacements are literal and line endings are not normalized.
+4. For `patch`, use a strict unified diff (or a bare hunk beginning with `@@`). Context and old-line counts must match the snapshot exactly. Fuzzy matching, overlapping edits, unrelated file headers, binary data, and ambiguous hunks are rejected rather than guessed.
+5. If the edit reports `edit.conflict`, `edit.mismatch`, or `edit.overlap`, reread the file and regenerate the edit from the new snapshot. Never replay the old request blindly. If transport fails after the server may have applied the edit, reread and compare the result before retrying.
+6. Treat the successful `new_digest` as the next base for a follow-up edit, then run a focused read or test. For binary or non-UTF-8 files, use `rdev_write`/`rdev_sync` instead of `rdev_edit`.
+
+The current `rdev_edit` surface is exposed through MCP. The CLI has no equivalent edit subcommand; when only the CLI is available, use the documented `rdev_write` flow and verify the result carefully.
 
 ## Selecting an interface
 

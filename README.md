@@ -7,7 +7,7 @@
 将下面这段 prompt 发给 Claude Code、Codex 或其他能调用 MCP 的 agent，即可让它完成安装检查、主机配置和首次连接；agent 只有在缺少 SSH 目标或需要用户确认时才应提问：
 
 ```text
-请使用 rdev 帮我操作远程开发机。先检查 rdev 是否可用并运行 `rdev version`；如果未安装，请按照项目 README 的用户级安装方式安装。然后检查已注册的 host；如果没有目标，请向我索要 SSH 主机别名或 user@host、端口和工作目录，再用 `rdev hosts add` 配置。首次连接前完成 host trust 和 project approval，先执行 `rdev ping` 验证连接。之后根据我的任务选择 rdev_exec、rdev_job_start、rdev_read/write、rdev_sync 或其他合适工具。长任务使用后台 job，文件变更先用同步预览；不要猜测主机、路径、凭据或审批参数，遇到权限或兼容性问题先说明原因和可执行的下一步。
+请使用 rdev 帮我操作远程开发机。先检查 rdev 是否可用并运行 `rdev version`；如果未安装，请按照项目 README 的用户级安装方式安装。然后检查已注册的 host；如果没有目标，请向我索要 SSH 主机别名或 user@host、端口和工作目录，再用 `rdev hosts add` 配置。首次连接前完成 host trust 和 project approval，先执行 `rdev ping` 验证连接。之后根据我的任务选择 rdev_exec、rdev_job_start、rdev_read/write/edit、rdev_sync 或其他合适工具。修改源码时先用 `rdev_read(include_digest=true)` 获取完整快照，再用 `rdev_edit` 携带 `base_digest` 进行 patch、行号或完整替换；遇到冲突或 hunk 不匹配必须重新读取并生成编辑。长任务使用后台 job，文件变更先用同步预览；不要猜测主机、路径、凭据或审批参数，遇到权限或兼容性问题先说明原因和可执行的下一步。
 ```
 
 如果当前 agent 已加载 `rdev` MCP，则无需手工输入 CLI 命令；如果只使用终端，请继续阅读下面的快速开始。
