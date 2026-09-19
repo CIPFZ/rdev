@@ -26,6 +26,8 @@ func NewBroker(socket string, owner broker.Owner) (*mcp.Server, error) {
 	registerBrokerSecrets(s, socket, owner)
 	registerBrokerSync(s, socket, owner)
 	registerBrokerEdit(s, socket, owner)
+	registerBrokerStructured(s, socket, owner)
+	registerBrokerOperationStatus(s, socket, owner)
 	mcp.AddTool(s, &mcp.Tool{Name: "rdev_broker_pool", Description: "Read global shared connection capacity, active leases and eviction reasons. Requires a separate pool.health grant."}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, broker.PoolHealth, error) {
 		r, err := callBroker(ctx, socket, owner, broker.Request{Owner: owner, Operation: "pool.health"})
 		if err != nil {

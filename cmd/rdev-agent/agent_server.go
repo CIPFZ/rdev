@@ -52,6 +52,7 @@ func newAgentServer(parent context.Context, state string, writer *respWriter) *a
 		version: proto.Version, features: make(map[proto.Feature]bool),
 		withDeadline: context.WithDeadline,
 	}
+	s.cache.journalDir = state
 	for _, feature := range proto.SupportedFeatures() {
 		s.features[feature] = true
 	}
@@ -160,6 +161,25 @@ func (s *agentServer) process(request *proto.Request) {
 		s.writeError(request, proto.CodeInvalidRequest, proto.StateNotSent, 1)
 		return
 	}
+	if request.Op == proto.OpOperationStatus {
+		if request.OperationStatus == nil || proto.ValidateOperationID(request.OperationStatus.OperationID) != nil {
+			s.writeError(request, proto.CodeInvalidRequest, proto.StateNotSent, 1)
+			return
+		}
+		status, err := s.cache.status(request.ClientID, request.OperationStatus.OperationID)
+		if !s.writer.write(acceptedResponse(request, 1)) {
+			return
+		}
+		response := &proto.Response{ID: request.ID, OperationID: request.OperationID, Type: proto.EventFinal, Seq: 2, Terminal: true, Execution: proto.StateCompleted, OK: err == nil, OperationStatus: status}
+		if err != nil {
+			response.OK = false
+			response.Error = classifyAgentError(err, request.OperationID)
+			response.Err = response.Error.Message
+			response.Execution = response.Error.ExecutionState
+		}
+		s.writer.write(response)
+		return
+	}
 	if !s.negotiatedFeature(proto.FeatureStreaming) {
 		request.StreamWindowBytes = 0
 	}
@@ -260,6 +280,7 @@ func (s *agentServer) process(request *proto.Request) {
 	}
 	stampResultMetadata(response)
 	if s.cache.finish(begin.record, response) {
+		s.cache.persist(begin.record, response)
 		s.writer.write(response)
 	}
 }
@@ -363,6 +384,9 @@ func stampResultMetadata(response *proto.Response) {
 	}
 	if response.Edit != nil {
 		stamp(&response.Edit.OperationID, &response.Edit.Terminal, &response.Edit.Execution)
+	}
+	if response.EditRollback != nil {
+		stamp(&response.EditRollback.OperationID, &response.EditRollback.Terminal, &response.EditRollback.Execution)
 	}
 	if response.Cat != nil {
 		stamp(&response.Cat.OperationID, &response.Cat.Terminal, &response.Cat.Execution)
@@ -581,6 +605,8 @@ func handleContextStream(ctx context.Context, request *proto.Request, state stri
 		}
 	case proto.OpEditFile:
 		response.Edit, err = doEdit(ctx, request.Edit)
+	case proto.OpEditRollback:
+		response.EditRollback, err = doEditRollback(ctx, request.EditRollback)
 	case proto.OpWriteFile:
 		if request.Cat == nil {
 			err = proto.NewError(proto.CodeInvalidRequest, request.OperationID, proto.StateNotSent)

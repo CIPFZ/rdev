@@ -106,7 +106,11 @@ func schema(name string) commandSpec {
 		add("bool", 0, "append")
 	case "edit":
 		s.min, s.max = 2, 2
-		add("string", 0, "kind", "base-digest", "operation-id")
+		add("string", 0, "kind", "base-digest", "operation-id", "search", "replacement")
+		add("bool", 0, "backup", "preview", "replace-all")
+	case "edit.rollback":
+		s.min, s.max = 2, 2
+		add("string", 0, "backup-id", "expected-digest", "operation-id")
 	case "job.status":
 		s.min, s.max = 2, 2
 	case "job.logs":
@@ -170,8 +174,10 @@ func schema(name string) commandSpec {
 	case "secrets.check":
 		s.min, s.max = 2, 2
 		add("string", 0, "path")
-	case "ping", "hosts.approve-project", "mutation.status", "secret.list":
+	case "ping", "hosts.approve-project", "secret.list":
 		s.min, s.max = 1, 1
+	case "mutation.status":
+		s.min, s.max = 2, 2
 	case "secret.set", "secret.delete":
 		s.min, s.max = 2, 2
 	case "secret.set_from_file":
@@ -343,6 +349,10 @@ func validateCLI(args []string) error {
 			name += ".remove"
 			rest = rest[1:]
 		}
+	}
+	if name == "edit" && len(rest) > 0 && rest[0] == "rollback" {
+		name = "edit.rollback"
+		rest = rest[1:]
 	}
 	if name == "exec" || name == "job.start" || name == "secrets.check" {
 		flags, argv, err := splitArgv(rest)

@@ -29,21 +29,21 @@ func Validate(p *proto.EditParams) error {
 	}
 	switch p.Kind {
 	case "replace":
-		if p.Content == nil || p.Patch != "" || len(p.Lines) != 0 {
+		if p.Content == nil || p.Patch != "" || len(p.Lines) != 0 || p.Search != "" || p.Replacement != "" || p.ReplaceAll {
 			return failure(proto.CodeInvalidRequest)
 		}
 		if len(*p.Content) > MaxBytes {
 			return failure(proto.CodeLimitExceeded)
 		}
 	case "patch":
-		if p.Content != nil || p.Patch == "" || len(p.Lines) != 0 {
+		if p.Content != nil || p.Patch == "" || len(p.Lines) != 0 || p.Search != "" || p.Replacement != "" || p.ReplaceAll {
 			return failure(proto.CodeInvalidRequest)
 		}
 		if len(p.Patch) > MaxBytes {
 			return failure(proto.CodeLimitExceeded)
 		}
 	case "lines":
-		if p.Content != nil || p.Patch != "" || len(p.Lines) == 0 {
+		if p.Content != nil || p.Patch != "" || len(p.Lines) == 0 || p.Search != "" || p.Replacement != "" || p.ReplaceAll {
 			return failure(proto.CodeInvalidRequest)
 		}
 		if len(p.Lines) > MaxEdits {
@@ -61,6 +61,13 @@ func Validate(p *proto.EditParams) error {
 			if total > MaxBytes {
 				return failure(proto.CodeLimitExceeded)
 			}
+		}
+	case "search":
+		if p.Content != nil || p.Patch != "" || len(p.Lines) != 0 || p.Search == "" || !text([]byte(p.Search)) || !text([]byte(p.Replacement)) {
+			return failure(proto.CodeInvalidRequest)
+		}
+		if len(p.Search)+len(p.Replacement) > MaxBytes {
+			return failure(proto.CodeLimitExceeded)
 		}
 	default:
 		return failure(proto.CodeInvalidRequest)
@@ -106,6 +113,21 @@ func Apply(base []byte, p *proto.EditParams) ([]byte, error) {
 			return nil, failure(proto.CodeEditText)
 		}
 		return []byte(*p.Content), nil
+	}
+	if p.Kind == "search" {
+		count := bytes.Count(base, []byte(p.Search))
+		if count == 0 {
+			return nil, failure(proto.CodeEditMismatch)
+		}
+		n := 1
+		if p.ReplaceAll {
+			n = count
+		}
+		out := bytes.Replace(base, []byte(p.Search), []byte(p.Replacement), n)
+		if len(out) > MaxBytes {
+			return nil, failure(proto.CodeLimitExceeded)
+		}
+		return out, nil
 	}
 	offsets := boundaries(base)
 	var edits []splice

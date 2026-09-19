@@ -29,6 +29,7 @@ import (
 	"github.com/CIPFZ/rdev/internal/broker"
 	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/client"
+	"github.com/CIPFZ/rdev/internal/fileedit"
 	"github.com/CIPFZ/rdev/internal/mcpsrv"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
@@ -142,6 +143,8 @@ func main() {
 		err = cmdWrite(ctx, c, os.Args[2:])
 	case "edit":
 		err = cmdEdit(ctx, c, os.Args[2:])
+	case "mutation":
+		err = cmdOperationStatus(ctx, c, os.Args[2:])
 	case "secrets":
 		err = cmdSecrets(ctx, c, os.Args[2:])
 	case "sync":
@@ -211,7 +214,8 @@ func usageFor(args []string) {
 		return
 	}
 	if len(args) >= 1 && args[0] == "edit" {
-		fmt.Fprintln(os.Stdout, "usage: rdev edit <host> <path> -kind patch|lines|replace -base-digest SHA [-operation-id ID] < payload")
+		fmt.Fprintln(os.Stdout, "usage: rdev edit <host> <path> -kind patch|lines|replace|search -base-digest SHA [-backup] [-preview] [-operation-id ID] < payload")
+		fmt.Fprintln(os.Stdout, "       rdev edit rollback <host> <path> -backup-id ID [-expected-digest SHA]")
 		fmt.Fprintln(os.Stdout, "  patch:  strict unified diff or bare @@ hunks from stdin")
 		fmt.Fprintln(os.Stdout, "  lines:  JSON array of {start_line,end_line,expected,replacement} from stdin")
 		fmt.Fprintln(os.Stdout, "  replace: complete UTF-8 file content from stdin")
@@ -246,6 +250,19 @@ func brokerMutation(ctx context.Context, args []string) error {
 		fs, err := parseFlags(args[1:], "mutation.status")
 		if err != nil {
 			return err
+		}
+		if len(fs.pos) == 2 {
+			if proto.ValidateOperationID(fs.pos[1]) != nil {
+				return errors.New("usage: rdev mutation status <host> <operation-id>")
+			}
+			resp, err := brokerWire(ctx, proto.OpOperationStatus, fs.pos[0], &proto.Request{Op: proto.OpOperationStatus, OperationStatus: &proto.OperationStatusParams{OperationID: fs.pos[1]}})
+			if err != nil {
+				return err
+			}
+			if resp.OperationStatus == nil {
+				return errors.New("broker returned no operation status")
+			}
+			return json.NewEncoder(os.Stdout).Encode(resp.OperationStatus)
 		}
 		args = append([]string{"status"}, fs.pos...)
 	}
@@ -437,6 +454,23 @@ func brokerWriteInput(ctx context.Context, args []string, input io.Reader) error
 }
 
 func brokerEdit(ctx context.Context, args []string) error {
+	if len(args) > 0 && args[0] == "rollback" {
+		fs, err := parseFlags(args[1:], "edit.rollback")
+		if err != nil {
+			return err
+		}
+		if fs.str("backup-id") == "" {
+			return errors.New("-backup-id is required")
+		}
+		resp, err := brokerWire(ctx, proto.OpEditRollback, fs.pos[0], &proto.Request{Op: proto.OpEditRollback, OperationID: fs.str("operation-id"), EditRollback: &proto.EditRollbackParams{Path: fs.pos[1], BackupID: fs.str("backup-id"), ExpectedDigest: fs.str("expected-digest")}})
+		if err != nil {
+			return err
+		}
+		if resp.EditRollback == nil {
+			return errors.New("broker edit rollback returned no result")
+		}
+		return json.NewEncoder(os.Stdout).Encode(resp.EditRollback)
+	}
 	fs, err := parseFlags(args, "edit")
 	if err != nil {
 		return err
@@ -444,6 +478,24 @@ func brokerEdit(ctx context.Context, args []string) error {
 	p, err := readEditParams(fs, os.Stdin)
 	if err != nil {
 		return err
+	}
+	if fs.bools["preview"] {
+		readResp, err := brokerWire(ctx, proto.OpReadFile, fs.pos[0], &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: fs.pos[1], Limit: fileedit.MaxBytes, IncludeDigest: true}})
+		if err != nil {
+			return err
+		}
+		if readResp.Read == nil || readResp.Read.ContentB64 || readResp.Read.Digest == "" {
+			return proto.NewError(proto.CodeEditText, "", proto.StateFailed)
+		}
+		if p.BaseDigest == "" {
+			p.BaseDigest = readResp.Read.Digest
+		}
+		before := []byte(readResp.Read.Content)
+		after, err := fileedit.Apply(before, &p)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"old_digest": fileedit.Digest(before), "new_digest": fileedit.Digest(after), "bytes_before": len(before), "bytes_after": len(after), "changed": string(before) != string(after), "diff": fileedit.UnifiedDiff(before, after)})
 	}
 	resp, err := brokerWire(ctx, proto.OpEditFile, fs.pos[0], &proto.Request{
 		Op: proto.OpEditFile, OperationID: fs.str("operation-id"), Edit: &p,
@@ -775,7 +827,9 @@ USAGE
   rdev read    <host> <path> [-limit N] [-offset N] [-include-digest]
   rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
-  rdev edit    <host> <path> -kind patch|lines|replace -base-digest SHA < payload
+	  rdev edit    <host> <path> -kind patch|lines|replace|search -base-digest SHA [-backup] [-preview] < payload
+  rdev edit rollback <host> <path> -backup-id ID [-expected-digest SHA]
+  rdev mutation status <host> <operation-id>
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run | -prepare | -plan ID] [-delete]
   rdev state   inspect|migrate|repair <host> [-dry-run]
   rdev agent   status|plan <host>; repair <host> [-dry-run] | [-confirm -transaction ID -plan-digest SHA -candidate FILE -current FILE -key FILE -known-hosts FILE]
@@ -1256,6 +1310,20 @@ func cmdWriteInput(ctx context.Context, c *client.Client, args []string, input i
 }
 
 func cmdEdit(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) > 0 && args[0] == "rollback" {
+		fs, err := parseFlags(args[1:], "edit.rollback")
+		if err != nil {
+			return err
+		}
+		if fs.str("backup-id") == "" {
+			return errors.New("-backup-id is required")
+		}
+		res, err := c.EditRollback(ctx, fs.pos[0], proto.EditRollbackParams{Path: fs.pos[1], BackupID: fs.str("backup-id"), ExpectedDigest: fs.str("expected-digest")}, fs.str("operation-id"))
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(res)
+	}
 	fs, err := parseFlags(args, "edit")
 	if err != nil {
 		return err
@@ -1264,7 +1332,43 @@ func cmdEdit(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if fs.bools["preview"] {
+		read, err := c.ReadFileSnapshot(ctx, fs.pos[0], fs.pos[1], 0, fileedit.MaxBytes)
+		if err != nil {
+			return err
+		}
+		if read.ContentB64 || read.Digest == "" {
+			return proto.NewError(proto.CodeEditText, "", proto.StateFailed)
+		}
+		if p.BaseDigest == "" {
+			p.BaseDigest = read.Digest
+		}
+		before, after := []byte(read.Content), []byte{}
+		after, err = fileedit.Apply(before, &p)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"old_digest": fileedit.Digest(before), "new_digest": fileedit.Digest(after), "bytes_before": len(before), "bytes_after": len(after), "changed": string(before) != string(after), "diff": fileedit.UnifiedDiff(before, after)})
+	}
 	res, err := c.EditFile(ctx, fs.pos[0], p, fs.str("operation-id"))
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(res)
+}
+
+func cmdOperationStatus(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: rdev mutation status <host> <operation-id>")
+	}
+	fs, err := parseFlags(args[1:], "mutation.status")
+	if err != nil {
+		return err
+	}
+	if len(fs.pos) != 2 || proto.ValidateOperationID(fs.pos[1]) != nil {
+		return errors.New("usage: rdev mutation status <host> <operation-id>")
+	}
+	res, err := c.OperationStatus(ctx, fs.pos[0], fs.pos[1])
 	if err != nil {
 		return err
 	}
@@ -1273,20 +1377,29 @@ func cmdEdit(ctx context.Context, c *client.Client, args []string) error {
 
 func readEditParams(fs *flagSet, input io.Reader) (proto.EditParams, error) {
 	if len(fs.pos) != 2 {
-		return proto.EditParams{}, errors.New("usage: rdev edit <host> <path> -kind patch|lines|replace -base-digest SHA < payload")
+		return proto.EditParams{}, errors.New("usage: rdev edit <host> <path> -kind patch|lines|replace|search -base-digest SHA < payload")
 	}
 	kind, digest := fs.str("kind"), fs.str("base-digest")
-	if kind != "patch" && kind != "lines" && kind != "replace" {
-		return proto.EditParams{}, errors.New("-kind must be patch, lines, or replace")
+	if kind != "patch" && kind != "lines" && kind != "replace" && kind != "search" {
+		return proto.EditParams{}, errors.New("-kind must be patch, lines, replace, or search")
 	}
 	if digest == "" {
 		return proto.EditParams{}, errors.New("-base-digest is required")
+	}
+	p := proto.EditParams{Path: fs.pos[1], Kind: kind, BaseDigest: digest, Backup: fs.bools["backup"], Search: fs.str("search"), Replacement: fs.str("replacement"), ReplaceAll: fs.bools["replace-all"]}
+	if kind == "search" {
+		if p.Search == "" {
+			return proto.EditParams{}, errors.New("-search is required for -kind search")
+		}
+		if p.Replacement == "" {
+			return proto.EditParams{}, errors.New("-replacement is required for -kind search")
+		}
+		return p, nil
 	}
 	body, err := readAllInput(input)
 	if err != nil {
 		return proto.EditParams{}, err
 	}
-	p := proto.EditParams{Path: fs.pos[1], Kind: kind, BaseDigest: digest}
 	switch kind {
 	case "replace":
 		p.Content = &body

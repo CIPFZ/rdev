@@ -11,8 +11,8 @@ import (
 
 func TestOperationRegistryIsCompleteAndConservative(t *testing.T) {
 	want := []string{
-		OpPing, OpExec, OpReadFile, OpWriteFile, OpEditFile, OpJobStart, OpJobList,
-		OpJobStatus, OpJobLogs, OpJobStop, OpJobWait, OpJobRm, OpList, OpCancel,
+		OpPing, OpExec, OpReadFile, OpWriteFile, OpEditFile, OpEditRollback, OpJobStart, OpJobList,
+		OpJobStatus, OpJobLogs, OpJobStop, OpJobWait, OpJobRm, OpList, OpCancel, OpOperationStatus,
 		OpStorageStatus, OpStorageGC, OpStorageDoctor,
 		OpStateInspect, OpStateMigrate, OpStateRepair,
 		OpCapabilityProbe, OpSyncInspect, OpSyncStage, OpSyncCommit,

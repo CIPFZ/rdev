@@ -35,6 +35,7 @@ const (
 	OpReadFile        = "read_file"
 	OpWriteFile       = "write_file"
 	OpEditFile        = "edit_file"
+	OpEditRollback    = "edit_rollback"
 	OpJobStart        = "job_start"
 	OpJobList         = "job_list"
 	OpJobStatus       = "job_status"
@@ -49,6 +50,7 @@ const (
 	OpStateMigrate    = "state_migrate"
 	OpStateRepair     = "state_repair"
 	OpCapabilityProbe = "capability_probe"
+	OpOperationStatus = "operation_status"
 	// OpAgentReinstall requests a controlled cleanup and reinstall of the
 	// remote agent. It is handled by the host transport during bootstrap; the
 	// wire agent never executes this operation itself.
@@ -91,18 +93,20 @@ type Request struct {
 	// StreamWindowBytes is the maximum total data-frame payload the agent may
 	// emit before the final frame. Zero disables data frames (accepted/progress/
 	// final still apply). It may only lower the shared hard window.
-	StreamWindowBytes int64             `json:"stream_window_bytes,omitempty"`
-	Hello             *HelloParams      `json:"hello,omitempty"`
-	Cancel            *CancelParams     `json:"cancel,omitempty"`
-	Exec              *ExecParams       `json:"exec,omitempty"`
-	Read              *ReadParams       `json:"read,omitempty"`
-	Cat               *WriteParams      `json:"write,omitempty"`
-	Edit              *EditParams       `json:"edit,omitempty"`
-	Job               *JobParams        `json:"job,omitempty"`
-	List              *ListParams       `json:"list,omitempty"`
-	Storage           *StorageParams    `json:"storage,omitempty"`
-	State             *StateParams      `json:"state,omitempty"`
-	Capability        *CapabilityParams `json:"capability,omitempty"`
+	StreamWindowBytes int64                  `json:"stream_window_bytes,omitempty"`
+	Hello             *HelloParams           `json:"hello,omitempty"`
+	Cancel            *CancelParams          `json:"cancel,omitempty"`
+	Exec              *ExecParams            `json:"exec,omitempty"`
+	Read              *ReadParams            `json:"read,omitempty"`
+	Cat               *WriteParams           `json:"write,omitempty"`
+	Edit              *EditParams            `json:"edit,omitempty"`
+	Job               *JobParams             `json:"job,omitempty"`
+	List              *ListParams            `json:"list,omitempty"`
+	Storage           *StorageParams         `json:"storage,omitempty"`
+	State             *StateParams           `json:"state,omitempty"`
+	Capability        *CapabilityParams      `json:"capability,omitempty"`
+	OperationStatus   *OperationStatusParams `json:"operation_status,omitempty"`
+	EditRollback      *EditRollbackParams    `json:"edit_rollback,omitempty"`
 }
 
 // CancelParams targets one foreground operation. Detached jobs are controlled
@@ -112,6 +116,13 @@ type CancelParams struct {
 	// TargetOp binds cancel-before-request tombstones to an operation whose
 	// registry policy explicitly permits foreground cancellation.
 	TargetOp string `json:"target_op,omitempty"`
+}
+
+// OperationStatusParams queries the in-memory terminal record for a prior
+// operation from the same client session. It is intentionally scoped by the
+// request ClientID; operation IDs alone are not an authorization boundary.
+type OperationStatusParams struct {
+	OperationID string `json:"operation_id"`
 }
 
 // ExecParams describes a foreground command.
@@ -173,14 +184,18 @@ type WriteParams struct {
 }
 
 // EditParams edits one existing UTF-8 text file against a complete snapshot.
-// Exactly one payload is selected by Kind: replace, patch, or lines.
+// Exactly one payload is selected by Kind: replace, patch, lines, or search.
 type EditParams struct {
-	Path       string     `json:"path"`
-	Kind       string     `json:"kind"`
-	BaseDigest string     `json:"base_digest"`
-	Content    *string    `json:"content,omitempty"`
-	Patch      string     `json:"patch,omitempty"`
-	Lines      []LineEdit `json:"lines,omitempty"`
+	Path        string     `json:"path"`
+	Kind        string     `json:"kind"`
+	BaseDigest  string     `json:"base_digest"`
+	Content     *string    `json:"content,omitempty"`
+	Patch       string     `json:"patch,omitempty"`
+	Lines       []LineEdit `json:"lines,omitempty"`
+	Search      string     `json:"search,omitempty"`
+	Replacement string     `json:"replacement,omitempty"`
+	ReplaceAll  bool       `json:"replace_all,omitempty"`
+	Backup      bool       `json:"backup,omitempty"`
 }
 
 // LineEdit uses inclusive one-based source lines. EndLine=0 inserts before
@@ -202,6 +217,25 @@ type EditResult struct {
 	BytesBefore int            `json:"bytes_before"`
 	BytesAfter  int            `json:"bytes_after"`
 	Changed     bool           `json:"changed"`
+	Committed   bool           `json:"committed"`
+	BackupID    string         `json:"backup_id,omitempty"`
+}
+
+type EditRollbackParams struct {
+	Path           string `json:"path"`
+	BackupID       string `json:"backup_id"`
+	ExpectedDigest string `json:"expected_digest,omitempty"`
+}
+
+type EditRollbackResult struct {
+	OperationID string         `json:"operation_id,omitempty"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	OldDigest   string         `json:"old_digest"`
+	NewDigest   string         `json:"new_digest"`
+	BackupID    string         `json:"backup_id"`
+	BytesBefore int            `json:"bytes_before"`
+	BytesAfter  int            `json:"bytes_after"`
 	Committed   bool           `json:"committed"`
 }
 
@@ -295,16 +329,33 @@ type Response struct {
 	Data     *DataFrame     `json:"data,omitempty"`
 	Progress *ProgressFrame `json:"progress,omitempty"`
 
-	Ping       *PingResult       `json:"ping,omitempty"`
-	Exec       *ExecResult       `json:"exec,omitempty"`
-	Read       *ReadResult       `json:"read,omitempty"`
-	Edit       *EditResult       `json:"edit,omitempty"`
-	Cat        *WriteResult      `json:"write,omitempty"`
-	Job        *JobResult        `json:"job,omitempty"`
-	Storage    *StorageResult    `json:"storage,omitempty"`
-	State      *StateResult      `json:"state,omitempty"`
-	Capability *CapabilityResult `json:"capability,omitempty"`
-	List       *ListResult       `json:"list,omitempty"`
+	Ping            *PingResult            `json:"ping,omitempty"`
+	Exec            *ExecResult            `json:"exec,omitempty"`
+	Read            *ReadResult            `json:"read,omitempty"`
+	Edit            *EditResult            `json:"edit,omitempty"`
+	Cat             *WriteResult           `json:"write,omitempty"`
+	Job             *JobResult             `json:"job,omitempty"`
+	Storage         *StorageResult         `json:"storage,omitempty"`
+	State           *StateResult           `json:"state,omitempty"`
+	Capability      *CapabilityResult      `json:"capability,omitempty"`
+	List            *ListResult            `json:"list,omitempty"`
+	OperationStatus *OperationStatusResult `json:"operation_status,omitempty"`
+	EditRollback    *EditRollbackResult    `json:"edit_rollback,omitempty"`
+}
+
+// OperationStatusResult is a read-only view of a cached operation outcome.
+// Final is present once the operation has completed and contains the original
+// typed response, allowing callers to recover without replaying a mutation.
+type OperationStatusResult struct {
+	OperationID string         `json:"operation_id"`
+	Operation   string         `json:"operation"`
+	Terminal    bool           `json:"terminal"`
+	Execution   ExecutionState `json:"execution_state"`
+	OK          bool           `json:"ok"`
+	Error       *ErrorEnvelope `json:"error,omitempty"`
+	// Final is the original typed response projected as JSON. A map keeps this
+	// envelope acyclic so MCP clients can derive a schema for the status tool.
+	Final map[string]any `json:"final,omitempty"`
 }
 
 // ResourceEnvelope carries requested and effective process budgets.
@@ -334,10 +385,13 @@ type ExecutionProfile struct {
 
 type CapabilityResult struct {
 	Features     []Feature         `json:"features,omitempty"`
+	Operations   []string          `json:"operations,omitempty"`
+	Tools        map[string]bool   `json:"tools,omitempty"`
 	ProbeVersion string            `json:"probe_version"`
 	ProbedAt     string            `json:"probed_at"`
 	OS           string            `json:"os"`
 	Arch         string            `json:"arch"`
+	Build        string            `json:"build,omitempty"`
 	Cgroup       bool              `json:"cgroup"`
 	Rlimit       bool              `json:"rlimit"`
 	Resources    ResourceEnvelope  `json:"resources"`

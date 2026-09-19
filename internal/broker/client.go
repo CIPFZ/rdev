@@ -144,6 +144,18 @@ func (c *Client) DoContext(ctx context.Context, req Request) (result Response, c
 			}
 		}()
 	}
+	// Read-only operation_status still needs an outer operation identity for
+	// protocol-v3 admission; it must not be confused with the target identity
+	// being queried.
+	if req.Wire != nil && req.Wire.Op == proto.OpOperationStatus && req.Wire.OperationID == "" {
+		id, err := proto.NewOperationID()
+		if err != nil {
+			return Response{}, err
+		}
+		wire := *req.Wire
+		wire.OperationID = id
+		req.Wire = &wire
+	}
 	if err := req.Owner.Validate(); err != nil {
 		return Response{}, err
 	}

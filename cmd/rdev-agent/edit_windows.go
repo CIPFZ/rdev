@@ -10,3 +10,7 @@ import (
 func doEdit(_ context.Context, _ *proto.EditParams) (*proto.EditResult, error) {
 	return nil, proto.NewError(proto.CodeUnsupportedPlatform, "", proto.StateNotSent)
 }
+
+func doEditRollback(_ context.Context, _ *proto.EditRollbackParams) (*proto.EditRollbackResult, error) {
+	return nil, proto.NewError(proto.CodeUnsupportedPlatform, "", proto.StateNotSent)
+}

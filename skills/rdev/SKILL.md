@@ -28,13 +28,17 @@ Use this skill when the user asks you to work on a remote development machine th
 Use `rdev_edit` as a read-compare-edit transaction. It is designed for an agent to make a small, reviewable change without losing concurrent work:
 
 1. Read the complete text snapshot with `rdev_read` and `include_digest=true`. Set a `limit` large enough for the whole file and confirm `eof=true`; the returned digest covers the whole file, not only a truncated response.
-2. Send one `rdev_edit` request with that digest as `base_digest`. Use `kind=patch` for normal code changes, `kind=lines` when the user gives explicit line ranges, and `kind=replace` when deliberately rebuilding the complete file. Do not mix edit kinds in one request.
+2. Send one `rdev_edit` request with that digest as `base_digest`. Use `kind=patch` for normal code changes, `kind=lines` when the user gives explicit line ranges, `kind=search` for an exact literal replacement, and `kind=replace` when deliberately rebuilding the complete file. Do not mix edit kinds in one request.
 3. For `lines`, line numbers are one-based and ranges are inclusive. `end_line=0` inserts before `start_line`; a start line after the final line appends. `expected`, when supplied, must match the selected original text exactly. Replacements are literal and line endings are not normalized.
 4. For `patch`, use a strict unified diff (or a bare hunk beginning with `@@`). Context and old-line counts must match the snapshot exactly. Fuzzy matching, overlapping edits, unrelated file headers, binary data, and ambiguous hunks are rejected rather than guessed.
 5. If the edit reports `edit.conflict`, `edit.mismatch`, or `edit.overlap`, reread the file and regenerate the edit from the new snapshot. Never replay the old request blindly. If transport fails after the server may have applied the edit, reread and compare the result before retrying.
-6. Treat the successful `new_digest` as the next base for a follow-up edit, then run a focused read or test. For binary or non-UTF-8 files, use `rdev_write`/`rdev_sync` instead of `rdev_edit`.
+6. For a reviewable change, call `rdev_edit_preview` (or CLI `rdev edit ... -preview`) first. It applies the same strict rules in memory and returns old/new digests plus a bounded unified diff without writing.
+7. Set `backup=true` (or CLI `-backup`) when a reversible mutation is useful. A successful result returns `backup_id`; use `rdev_edit_rollback` or `rdev edit rollback HOST PATH -backup-id ID -expected-digest SHA` to restore it atomically. The optional expected digest prevents rolling back over an unrelated writer.
+8. Treat the successful `new_digest` as the next base for a follow-up edit, then run a focused read or test. For binary or non-UTF-8 files, use `rdev_write`/`rdev_sync` instead of `rdev_edit`.
 
-The same edit operation is available through MCP as `rdev_edit` and through the CLI as `rdev edit`. With the CLI, first run `rdev read HOST PATH -include-digest` and take the returned `digest`; then pass `-kind patch|lines|replace -base-digest DIGEST` and send the payload on stdin. Patch and replace consume literal stdin; lines consumes a JSON array of `LineEdit` objects. Both interfaces use the same conflict and validation rules.
+After an ambiguous transport result, query `rdev_operation_status` with the same operation ID (or CLI `rdev mutation status HOST OPERATION_ID`) before considering a retry. The agent retains a bounded status record across client invocations while it is running; broker-managed mutations also have durable broker status.
+
+The same edit operation is available through MCP as `rdev_edit` and through the CLI as `rdev edit`. With the CLI, first run `rdev read HOST PATH -include-digest` and take the returned `digest`; then pass `-kind patch|lines|replace|search -base-digest DIGEST`. Patch and replace consume literal stdin; lines consumes a JSON array of `LineEdit` objects; search takes `-search TEXT -replacement TEXT` and replaces one exact match unless `-replace-all` is set. Both interfaces use the same conflict and validation rules.
 
 ## Selecting an interface
 
@@ -45,6 +49,7 @@ When an MCP server is available, use the corresponding structured operation:
 - `rdev_read`, `rdev_write`, `rdev_edit`, and `rdev_list` for files and directories. For source edits, call `rdev_read` with `include_digest=true`, then use `rdev_edit` with that `base_digest`; prefer `patch` for normal code changes, `lines` for explicit one-based line ranges, and `replace` for a complete rewrite. On conflict or hunk mismatch, reread and regenerate instead of retrying the old edit.
 - `rdev_sync` for push/pull operations; use preview and approval in broker mode.
 - `rdev_session`, `rdev_ping`, `rdev_capability`, `rdev_agent_plan`, and `rdev_support` for setup and support checks.
+- `rdev_git_status`, `rdev_systemd`, and `rdev_port_check` for structured host checks. These use fixed argv and avoid shell parsing. `rdev_capability` reports the remote build, supported operations, execution profile, and detected tools; choose a fallback when a tool such as `rg` is absent.
 - `rdev_fleet` only for broker-managed multi-host job plans.
 
 When only the CLI is available, consult the repository README for the exact command syntax and use the same decision rules. Do not assume that a CLI command or MCP tool exists in both standalone and broker modes; check the active support matrix when the mode is unclear.

@@ -96,6 +96,38 @@ func doEdit(ctx context.Context, p *proto.EditParams) (*proto.EditResult, error)
 	if err != nil {
 		return nil, err
 	}
+	backupName := ""
+	backupKept := false
+	if p.Backup {
+		backupName = ".rdev-backup-" + id
+		backup, openErr := root.OpenFile(backupName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if openErr != nil {
+			return nil, openErr
+		}
+		if _, openErr = backup.Write(before); openErr == nil {
+			openErr = backup.Chmod(st.Mode().Perm())
+		}
+		if openErr == nil {
+			openErr = backup.Sync()
+		}
+		closeErr := backup.Close()
+		if openErr == nil {
+			openErr = closeErr
+		}
+		if openErr != nil {
+			_ = root.Remove(backupName)
+			return nil, openErr
+		}
+		if openErr = parent.Sync(); openErr != nil {
+			_ = root.Remove(backupName)
+			return nil, openErr
+		}
+	}
+	defer func() {
+		if backupName != "" && !backupKept {
+			_ = root.Remove(backupName)
+		}
+	}()
 	tmp := ".rdev-edit-" + id
 	f, err := root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -128,6 +160,8 @@ func doEdit(ctx context.Context, p *proto.EditParams) (*proto.EditResult, error)
 	if err = root.Rename(tmp, name); err != nil {
 		return nil, err
 	}
+	backupKept = backupName != ""
+	res.BackupID = id
 	// Publication already happened. Never imply that a post-rename failure left
 	// the old content intact, and never try to roll back over another writer.
 	if err = parent.Sync(); err != nil {

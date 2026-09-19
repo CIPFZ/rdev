@@ -13,7 +13,7 @@ func LaneForOperation(operation string) Lane {
 	switch operation {
 	case "exec", "job_start", "job_wait":
 		return LaneExec
-	case "sync.push", "sync.pull", "write", "write_file", "read_file", "edit_file":
+	case "sync.push", "sync.pull", "write", "write_file", "read_file", "edit_file", "edit_rollback":
 		return LaneBulk
 	default:
 		return LaneControl

@@ -121,6 +121,9 @@ rdev fleet retry PLAN FAILED_HOST_ID
 | `rdev_state` | 整个 host state root 的管理员检查、迁移和修复 |
 | `rdev_storage_status` / `rdev_storage_doctor` / `rdev_storage_gc` | standalone 的受管存储检查和清理；共享 MCP 未注册这些工具 |
 | `rdev_ping` / `rdev_capability` | broker 的连接检查和原始 capability probe |
+| `rdev_edit_preview` / `rdev_edit_rollback` | digest-bound 编辑预览、统一 diff，以及备份的原子恢复 |
+| `rdev_operation_status` | 查询当前 agent 会话中 mutation 的最终状态，不重放原请求 |
+| `rdev_git_status` / `rdev_systemd` / `rdev_port_check` | 固定 argv 的结构化 Git、systemd 和监听端口检查 |
 | `rdev_broker_status` / `rdev_broker_pool` | broker 的 owner-scoped 使用量和单独授权的全局连接池统计 |
 | `rdev_mutation_status` / `rdev_job_events` | broker 的 mutation outcome 查询及 job 状态历史 |
 
@@ -159,6 +162,12 @@ rdev read dev '~/app/config.yaml'
 rdev read dev '~/app/config.yaml' -include-digest
 rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 < change.diff
 rdev edit dev '~/app/config.yaml' -kind lines -base-digest SHA256 < line-edits.json
+rdev edit dev '~/app/config.yaml' -kind search -search old -replacement new -base-digest SHA256
+rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 -preview < change.diff
+rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 -backup < change.diff
+rdev edit rollback dev '~/app/config.yaml' -backup-id OPERATION_ID -expected-digest SHA256
+rdev mutation status dev OPERATION_ID
+rdev capability dev -refresh
 rdev ls dev '~/app' -limit 50
 printf '%s\n' content | rdev write dev /tmp/f.txt
 rdev sync dev push -exclude .git -dry-run -- -leading-local /remote/dst

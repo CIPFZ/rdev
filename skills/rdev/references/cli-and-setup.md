@@ -19,5 +19,13 @@ interface. MCP callers use `rdev_read(include_digest=true)` followed by
 `rdev edit HOST PATH -kind patch|lines|replace -base-digest DIGEST < payload`.
 Patch and replace read literal stdin; lines reads a JSON array of `LineEdit`
 objects. Both paths support strict patching, one-based inclusive line ranges,
-complete replacement, and the same conflict recovery. A conflict or hunk
-mismatch requires a fresh read and regenerated edit.
+complete replacement, preview/diff (`-preview` or `rdev_edit_preview`), and
+optional atomic backup/rollback (`-backup`, `rdev_edit_rollback`). A conflict
+or hunk mismatch requires a fresh read and regenerated edit. After an
+ambiguous mutation, query `rdev_operation_status` or
+`rdev mutation status HOST OPERATION_ID` before retrying.
+
+`rdev capability HOST` returns the remote build stamp, negotiated operations,
+execution profile and detected common tools. Prefer `rdev_git_status`,
+`rdev_systemd` and `rdev_port_check` for structured checks; they use fixed
+argv and fall back from `ss` to `netstat` for socket inspection.

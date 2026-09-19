@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,13 +50,98 @@ type operationRecord struct {
 // is returned as ambiguous because an agent restart or eviction may have erased
 // proof that it already ran.
 type operationCache struct {
-	mu       sync.Mutex
-	clock    runtimeClock
-	capacity int
-	bytes    int64
-	byteCap  int64
-	ttl      time.Duration
-	records  map[string]*operationRecord
+	mu         sync.Mutex
+	clock      runtimeClock
+	capacity   int
+	bytes      int64
+	byteCap    int64
+	ttl        time.Duration
+	records    map[string]*operationRecord
+	journalDir string
+}
+
+type operationJournal struct {
+	ClientID    string          `json:"client_id"`
+	OperationID string          `json:"operation_id"`
+	Operation   string          `json:"operation"`
+	Response    *proto.Response `json:"response"`
+}
+
+func (c *operationCache) persist(record *operationRecord, response *proto.Response) {
+	if record == nil || response == nil || record.class != proto.ClassMutating || c.journalDir == "" || proto.ValidateOperationID(record.operationID) != nil {
+		return
+	}
+	b, err := json.Marshal(operationJournal{ClientID: record.clientID, OperationID: record.operationID, Operation: record.op, Response: response})
+	if err != nil || len(b) > 256<<10 {
+		return
+	}
+	dir := filepath.Join(c.journalDir, "operations")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".operation-*")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(b)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil && os.Rename(tmpName, filepath.Join(dir, "operation-"+record.operationID+".json")) == nil {
+		pruneOperationJournal(dir)
+	}
+}
+
+func pruneOperationJournal(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) <= dedupeCapacity {
+		return
+	}
+	type item struct {
+		name string
+		mod  time.Time
+	}
+	items := make([]item, 0, len(entries))
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "operation-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil {
+			items = append(items, item{entry.Name(), info.ModTime()})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].mod.Before(items[j].mod) })
+	for len(items) > dedupeCapacity {
+		_ = os.Remove(filepath.Join(dir, items[0].name))
+		items = items[1:]
+	}
+}
+
+func (c *operationCache) loadJournal(clientID, operationID string) (*operationRecord, error) {
+	if c.journalDir == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(filepath.Join(c.journalDir, "operations", "operation-"+operationID+".json"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var item operationJournal
+	if json.Unmarshal(b, &item) != nil || item.Response == nil || item.OperationID != operationID {
+		return nil, nil
+	}
+	return &operationRecord{clientID: item.ClientID, operationID: item.OperationID, op: item.Operation, final: item.Response, finished: true}, nil
 }
 
 func newOperationCache(clock runtimeClock, capacity int, ttl time.Duration) *operationCache {
@@ -80,6 +169,52 @@ type beginResult struct {
 	cached   *proto.Response
 	join     bool
 	envelope *proto.ErrorEnvelope
+}
+
+func (c *operationCache) status(clientID, operationID string) (*proto.OperationStatusResult, error) {
+	if clientID != "" && proto.ValidateOperationID(clientID) != nil || proto.ValidateOperationID(operationID) != nil {
+		return nil, proto.NewError(proto.CodeInvalidRequest, operationID, proto.StateNotSent)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.expireLocked(c.clock.Now())
+	record := c.records[operationCacheKey(clientID, operationID)]
+	if record == nil && clientID != "" {
+		// Standalone CLI invocations do not share a process-local caller ID.
+		// Operation IDs are cryptographically random; accepting a unique match
+		// lets a later `rdev mutation status HOST OP_ID` recover an ambiguous
+		// result without exposing another operation when IDs collide.
+		for _, candidate := range c.records {
+			if candidate.operationID == operationID {
+				if record != nil {
+					return nil, proto.NewError(proto.CodeObjectNotFound, operationID, proto.StateCompleted)
+				}
+				record = candidate
+			}
+		}
+	}
+	if record == nil {
+		record, _ = c.loadJournal(clientID, operationID)
+	}
+	if record == nil {
+		return nil, proto.NewError(proto.CodeObjectNotFound, operationID, proto.StateCompleted)
+	}
+	out := &proto.OperationStatusResult{OperationID: record.operationID, Operation: record.op}
+	if !record.finished {
+		out.Execution = proto.StateAccepted
+		return out, nil
+	}
+	final := cloneResponse(record.final)
+	if final == nil {
+		return nil, proto.NewError(proto.CodeInternalFailure, operationID, proto.StatePossiblyExecuted)
+	}
+	out.Terminal, out.Execution, out.OK = final.Terminal, final.Execution, final.OK
+	out.Error = final.Error
+	encoded, marshalErr := json.Marshal(final)
+	if marshalErr == nil {
+		_ = json.Unmarshal(encoded, &out.Final)
+	}
+	return out, nil
 }
 
 func (c *operationCache) begin(req *proto.Request, cancel context.CancelFunc) beginResult {

@@ -66,6 +66,7 @@ type OperationDescriptor struct {
 
 var operationRegistry = map[string]OperationDescriptor{
 	OpEditFile:        operation(OpEditFile, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication, FeatureEditFile),
+	OpEditRollback:    operation(OpEditRollback, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication, FeatureEditFile),
 	OpSyncInspect:     operation(OpSyncInspect, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
 	OpSyncStage:       operation(OpSyncStage, ClassIdempotent, RetrySafe, ExecutionImmediate, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
 	OpSyncCommit:      operation(OpSyncCommit, ClassMutating, RetryNever, ExecutionForeground, DisconnectCancel, FeatureSyncPlan, FeatureOperationID, FeatureCancel, FeatureDeadline),
@@ -87,6 +88,7 @@ var operationRegistry = map[string]OperationDescriptor{
 	OpStateMigrate:    operation(OpStateMigrate, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
 	OpStateRepair:     operation(OpStateRepair, ClassMutating, RetryDeduplicated, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureDeduplication),
 	OpCapabilityProbe: operation(OpCapabilityProbe, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
+	OpOperationStatus: operation(OpOperationStatus, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectObserveOnly, FeatureOperationID),
 	OpList:            operation(OpList, ClassReadOnly, RetrySafe, ExecutionImmediate, DisconnectComplete, FeatureOperationID, FeatureTruncation),
 	OpCancel:          operation(OpCancel, ClassIdempotent, RetrySafe, ExecutionControl, DisconnectComplete, FeatureOperationID, FeatureCancel),
 }

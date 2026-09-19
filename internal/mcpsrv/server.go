@@ -27,10 +27,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Version is reported to MCP clients. Sourced from buildinfo so the release
-// version is stamped in one place rather than declared twice; it is a var, not a
-// const, because -ldflags -X can only write to a variable.
-var Version = buildinfo.Version
+// Version is reported during MCP initialization. Include the commit and commit
+// time so an agent can distinguish a stale long-lived rdev serve process from
+// the newly installed binary; the CLI prints the same stamp with rdev version.
+var Version = buildinfo.Stamp()
 
 // New builds a server with all rdev tools registered.
 func New(c *client.Client) *mcp.Server {
@@ -66,6 +66,8 @@ func newServer(c *client.Client, approveProject func(string) (session.ProjectTru
 	registerExec(s, c)
 	registerJobs(s, c)
 	registerFiles(s, c)
+	registerStructured(s, c)
+	registerOperationStatus(s, c)
 	registerSync(s, c)
 	registerSession(s, c, approveProject)
 	registerSecrets(s, c)

@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/CIPFZ/rdev/internal/buildinfo"
 	"github.com/CIPFZ/rdev/internal/proto"
 )
 
@@ -79,7 +81,17 @@ func withProfileDigest(p proto.ExecutionProfile) proto.ExecutionProfile {
 func probeCapabilities(refresh bool) *proto.CapabilityResult {
 	_ = refresh // capability probes are cheap and intentionally uncached for now.
 	now := time.Now().UTC()
-	result := &proto.CapabilityResult{ProbeVersion: capabilityProbeVersion, Features: proto.SupportedFeatures(), ProbedAt: now.Format(time.RFC3339Nano), OS: runtime.GOOS, Arch: runtime.GOARCH, Rlimit: rlimitAvailable()}
+	operations := proto.Operations()
+	operationNames := make([]string, 0, len(operations))
+	for _, operation := range operations {
+		operationNames = append(operationNames, operation.Name)
+	}
+	tools := map[string]bool{}
+	for _, name := range []string{"git", "rg", "systemctl", "journalctl", "ss", "netstat", "python3", "sed", "awk"} {
+		_, err := exec.LookPath(name)
+		tools[name] = err == nil
+	}
+	result := &proto.CapabilityResult{ProbeVersion: capabilityProbeVersion, Features: proto.SupportedFeatures(), Operations: operationNames, Tools: tools, Build: buildinfo.Stamp(), ProbedAt: now.Format(time.RFC3339Nano), OS: runtime.GOOS, Arch: runtime.GOARCH, Rlimit: rlimitAvailable()}
 	// Linux cgroup v2 is the only currently advertised hard-control backend.
 	if runtime.GOOS == "linux" {
 		result.Cgroup = cgroupV2Available()

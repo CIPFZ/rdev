@@ -43,10 +43,32 @@ func TestPatchStrictAndReplace(t *testing.T) {
 		t.Fatalf("%q %v", got, e)
 	}
 }
+
+func TestUnifiedDiffIsBoundedAndLiteral(t *testing.T) {
+	diff := UnifiedDiff([]byte("a\nb\nc\n"), []byte("a\nB\nc\n"))
+	want := "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+	if diff != want {
+		t.Fatalf("diff = %q, want %q", diff, want)
+	}
+}
 func TestOverlapRejected(t *testing.T) {
 	base := []byte("a\nb\n")
 	p := &proto.EditParams{Path: "x", Kind: "lines", BaseDigest: Digest(base), Lines: []proto.LineEdit{{StartLine: 1, EndLine: 2, Replacement: "x"}, {StartLine: 2, EndLine: 2, Replacement: "y"}}}
 	if _, e := Apply(base, p); e == nil || e.(*proto.ErrorEnvelope).Code != proto.CodeEditOverlap {
 		t.Fatalf("%v", e)
+	}
+}
+
+func TestSearchEditIsExactAndDigestBound(t *testing.T) {
+	base := []byte("one two two\n")
+	p := &proto.EditParams{Path: "x", Kind: "search", BaseDigest: Digest(base), Search: "two", Replacement: "TWO"}
+	got, err := Apply(base, p)
+	if err != nil || string(got) != "one TWO two\n" {
+		t.Fatalf("search result=%q err=%v", got, err)
+	}
+	p.ReplaceAll = true
+	got, err = Apply(base, p)
+	if err != nil || string(got) != "one TWO TWO\n" {
+		t.Fatalf("replace-all result=%q err=%v", got, err)
 	}
 }
