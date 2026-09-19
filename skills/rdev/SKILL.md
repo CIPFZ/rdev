@@ -46,7 +46,7 @@ When an MCP server is available, use the corresponding structured operation:
 
 - `rdev_exec` for a foreground argv command.
 - `rdev_job_start`, `rdev_job_wait`, `rdev_job_status`, and `rdev_job_logs` for bounded background work.
-- `rdev_read`, `rdev_write`, `rdev_edit`, and `rdev_list` for files and directories. For source edits, call `rdev_read` with `include_digest=true`, then use `rdev_edit` with that `base_digest`; prefer `patch` for normal code changes, `lines` for explicit one-based line ranges, and `replace` for a complete rewrite. On conflict or hunk mismatch, reread and regenerate instead of retrying the old edit.
+- `rdev_read`, `rdev_write`, `rdev_edit`, and `rdev_list` for files and directories. For source edits, call `rdev_read` with `include_digest=true`, then use `rdev_edit` with that `base_digest`; prefer `patch` for normal code changes, `lines` for explicit one-based line ranges, `search` for an exact literal replacement, and `replace` for a complete rewrite. Use preview for reviewable changes and backup when rollback may be useful. On conflict or hunk mismatch, reread and regenerate instead of retrying the old edit.
 - `rdev_sync` for push/pull operations; use preview and approval in broker mode.
 - `rdev_session`, `rdev_ping`, `rdev_capability`, `rdev_agent_plan`, and `rdev_support` for setup and support checks.
 - `rdev_git_status`, `rdev_systemd`, and `rdev_port_check` for structured host checks. These use fixed argv and avoid shell parsing. `rdev_capability` reports the remote build, supported operations, execution profile, and detected tools; choose a fallback when a tool such as `rg` is absent.

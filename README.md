@@ -7,7 +7,7 @@
 将下面这段 prompt 发给 Claude Code、Codex 或其他能调用 MCP 的 agent，即可让它完成安装检查、主机配置和首次连接；agent 只有在缺少 SSH 目标或需要用户确认时才应提问：
 
 ```text
-请使用 rdev 帮我操作远程开发机。先检查 rdev 是否可用并运行 `rdev version`；如果未安装，请按照项目 README 的用户级安装方式安装。然后检查已注册的 host；如果没有目标，请向我索要 SSH 主机别名或 user@host、端口和工作目录，再用 `rdev hosts add` 配置。首次连接前完成 host trust 和 project approval，先执行 `rdev ping` 验证连接。之后根据我的任务选择 rdev_exec、rdev_job_start、rdev_read/write/edit、rdev_sync 或其他合适工具。修改源码时先用 `rdev_read(include_digest=true)` 获取完整快照，再用 `rdev_edit` 携带 `base_digest` 进行 patch、行号或完整替换；遇到冲突或 hunk 不匹配必须重新读取并生成编辑。长任务使用后台 job，文件变更先用同步预览；不要猜测主机、路径、凭据或审批参数，遇到权限或兼容性问题先说明原因和可执行的下一步。
+请使用 rdev 帮我操作远程开发机。先检查 rdev 是否可用并运行 `rdev version`；如果未安装，请按照项目 README 的用户级安装方式安装。然后检查已注册的 host；如果没有目标，请向我索要 SSH 主机别名或 user@host、端口和工作目录，再用 `rdev hosts add` 配置。首次连接前完成 host trust 和 project approval，先执行 `rdev ping` 验证连接。之后根据我的任务选择 rdev_exec、rdev_job_start、rdev_read/write/edit、rdev_sync 或其他合适工具。修改源码时先用 `rdev_read(include_digest=true)` 获取完整快照，再用 `rdev_edit` 携带 `base_digest` 进行 patch、行号、精确搜索替换或完整替换；需要审阅时先用 preview，需要可恢复性时启用 backup。遇到冲突或 hunk 不匹配必须重新读取并生成编辑；遇到传输歧义先用 operation status 查询最终结果，不能盲目重试。长任务使用后台 job，文件变更先用同步预览；不要猜测主机、路径、凭据或审批参数，遇到权限或兼容性问题先说明原因和可执行的下一步。
 ```
 
 如果当前 agent 已加载 `rdev` MCP，则无需手工输入 CLI 命令；如果只使用终端，请继续阅读下面的快速开始。
@@ -110,7 +110,7 @@ rdev fleet retry PLAN FAILED_HOST_ID
 |---|---|
 | `rdev_exec` | `argv` 数组形式的前台命令 |
 | `rdev_job_start` / `_wait` / `_list` / `_status` / `_logs` / `_stop` / `_rm` | 有界后台任务、观察和清理 |
-| `rdev_read` / `rdev_write` / `rdev_edit` / `rdev_list` | 文件读写、受保护的 agent 编辑和目录列表；编辑先 `rdev_read(include_digest=true)`，再用 `base_digest` 提交 `lines`、`patch` 或 `replace` |
+| `rdev_read` / `rdev_write` / `rdev_edit` / `rdev_list` | 文件读写、受保护的 agent 编辑和目录列表；编辑先 `rdev_read(include_digest=true)`，再用 `base_digest` 提交 `lines`、`patch`、`search` 或 `replace`；可先预览并按需创建备份 |
 | `rdev_fleet` | broker 持久 job_start 编排：预览、审批、执行、分页查询、暂停/恢复/取消及明确失败子集重试；standalone 明确拒绝 |
 | `rdev_sync` | push/pull；broker 使用预览、保留计划及审批执行 |
 | `rdev_secrets` | standalone 内存凭据；broker principal-owned 凭据 |
@@ -120,9 +120,9 @@ rdev fleet retry PLAN FAILED_HOST_ID
 | `rdev_compat` | 当前构建的协议、错误、config/state 兼容契约 |
 | `rdev_state` | 整个 host state root 的管理员检查、迁移和修复 |
 | `rdev_storage_status` / `rdev_storage_doctor` / `rdev_storage_gc` | standalone 的受管存储检查和清理；共享 MCP 未注册这些工具 |
-| `rdev_ping` / `rdev_capability` | broker 的连接检查和原始 capability probe |
+| `rdev_ping` / `rdev_capability` | broker MCP 的连接检查和 capability probe；CLI 同名命令可用于 standalone 或 broker，并返回版本、支持的操作、执行 profile 与工具探测 |
 | `rdev_edit_preview` / `rdev_edit_rollback` | digest-bound 编辑预览、统一 diff，以及备份的原子恢复 |
-| `rdev_operation_status` | 查询当前 agent 会话中 mutation 的最终状态，不重放原请求 |
+| `rdev_operation_status` | 查询 agent 保留的 mutation 最终状态，可跨 CLI 进程，不重放原请求 |
 | `rdev_git_status` / `rdev_systemd` / `rdev_port_check` | 固定 argv 的结构化 Git、systemd 和监听端口检查 |
 | `rdev_broker_status` / `rdev_broker_pool` | broker 的 owner-scoped 使用量和单独授权的全局连接池统计 |
 | `rdev_mutation_status` / `rdev_job_events` | broker 的 mutation outcome 查询及 job 状态历史 |
@@ -163,6 +163,7 @@ rdev read dev '~/app/config.yaml' -include-digest
 rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 < change.diff
 rdev edit dev '~/app/config.yaml' -kind lines -base-digest SHA256 < line-edits.json
 rdev edit dev '~/app/config.yaml' -kind search -search old -replacement new -base-digest SHA256
+rdev edit dev '~/app/config.yaml' -kind search -search old -replacement new -replace-all -base-digest SHA256
 rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 -preview < change.diff
 rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 -backup < change.diff
 rdev edit rollback dev '~/app/config.yaml' -backup-id OPERATION_ID -expected-digest SHA256

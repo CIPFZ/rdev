@@ -214,11 +214,13 @@ func usageFor(args []string) {
 		return
 	}
 	if len(args) >= 1 && args[0] == "edit" {
-		fmt.Fprintln(os.Stdout, "usage: rdev edit <host> <path> -kind patch|lines|replace|search -base-digest SHA [-backup] [-preview] [-operation-id ID] < payload")
+		fmt.Fprintln(os.Stdout, "usage: rdev edit <host> <path> -kind patch|lines|replace|search -base-digest SHA [-backup] [-preview] [-operation-id ID] [-search TEXT -replacement TEXT [-replace-all]] [< payload]")
 		fmt.Fprintln(os.Stdout, "       rdev edit rollback <host> <path> -backup-id ID [-expected-digest SHA]")
 		fmt.Fprintln(os.Stdout, "  patch:  strict unified diff or bare @@ hunks from stdin")
 		fmt.Fprintln(os.Stdout, "  lines:  JSON array of {start_line,end_line,expected,replacement} from stdin")
+		fmt.Fprintln(os.Stdout, "  search: -search TEXT -replacement TEXT; use -replace-all for every exact match")
 		fmt.Fprintln(os.Stdout, "  replace: complete UTF-8 file content from stdin")
+		fmt.Fprintln(os.Stdout, "  -preview returns a bounded diff without writing; -backup enables atomic rollback")
 		fmt.Fprintln(os.Stdout, "  first run: rdev read <host> <path> -include-digest")
 		return
 	}
@@ -827,7 +829,7 @@ USAGE
   rdev read    <host> <path> [-limit N] [-offset N] [-include-digest]
   rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
-	  rdev edit    <host> <path> -kind patch|lines|replace|search -base-digest SHA [-backup] [-preview] < payload
+	  rdev edit    <host> <path> -kind patch|lines|replace|search -base-digest SHA [-backup] [-preview] [-search TEXT -replacement TEXT [-replace-all]] [< payload]
   rdev edit rollback <host> <path> -backup-id ID [-expected-digest SHA]
   rdev mutation status <host> <operation-id>
   rdev sync    <host> push|pull <local> <remote> [-exclude P]... [-dry-run | -prepare | -plan ID] [-delete]
@@ -874,9 +876,12 @@ NOTES
   Stdin read errors fail writes without submitting partial input.
 
   Agent source editing is available as rdev edit or MCP rdev_edit through rdev serve:
-  read with include_digest=true, then submit a digest-bound patch, line edit or
-  replacement. For CLI lines edits, stdin is a JSON array of line edit objects;
-  patch and replace read their literal payload from stdin.
+  read with include_digest=true, then submit a digest-bound patch, line edit,
+  exact search replacement or complete replacement. Search uses -search and
+  -replacement (plus -replace-all when needed); lines edits read a JSON array
+  of line edit objects; patch and replace read their literal payload from stdin.
+  Use -preview for a bounded diff, -backup for rollback, and mutation status to
+  resolve an ambiguous result before retrying.
 
   Timeout seconds: omitted/0 => exec 60, job wait 300, new job wall 3600.
   Positive values are 1..3600; negative/infinite timeouts are rejected.
@@ -1377,7 +1382,7 @@ func cmdOperationStatus(ctx context.Context, c *client.Client, args []string) er
 
 func readEditParams(fs *flagSet, input io.Reader) (proto.EditParams, error) {
 	if len(fs.pos) != 2 {
-		return proto.EditParams{}, errors.New("usage: rdev edit <host> <path> -kind patch|lines|replace|search -base-digest SHA < payload")
+		return proto.EditParams{}, errors.New("usage: rdev edit <host> <path> -kind patch|lines|replace|search -base-digest SHA [-search TEXT -replacement TEXT [-replace-all]] [< payload]")
 	}
 	kind, digest := fs.str("kind"), fs.str("base-digest")
 	if kind != "patch" && kind != "lines" && kind != "replace" && kind != "search" {

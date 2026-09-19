@@ -16,13 +16,13 @@ For source files, use the same digest-bound edit workflow through either
 interface. MCP callers use `rdev_read(include_digest=true)` followed by
 `rdev_edit(base_digest=...)`. CLI callers use
 `rdev read HOST PATH -include-digest`, followed by
-`rdev edit HOST PATH -kind patch|lines|replace -base-digest DIGEST < payload`.
+`rdev edit HOST PATH -kind patch|lines|replace|search -base-digest DIGEST [< payload]`.
 Patch and replace read literal stdin; lines reads a JSON array of `LineEdit`
-objects. Both paths support strict patching, one-based inclusive line ranges,
-complete replacement, preview/diff (`-preview` or `rdev_edit_preview`), and
-optional atomic backup/rollback (`-backup`, `rdev_edit_rollback`). A conflict
-or hunk mismatch requires a fresh read and regenerated edit. After an
-ambiguous mutation, query `rdev_operation_status` or
+objects; search takes `-search TEXT -replacement TEXT` and replaces one exact
+match unless `-replace-all` is set. All kinds support the same digest guard,
+preview/diff (`-preview` or `rdev_edit_preview`), and optional atomic
+backup/rollback (`-backup`, `rdev_edit_rollback`). A conflict or hunk mismatch
+requires a fresh read and regenerated edit. After an ambiguous mutation, query `rdev_operation_status` or
 `rdev mutation status HOST OPERATION_ID` before retrying.
 
 `rdev capability HOST` returns the remote build stamp, negotiated operations,
