@@ -36,6 +36,10 @@ func schema(name string) commandSpec {
 		}
 	}
 	switch name {
+	case "hosts.list":
+		add("string", 0, "format")
+	case "login":
+		s.min, s.max = 1, 1
 	case "policy.check":
 	case "doctor":
 		s.min, s.max = 0, 1
@@ -184,7 +188,7 @@ func schema(name string) commandSpec {
 		s.min, s.max = 3, 3
 	case "broker.status":
 		add("bool", 0, "pool")
-	case "serve", "version", "-version", "--version", "help", "-h", "--help", "compat", "hosts", "hosts.list", "hosts.trust", "secrets.list":
+	case "serve", "version", "-version", "--version", "help", "-h", "--help", "compat", "hosts", "hosts.trust", "secrets.list":
 	default:
 		s.min, s.max = -1, -1
 	}

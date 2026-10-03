@@ -29,7 +29,15 @@ rdev hosts trust
 rdev hosts approve-project <上一步显示的sha256>
 rdev ping dev
 rdev exec dev -- printf '%s\n' '中文 "quoted" $(not-run)'
+
+# 人工维护时：用简洁表格查看主机，或进入交互式 SSH
+rdev hosts list -format raw
+rdev login dev
 ```
+
+`rdev login` 只复用已登记的地址、端口和身份文件，然后交给本机
+OpenSSH 建立带 PTY 的交互会话；密码提示仍由 SSH 处理，rdev 不保存密码。
+`rdev hosts list` 默认仍输出 JSON；`-format raw` 只改变人工查看时的展示格式。
 
 本地源码开发也可以使用 `make dev-build`：它会在缺少时创建一个权限为 0600、七天后过期的 `dev` unsigned policy，然后按正确顺序构建嵌入 agent、CLI 和 daemon。已有的管理员 policy 不会被覆盖；正式或共享环境应改用管理员签名 policy。
 

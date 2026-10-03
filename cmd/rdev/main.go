@@ -19,10 +19,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/CIPFZ/rdev/internal/artifact"
@@ -153,6 +155,8 @@ func main() {
 		err = cmdState(ctx, c, os.Args[2:])
 	case "hosts":
 		err = cmdHosts(ctx, c, os.Args[2:])
+	case "login":
+		err = cmdLogin(ctx, c, os.Args[2:])
 	case "ping":
 		err = cmdPing(ctx, c, os.Args[2:])
 	case "capability":
@@ -211,6 +215,14 @@ func usageFor(args []string) {
 	if len(args) >= 2 && args[0] == "hosts" && args[1] == "add" {
 		fmt.Fprintln(os.Stdout, "usage: rdev hosts add <name> <addr> [-port N] [-cwd DIR] [-remote-dir D] [-identity-file PATH] [-env K=V]... [-secret NAME=PATH]... [-no-login] [-force-agent-upload] [-global] [-save]")
 		fmt.Fprintln(os.Stdout, "scope defaults to this project; -global writes the all-projects registry")
+		return
+	}
+	if len(args) >= 2 && args[0] == "hosts" && args[1] == "list" {
+		fmt.Fprintln(os.Stdout, "usage: rdev hosts list [-format json|raw]")
+		return
+	}
+	if len(args) >= 1 && args[0] == "login" {
+		fmt.Fprintln(os.Stdout, "usage: rdev login <host>")
 		return
 	}
 	if len(args) >= 1 && args[0] == "edit" {
@@ -816,6 +828,7 @@ USAGE
   rdev fleet inventory-list               inventory administration requires its own grant
   rdev broker status                      this principal's shared broker resource usage
   rdev ping    <host>
+	  rdev login   <host>                   open an interactive SSH session
   rdev capability <host> [-refresh]
   rdev env inspect <host> [-refresh]
   rdev exec    <host> [-cwd DIR] [-env K=V]... [-timeout N] -- <argv...>
@@ -1538,6 +1551,19 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(c, out)
 	}
 	if len(args) == 0 || args[0] == "list" {
+		if len(args) > 0 {
+			fs, err := parseFlags(args[1:], "hosts.list")
+			if err != nil {
+				return err
+			}
+			format := fs.str("format")
+			if format == "raw" {
+				return cmdHostList(c)
+			}
+			if format != "" && format != "json" {
+				return fmt.Errorf("unknown hosts list format %q (use json or raw)", format)
+			}
+		}
 		type row struct {
 			Name         string            `json:"name"`
 			Addr         string            `json:"addr"`
@@ -1654,6 +1680,66 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 		return cmdHosts(ctx, c, []string{"list"})
 	}
 	return fmt.Errorf("unknown hosts subcommand %q", args[0])
+}
+
+// cmdLogin hands the user's terminal to the system OpenSSH client. Unlike
+// exec, this intentionally does not use BatchMode or the rdev agent: password
+// prompts, shell startup, and interactive programs belong to SSH itself.
+func cmdLogin(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: rdev login <host>")
+	}
+	snapshot, err := c.Hosts.Inspect(args[0])
+	if err != nil {
+		return err
+	}
+	h := snapshot.Host
+	if err := transport.ValidateDestination(h.Addr, h.Port); err != nil {
+		return fmt.Errorf("invalid host %q: %w", args[0], err)
+	}
+	sshArgs := []string{"-tt"}
+	if h.IdentityFile != "" {
+		sshArgs = append(sshArgs, "-o", "IdentitiesOnly=yes", "-i", h.IdentityFile)
+	}
+	if h.Port != 0 {
+		sshArgs = append(sshArgs, "-p", strconv.Itoa(h.Port))
+	}
+	sshArgs = append(sshArgs, h.Addr)
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ssh login: %w", err)
+	}
+	return nil
+}
+
+// cmdHostList is the human-facing counterpart to the JSON `hosts list`
+// command. Keep the output small enough to scan while leaving fingerprints and
+// other diagnostics available through the existing command.
+func cmdHostList(c *client.Client) error {
+	names := c.Hosts.Names()
+	if len(names) == 0 {
+		fmt.Fprintln(os.Stdout, "no hosts registered")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tADDRESS\tPORT\tCWD\tSCOPE")
+	for _, name := range names {
+		snapshot, err := c.Hosts.Inspect(name)
+		if err != nil {
+			continue
+		}
+		port := "-"
+		if snapshot.Host.Port != 0 {
+			port = strconv.Itoa(snapshot.Host.Port)
+		}
+		cwd := snapshot.State.Cwd
+		if cwd == "" {
+			cwd = "~"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", name, snapshot.Host.Addr, port, cwd, snapshot.Scope)
+	}
+	return w.Flush()
 }
 
 func sourceLabel(scope session.Scope) string {

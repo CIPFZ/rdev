@@ -1455,6 +1455,20 @@ func ProjectConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The user's home directory is already the base of the global registry.
+	// Treating it as a project would make ~/.rdev/hosts.json load twice and
+	// incorrectly subject the global file to project approval.
+	if home, err := os.UserHomeDir(); err == nil {
+		if resolvedHome, resolveErr := filepath.EvalSymlinks(home); resolveErr == nil {
+			home = resolvedHome
+		}
+		if resolvedCWD, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+			cwd = resolvedCWD
+		}
+		if filepath.Clean(cwd) == filepath.Clean(home) {
+			return "", fmt.Errorf("working directory is the global rdev home; no project host registry")
+		}
+	}
 	// Bind approvals to one physical project identity rather than allowing the
 	// same checkout to accumulate separate decisions through symlink aliases.
 	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {

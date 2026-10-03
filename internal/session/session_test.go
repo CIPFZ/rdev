@@ -176,6 +176,17 @@ func TestProjectScopeOverridesGlobal(t *testing.T) {
 	}
 }
 
+func TestProjectConfigPathSkipsGlobalHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(home)
+	if _, err := ProjectConfigPath(); err == nil {
+		t.Fatal("ProjectConfigPath() from home directory returned a project path")
+	}
+}
+
 func TestSaveOnlyWritesMatchingScope(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
