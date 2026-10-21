@@ -153,7 +153,11 @@ CLI 的 `--` 分隔 rdev 参数和命令 argv；之后不再由 rdev 解析。**
 | job wait：CLI `-timeout` / MCP `timeout_sec` | 300 秒 | 1–3600 秒 | 仅停止本次观察，返回 `timed_out`，不终止 job |
 | 新后台 job：CLI `-wall-timeout` / MCP `resources.wall_timeout_sec` | 3600 秒 | 1–3600 秒 | supervisor 执行 job 运行时限 |
 
-负值、溢出、超上限和显式无限均拒绝；`0` 不表示无限。连接建立和请求 context/deadline 是独立预算，可能更早结束；exec 的运行时限不等于 SSH 建连的总时限。前台取消隔离于其他客户端；后台 job 不因连接断开或一次 wait 到期而结束，但仍受自身运行时限约束。
+负值、溢出、超上限和显式无限均拒绝；`0` 不表示无限。连接建立和请求 context/deadline 是独立预算，可能更早结束；exec 的运行时限不等于 SSH 建连的总时限。CLI 的 `exec` 和 `job wait` 另有本地截止时间：远端超时（缺省时用上表默认值）加 45 秒宽限，覆盖读取 stdin、SSH 建连（ssh `ConnectTimeout=15`）和 agent 握手；超出后以退出码 124 结束，并指出卡住的阶段。
+
+`exec` 仅在 stdin 为普通文件或管道时转发，或用 `-stdin` 显式要求；socket、终端和设备一律忽略。管道必须读到 EOF 才会发出请求，管道 2 秒无数据会在 stderr 提示；不需要输入时传 `-no-stdin` 或 `</dev/null`（agent 环境继承的 stdin 可能永不关闭）。`rdev -v <命令>` 或 `RDEV_DEBUG=1` 把各阶段（解析主机、stdin、SSH 建连、agent 握手、请求发出、收到结果）及耗时输出到 stderr；`exec` 运行超过 30 秒后每 60 秒在 stderr 输出一次心跳（含当前阶段）。`RDEV_QUIET=1` 关闭这些提示和心跳，但不影响错误和结果。
+
+项目 `.rdev/hosts.json` 改动后需要重新审批；在此期间只有用到其中主机时才会提示：仅在项目配置中定义的主机会报错并给出 `rdev hosts approve-project <sha256>`，与全局同名的主机则提示正在使用全局定义。`rdev hosts list` 会在 stderr 列出未加载的项目主机，以及指向同一地址的多个别名。前台取消隔离于其他客户端；后台 job 不因连接断开或一次 wait 到期而结束，但仍受自身运行时限约束。
 
 这是兼容性行为变化：旧调用中缺省/零值的无限 exec 和无限新 job 现在使用上述有限默认值。已有显式合法正值继续有效；升级不会追溯修改已经运行的旧 supervisor。exec/wait 向兼容旧 agent 发送规范化后的显式值，避免旧零值语义重新放开预算。新 job 还要求 agent 协商 `job_resource_envelope` feature；不支持该 feature 的旧 agent 在发送 job start 前明确拒绝，须先升级 agent。已有 job 的 status/wait/stop 和公共 read/ping 不因此停止兼容。
 
@@ -162,12 +166,15 @@ MCP job start 接受 `resources`；结果保留 `requested_resources`、`effecti
 ```bash
 rdev exec dev -timeout 30 -- sqlite3 db "SELECT json_extract(x,'\$.score') FROM runs"
 rdev job start dev -label batch -env MODE=batch -wall-timeout 600 -- ./run.sh
+id=$(rdev job start dev -q -- ./run.sh)        # 只输出 job id
 rdev job wait dev <id> -timeout 60 -tail 20
+rdev job wait dev "$id" -q                      # 每个 job 一行摘要，日志仍走 stderr
 rdev job logs dev <id> -grep ERROR -tail 50
 rdev job stop dev <id> -signal TERM -grace 5
 rdev job rm dev -keep-last 5 -older-than 86400
 rdev read dev '~/app/config.yaml'
 rdev read dev '~/app/config.yaml' -include-digest
+rdev digest dev '~/app/config.yaml'             # 只输出 edit -base-digest 需要的摘要
 rdev edit dev '~/app/config.yaml' -kind patch -base-digest SHA256 < change.diff
 rdev edit dev '~/app/config.yaml' -kind lines -base-digest SHA256 < line-edits.json
 rdev edit dev '~/app/config.yaml' -kind search -search old -replacement new -base-digest SHA256

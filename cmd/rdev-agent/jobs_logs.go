@@ -122,14 +122,14 @@ func jobLogs(p *proto.JobParams, state string) (*proto.JobResult, error) {
 	// size. This is the common shape -- checking on a running batch -- and on a
 	// 50 MB log it is ~40x faster than scanning.
 	if p.Grep == "" && since == 0 {
-		logs, tailTruncated, tailScanBytes, err := readTailStatus(path, tail)
+		window, err := readTailWindow(path, tail)
 		if err != nil {
 			return nil, err
 		}
-		res.Logs = logs
-		res.TailTruncated = tailTruncated
-		res.TailScanBytes = tailScanBytes
-		res.LogsTruncation, _ = proto.NewTruncation(info.Size(), int64(len(logs)))
+		res.Logs = window.logs
+		res.TailTruncated = window.truncated
+		res.TailScanBytes = window.scanned
+		res.LogsTruncation = window.truncation()
 		if res.LogLedger.LimitBytes != 0 {
 			res.LogsTruncation, _ = proto.NewTruncation(res.LogLedger.OriginalBytes, res.LogLedger.RetainedBytes)
 		}
@@ -196,17 +196,41 @@ func readTail(path string, n int) (string, error) {
 // requested window (for example, a single gigantic line). This is observable
 // so callers can choose a larger strategy instead of assuming completeness.
 func readTailStatus(path string, n int) (string, bool, int64, error) {
+	w, err := readTailWindow(path, n)
+	return w.logs, w.truncated, w.scanned, err
+}
+
+// tailWindow is the last lines of a log plus its byte accounting against the
+// file size observed for the same read.
+type tailWindow struct {
+	logs      string
+	truncated bool
+	scanned   int64
+	size      int64
+	// covered counts the file bytes the returned window represents: the lines
+	// themselves plus the trailing newlines trimmed from the end. Without
+	// those, a complete log ending in "\n" reported one dropped byte.
+	covered int64
+}
+
+// truncation is the retained/dropped ledger of the window.
+func (w tailWindow) truncation() proto.Truncation {
+	t, _ := proto.NewTruncation(w.size, w.covered)
+	return t
+}
+
+func readTailWindow(path string, n int) (tailWindow, error) {
 	if n < 1 {
 		n = 1
 	}
 	f, err := openJobLog(path)
 	if err != nil {
-		return "", false, 0, err
+		return tailWindow{}, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return "", false, 0, err
+		return tailWindow{}, err
 	}
 
 	size := info.Size()
@@ -226,7 +250,7 @@ func readTailStatus(path string, n int) (string, bool, int64, error) {
 
 		buf := make([]byte, step)
 		if _, err := f.ReadAt(buf, pos); err != nil && err != io.EOF {
-			return "", false, 0, err
+			return tailWindow{}, err
 		}
 		tail = append(buf, tail...)
 
@@ -237,11 +261,19 @@ func readTailStatus(path string, n int) (string, bool, int64, error) {
 		}
 	}
 
-	lines := strings.Split(strings.TrimRight(string(tail), "\n"), "\n")
+	trimmed := strings.TrimRight(string(tail), "\n")
+	lines := strings.Split(trimmed, "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
-	return strings.Join(lines, "\n"), pos > 0 && bytes.Count(tail, []byte("\n")) <= n, size - pos, nil
+	logs := strings.Join(lines, "\n")
+	return tailWindow{
+		logs:      logs,
+		truncated: pos > 0 && bytes.Count(tail, []byte("\n")) <= n,
+		scanned:   size - pos,
+		size:      size,
+		covered:   int64(len(logs) + len(tail) - len(trimmed)),
+	}, nil
 }
 
 // lineRing keeps the last n lines seen, discarding earlier ones.

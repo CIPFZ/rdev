@@ -16,7 +16,9 @@ Use this skill when the user asks you to work on a remote development machine th
 - If no usable host is configured, ask the user for an SSH alias or `user@host`, port when non-default, and remote working directory. Do not proceed by guessing.
 - Choose the narrowest operation that fits the task: foreground exec for short commands, a bounded background job for long-running work, read/write/list for individual files, and sync for directory changes.
 - For source changes, prefer the agent-oriented edit transaction below over shell heredocs or whole-file rewrites. Use `rdev_write` for binary data, new files, or an intentional complete replacement.
-- Use explicit timeouts. A foreground exec defaults to 60 seconds; job observation defaults to 300 seconds; a new job's wall timeout defaults to 3600 seconds. A timeout while waiting does not cancel a job.
+- Use explicit timeouts. A foreground exec defaults to 60 seconds; job observation defaults to 300 seconds; a new job's wall timeout defaults to 3600 seconds. A timeout while waiting does not cancel a job. The CLI also stops `exec`/`job wait` locally at the timeout + 45s and exits 124 naming the stuck phase.
+- With the CLI, pass `-no-stdin` (or `</dev/null`) to `rdev exec` unless you are deliberately piping input: a forwarded pipe must reach EOF before the command is sent, and an agent harness's inherited stdin may never close. If a command seems stuck, rerun with `rdev -v ...` or `RDEV_DEBUG=1` to see each phase with timings; set `RDEV_QUIET=1` to drop advisory notices from stderr.
+- For scripts, `rdev job start -q` prints only the job id and `rdev job wait -q` prints one summary line per job.
 - For file or directory changes, preview synchronization before applying it when the mode supports previews. Preserve the user's requested direction (`push` or `pull`) and exclusions.
 - In shared/broker mode, use only operations advertised by the current server. Fleet operations require a plan, digest-bound approval, and execution; never fall back to a local SSH loop when the broker rejects Fleet.
 - Treat permission, trust, approval, compatibility, and capability errors as actionable state. Explain the error and the smallest next step instead of retrying blindly.
@@ -38,7 +40,7 @@ Use `rdev_edit` as a read-compare-edit transaction. It is designed for an agent 
 
 After an ambiguous transport result, query `rdev_operation_status` with the same operation ID (or CLI `rdev mutation status HOST OPERATION_ID`) before considering a retry. The agent retains a bounded status record across client invocations while it is running; broker-managed mutations also have durable broker status.
 
-The same edit operation is available through MCP as `rdev_edit` and through the CLI as `rdev edit`. With the CLI, first run `rdev read HOST PATH -include-digest` and take the returned `digest`; then pass `-kind patch|lines|replace|search -base-digest DIGEST`. Patch and replace consume literal stdin; lines consumes a JSON array of `LineEdit` objects; search takes `-search TEXT -replacement TEXT` and replaces one exact match unless `-replace-all` is set. Both interfaces use the same conflict and validation rules.
+The same edit operation is available through MCP as `rdev_edit` and through the CLI as `rdev edit`. With the CLI, first run `rdev digest HOST PATH` (or `rdev read HOST PATH -include-digest` when you also need the content) and take the digest; then pass `-kind patch|lines|replace|search -base-digest DIGEST`. Patch and replace consume literal stdin; lines consumes a JSON array of `LineEdit` objects; search takes `-search TEXT -replacement TEXT` and replaces one exact match unless `-replace-all` is set. Both interfaces use the same conflict and validation rules.
 
 ## Selecting an interface
 

@@ -11,11 +11,17 @@ as `unknown` and no upload or repair is triggered. `bootstrap-key`, `setup` and 
 `-password-fd FD -confirm`; without those flags a noninteractive call fails.
 Never pass a password through argv, environment, ordinary stdin, logs, jobs or MCP. exec/job inherit
 standard streams and do not provide PTY, TUI or persistent-session guarantees.
+`rdev exec` forwards stdin only from a regular file, a pipe (after EOF) or with
+`-stdin`; use `-no-stdin` when the caller's stdin may stay open. `exec` and
+`job wait` stop locally at their timeout + 45s with exit code 124. Use
+`rdev -v CMD` or `RDEV_DEBUG=1` for per-phase timings and `RDEV_QUIET=1` to
+silence advisory notices. A host defined only in an unapproved project file
+fails with the exact `rdev hosts approve-project SHA` to run.
 
 For source files, use the same digest-bound edit workflow through either
 interface. MCP callers use `rdev_read(include_digest=true)` followed by
 `rdev_edit(base_digest=...)`. CLI callers use
-`rdev read HOST PATH -include-digest`, followed by
+`rdev digest HOST PATH` (digest only) or `rdev read HOST PATH -include-digest`, followed by
 `rdev edit HOST PATH -kind patch|lines|replace|search -base-digest DIGEST [< payload]`.
 Patch and replace read literal stdin; lines reads a JSON array of `LineEdit`
 objects; search takes `-search TEXT -replacement TEXT` and replaces one exact

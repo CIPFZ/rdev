@@ -347,6 +347,7 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 	if err != nil {
 		return nil, err
 	}
+	observe.Trace(ctx, "host resolved: %s -> %s (%s)", hostName, resolved.Host.Addr, resolved.Scope)
 
 	// Serialize setup for this host: bootstrap writes a shared temp file on the
 	// remote, so two concurrent dials would clobber each other.
@@ -369,6 +370,7 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 		existing, ok := c.conns[resolved.Host.Name]
 		if ok && existing.generation == resolved.Generation && existing.fingerprint == resolved.Fingerprint && existing.connectionFingerprint == resolved.ConnectionFingerprint {
 			c.mu.Unlock()
+			observe.Trace(ctx, "reusing agent connection to %s", resolved.Host.Name)
 			return existing.conn, nil
 		}
 		c.mu.Unlock()
@@ -436,6 +438,7 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 		}
 		c.publishConnectionSecurityIfCurrent(resolved.Host.Name, setupPublication, status)
 
+		observe.Trace(ctx, "connecting to %s (%s)", resolved.Host.Name, resolved.Host.Addr)
 		conn, dialErr := c.dial(observe.WithConnectionAggregate(ctx, &c.dialControl.activity), resolved.Host, c.lookup)
 		setupRejection := canonicalSetupRejection(dialErr)
 		permit.finish(ctx.Err() == nil && setupRejection == nil, dialErr)
@@ -509,6 +512,7 @@ func (c *Client) connForTarget(ctx context.Context, hostName, target string) (re
 		c.mu.Unlock()
 		c.recordConnectionSecurityTransition(resolved.Host.Name, previous, ready)
 		releaseIdentity()
+		observe.Trace(ctx, "agent connection ready: %s", resolved.Host.Name)
 		return conn, nil
 	}
 }

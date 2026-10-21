@@ -109,6 +109,12 @@ type Registry struct {
 	generations  map[string]uint64
 	nextGen      uint64
 	projectTrust ProjectTrust
+	// unapproved holds the host names an unapproved project file defines. They
+	// are never loaded; the names only let errors and notices say why a host
+	// is missing or came from the global registry instead.
+	unapproved   map[string]bool
+	noticed      map[string]bool
+	notice       func(string)
 	fatal        error
 	observe      *observe.Registry
 	onHostChange func(string, uint64)
@@ -352,6 +358,61 @@ func (e *UntrustedProjectError) Error() string {
 	return fmt.Sprintf(
 		"project host config is not approved: %s (sha256:%s); review it, then run `rdev hosts approve-project %s`",
 		e.Trust.Path, e.Trust.Digest, e.Trust.Digest)
+}
+
+// UnapprovedProjectHostError means the requested name exists only in a project
+// file that was not loaded because its current bytes are not approved.
+type UnapprovedProjectHostError struct {
+	Name  string
+	Trust ProjectTrust
+}
+
+func (e *UnapprovedProjectHostError) Error() string {
+	return fmt.Sprintf(
+		"host %q is defined in unapproved project config %s (sha256:%s); the file changed since it was approved (or never was), so none of its hosts are loaded; review it, then run `rdev hosts approve-project %s`",
+		e.Name, e.Trust.Path, e.Trust.Digest, e.Trust.Digest)
+}
+
+// projectHostNames extracts only the names from project bytes that will not be
+// loaded. Malformed input yields nothing: this is for diagnostics, never trust.
+func projectHostNames(b []byte) map[string]bool {
+	var file struct {
+		Hosts []struct {
+			Name string `json:"name"`
+		} `json:"hosts"`
+	}
+	if json.Unmarshal(b, &file) != nil {
+		return nil
+	}
+	names := make(map[string]bool, len(file.Hosts))
+	for _, h := range file.Hosts {
+		if h.Name != "" {
+			names[h.Name] = true
+		}
+	}
+	return names
+}
+
+// SetNotice installs a sink for non-fatal notices, such as a host resolving
+// from the global registry while an unapproved project file also defines it.
+// Each notice is delivered at most once per host per registry.
+func (r *Registry) SetNotice(fn func(string)) {
+	r.mu.Lock()
+	r.notice = fn
+	r.mu.Unlock()
+}
+
+// UnapprovedProjectHosts lists the names defined by the current project file
+// when that file is present but not approved.
+func (r *Registry) UnapprovedProjectHosts() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.unapproved))
+	for name := range r.unapproved {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 type hostEntry struct {
@@ -620,6 +681,10 @@ func (r *Registry) Load() error {
 		trust.Approved = approved
 		r.mu.Lock()
 		r.projectTrust = trust
+		r.unapproved = nil
+		if !approved {
+			r.unapproved = projectHostNames(b)
+		}
 		r.mu.Unlock()
 		if !approved {
 			r.reject(observe.ReasonProjectUntrusted, trust.Path)
@@ -1113,6 +1178,7 @@ func (r *Registry) ApproveProject(digest string) (ProjectTrust, error) {
 	changed := applyCandidates(&staged, candidates, ScopeProject)
 	staged.trust = trust
 	hook, generations := r.publishLocked(staged)
+	r.unapproved = nil
 	registry := r.observe
 	r.mu.Unlock()
 	r.tx.Unlock()
@@ -1241,13 +1307,31 @@ func (r *Registry) Resolve(name string) (ResolvedHost, error) {
 	if err := r.fatalError(); err != nil {
 		return ResolvedHost{}, err
 	}
-	r.mu.RLock()
+	r.mu.Lock()
 	h, ok := r.hosts[name]
 	generation := r.generations[name]
 	scope := r.scopes[name]
-	r.mu.RUnlock()
+	shadowed := r.unapproved[name]
+	trust := r.projectTrust
+	var notice func(string)
+	if ok && shadowed && scope != ScopeProject && !r.noticed[name] {
+		if r.noticed == nil {
+			r.noticed = make(map[string]bool)
+		}
+		r.noticed[name] = true
+		notice = r.notice
+	}
+	r.mu.Unlock()
+	if notice != nil {
+		notice(fmt.Sprintf(
+			"host %q resolved from the %s registry; unapproved project config %s also defines it and is ignored until `rdev hosts approve-project %s`",
+			name, scope, trust.Path, trust.Digest))
+	}
 	if ok {
 		return ResolvedHost{Host: h, Scope: scope, Fingerprint: hostFingerprint(h, scope), ConnectionFingerprint: connectionFingerprint(h, scope), Generation: generation}, nil
+	}
+	if shadowed {
+		return ResolvedHost{}, &UnapprovedProjectHostError{Name: name, Trust: trust}
 	}
 
 	if parsed, err := parseDestination(name); err == nil {

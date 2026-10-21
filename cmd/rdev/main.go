@@ -33,6 +33,7 @@ import (
 	"github.com/CIPFZ/rdev/internal/client"
 	"github.com/CIPFZ/rdev/internal/fileedit"
 	"github.com/CIPFZ/rdev/internal/mcpsrv"
+	"github.com/CIPFZ/rdev/internal/observe"
 	"github.com/CIPFZ/rdev/internal/proto"
 	"github.com/CIPFZ/rdev/internal/session"
 	"github.com/CIPFZ/rdev/internal/transport"
@@ -88,6 +89,7 @@ func printVersion() {
 }
 
 func main() {
+	os.Args = stripGlobalFlags(os.Args)
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -103,12 +105,17 @@ func main() {
 	if os.Getenv("RDEV_BROKER_SOCKET") != "" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		ctx = observe.WithTracer(ctx, phases.trace)
 		if err := runBrokerCommand(ctx, os.Args[1:]); err != nil {
 			var status fleetExit
 			if errors.As(err, &status) {
 				os.Exit(int(status))
 			}
 			fmt.Fprintln(os.Stderr, err)
+			var deadline *clientDeadlineError
+			if errors.As(err, &deadline) {
+				os.Exit(exitClientDeadline)
+			}
 			os.Exit(1)
 		}
 		return
@@ -119,15 +126,17 @@ func main() {
 		os.Exit(1)
 	}
 	c := client.New(lookupAgent)
+	c.Hosts.SetNotice(func(message string) { notice("warning: %s", message) })
 	// A malformed registry should not block a session: warn and continue with
 	// ad-hoc destinations, which still work without any config file.
 	if err := c.Hosts.Load(); err != nil {
-		fmt.Fprintf(os.Stderr, "rdev: warning: %v\n", err)
+		reportLoadError(os.Args[1], err)
 	}
 	defer c.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx = observe.WithTracer(ctx, phases.trace)
 
 	var err error
 	switch os.Args[1] {
@@ -139,6 +148,8 @@ func main() {
 		err = cmdJob(ctx, c, os.Args[2:])
 	case "read":
 		err = cmdRead(ctx, c, os.Args[2:])
+	case "digest":
+		err = cmdDigest(ctx, c, os.Args[2:])
 	case "ls":
 		err = cmdList(ctx, c, os.Args[2:])
 	case "write":
@@ -198,8 +209,31 @@ func main() {
 		} else {
 			fmt.Fprintf(os.Stderr, "rdev: %s\n", c.Secrets.Redact(err.Error()))
 		}
+		var deadline *clientDeadlineError
+		if errors.As(err, &deadline) {
+			os.Exit(exitClientDeadline)
+		}
 		os.Exit(1)
 	}
+}
+
+// reportLoadError prints a registry load problem. An unapproved project file
+// only matters to commands that touch one of its hosts, and those now fail or
+// warn by name at resolution; repeating it on every invocation buried remote
+// stderr under the same line. Long-lived and host-management commands still
+// state it up front.
+func reportLoadError(command string, err error) {
+	var untrusted *session.UntrustedProjectError
+	if errors.As(err, &untrusted) {
+		switch command {
+		case "serve", "hosts", "doctor":
+			notice("warning: %v", err)
+		default:
+			phases.trace("registry: " + err.Error())
+		}
+		return
+	}
+	fmt.Fprintf(os.Stderr, "rdev: warning: %v\n", err)
 }
 
 func wantsHelp(args []string) bool {
@@ -233,7 +267,19 @@ func usageFor(args []string) {
 		fmt.Fprintln(os.Stdout, "  search: -search TEXT -replacement TEXT; use -replace-all for every exact match")
 		fmt.Fprintln(os.Stdout, "  replace: complete UTF-8 file content from stdin")
 		fmt.Fprintln(os.Stdout, "  -preview returns a bounded diff without writing; -backup enables atomic rollback")
-		fmt.Fprintln(os.Stdout, "  first run: rdev read <host> <path> -include-digest")
+		fmt.Fprintln(os.Stdout, "  first run: rdev digest <host> <path>  (or rdev read <host> <path> -include-digest)")
+		return
+	}
+	if len(args) >= 1 && args[0] == "digest" {
+		fmt.Fprintln(os.Stdout, "usage: rdev digest <host> <path>")
+		fmt.Fprintln(os.Stdout, "  prints the complete-snapshot SHA-256 for rdev edit -base-digest")
+		return
+	}
+	if len(args) >= 1 && args[0] == "exec" {
+		fmt.Fprintln(os.Stdout, "usage: rdev exec <host> [-cwd DIR] [-env K=V]... [-timeout N] [-no-login] [-stdin|-no-stdin] -- <argv...>")
+		fmt.Fprintln(os.Stdout, "  stdin is forwarded from a regular file or pipe (after EOF), or always with -stdin")
+		fmt.Fprintln(os.Stdout, "  -no-stdin never reads stdin; use it when the caller's stdin may stay open")
+		fmt.Fprintln(os.Stdout, "  the local deadline is -timeout (default 60) + 45s; exceeding it exits 124")
 		return
 	}
 	if len(args) >= 1 && args[0] == "read" {
@@ -354,23 +400,34 @@ func brokerExec(ctx context.Context, args []string) error {
 	if len(fs.pos) < 1 || len(argv) == 0 {
 		return errors.New("usage: rdev exec <host> [-cwd DIR] -- <argv...>")
 	}
+	if fs.bools["stdin"] {
+		return errors.New("-stdin is not supported through the shared broker; use rdev write to stage input")
+	}
+	remoteSec := fs.num("timeout")
+	if remoteSec == 0 {
+		remoteSec = proto.DefaultExecTimeoutSeconds
+	}
+	ctx, cancel, explain := withClientDeadline(ctx, remoteSec)
+	defer cancel()
 	owner := broker.Owner{ClientID: os.Getenv("RDEV_CLIENT_ID"), ProjectID: os.Getenv("RDEV_PROJECT_ID")}
 	if err := owner.Validate(); err != nil {
 		return fmt.Errorf("broker principal: %w", err)
 	}
 	c, err := broker.DialClient(ctx, os.Getenv("RDEV_BROKER_SOCKET"), owner)
 	if err != nil {
-		return err
+		return explain(err)
 	}
 	defer c.Close()
 	login := !fs.bools["no-login"]
+	phases.trace("request sent to broker: op=exec")
 	res, err := c.DoContext(ctx, broker.Request{Owner: owner, Operation: "exec", Host: fs.pos[0], Wire: &proto.Request{
 		Op: proto.OpExec, ClientID: owner.ClientID, ProjectID: owner.ProjectID,
 		Exec: &proto.ExecParams{Argv: argv, Cwd: fs.str("cwd"), Env: fs.env(), TimeoutSec: fs.num("timeout"), LoginShell: login},
 	}})
 	if err != nil {
-		return err
+		return explain(err)
 	}
+	phases.trace("broker result received: op=exec")
 	if err := res.Failure(); err != nil {
 		return err
 	}
@@ -431,6 +488,21 @@ func brokerRead(ctx context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "\nrdev: read truncated operation_id=%s terminal=%t execution_state=%s retained=%d original=%d dropped=%d\n", resp.Read.OperationID, resp.Read.Terminal, resp.Read.Execution, resp.Read.Truncation.RetainedBytes, resp.Read.Truncation.OriginalBytes, resp.Read.Truncation.DroppedBytes)
 	}
 	return nil
+}
+
+func brokerDigest(ctx context.Context, args []string) error {
+	fs, err := parseFlags(args, "digest")
+	if err != nil {
+		return err
+	}
+	resp, err := brokerWire(ctx, "read_file", fs.pos[0], &proto.Request{Op: proto.OpReadFile, Read: &proto.ReadParams{Path: fs.pos[1], Limit: 1, IncludeDigest: true}})
+	if err != nil {
+		return err
+	}
+	if resp.Read == nil {
+		return errors.New("broker read returned no result")
+	}
+	return printDigest(resp.Read)
 }
 
 func brokerWrite(ctx context.Context, args []string) error {
@@ -622,6 +694,10 @@ func brokerJob(ctx context.Context, args []string) error {
 		if resp.Wire == nil || resp.Wire.Job == nil || resp.Wire.Job.Info == nil {
 			return errors.New("broker job start returned no result")
 		}
+		if fs.bools["q"] {
+			fmt.Println(resp.Wire.Job.Info.ID)
+			return nil
+		}
 		return json.NewEncoder(os.Stdout).Encode(resp.Wire.Job.Info)
 	case "list":
 		fs, err := parseFlags(args[1:], "job.list")
@@ -710,9 +786,11 @@ func brokerJob(ctx context.Context, args []string) error {
 		} else {
 			params.IDs = fs.pos[1:]
 		}
+		ctx, cancel, explain := withClientDeadline(ctx, waitBudget(params.WaitTimeoutSec))
+		defer cancel()
 		resp, err := brokerWire(ctx, "job_wait", fs.pos[0], &proto.Request{Op: proto.OpJobWait, Job: params})
 		if err != nil {
-			return err
+			return explain(err)
 		}
 		if resp.Job == nil {
 			return errors.New("broker job wait returned no result")
@@ -720,7 +798,9 @@ func brokerJob(ctx context.Context, args []string) error {
 		if resp.Job.Logs != "" {
 			fmt.Fprintln(os.Stderr, resp.Job.Logs)
 		}
-		if err := json.NewEncoder(os.Stdout).Encode(resp.Job); err != nil {
+		if fs.bools["q"] {
+			printWaitSummary(resp.Job.Info, resp.Job.Waited)
+		} else if err := json.NewEncoder(os.Stdout).Encode(resp.Job); err != nil {
 			return err
 		}
 		if resp.Job.TimedOut {
@@ -831,15 +911,16 @@ USAGE
 	  rdev login   <host>                   open an interactive SSH session
   rdev capability <host> [-refresh]
   rdev env inspect <host> [-refresh]
-  rdev exec    <host> [-cwd DIR] [-env K=V]... [-timeout N] -- <argv...>
-  rdev job     start  <host> [-cwd DIR] [-env K=V]... [-label L] [-wall-timeout N] [-fds N] [-job-count N] -- <argv...>
+  rdev exec    <host> [-cwd DIR] [-env K=V]... [-timeout N] [-stdin|-no-stdin] -- <argv...>
+  rdev job     start  <host> [-cwd DIR] [-env K=V]... [-label L] [-wall-timeout N] [-fds N] [-job-count N] [-q] -- <argv...>
   rdev job     list   <host> [-limit N]
   rdev job     status <host> <job-id>
   rdev job     logs   <host> <job-id> [-stream stdout|stderr] [-tail N] [-grep S]
-  rdev job     wait   <host> <job-id>... [-any] [-timeout N] [-tail N]
+  rdev job     wait   <host> <job-id>... [-any] [-timeout N] [-tail N] [-q]
   rdev job     stop   <host> <job-id> [-signal TERM|KILL] [-grace N]
   rdev job     rm     <host> [<job-id>] [-older-than SEC] [-keep-last N]
   rdev read    <host> <path> [-limit N] [-offset N] [-include-digest]
+  rdev digest  <host> <path>                 whole-file digest for edit -base-digest
   rdev ls      <host> [<path>] [-limit N]
   rdev write   <host> <path> [-mode 644]        (content from stdin)
 	  rdev edit    <host> <path> -kind patch|lines|replace|search -base-digest SHA [-backup] [-preview] [-search TEXT -replacement TEXT [-replace-all]] [< payload]
@@ -899,6 +980,18 @@ NOTES
   Timeout seconds: omitted/0 => exec 60, job wait 300, new job wall 3600.
   Positive values are 1..3600; negative/infinite timeouts are rejected.
   Wait expiry ends observation only; job runtime has its own wall budget.
+  exec and job wait also stop locally after their timeout + 45s (stdin, ssh
+  connect, handshake included) and then exit 124 naming the stuck phase.
+
+  exec forwards stdin only from a regular file, a pipe, or with -stdin; a
+  socket or terminal is ignored. A pipe must reach EOF before the command is
+  sent; pass -no-stdin or </dev/null when no input is intended.
+  job start -q prints only the job id; job wait -q prints one summary line
+  per job instead of JSON (logs stay on stderr).
+
+  rdev -v CMD ... or RDEV_DEBUG=1 traces each phase with elapsed time to
+  stderr. RDEV_QUIET=1 suppresses advisory notices and the exec heartbeat
+  (printed to stderr after 30s, then every 60s).
   Shared state operations require host-wide administrator grants and approval
   for migrate/repair (including -dry-run). See support for shared boundaries.
 
@@ -976,20 +1069,43 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 		return errors.New("no command given after --")
 	}
 
+	if fs.bools["stdin"] && fs.bools["no-stdin"] {
+		return errors.New("-stdin and -no-stdin are mutually exclusive")
+	}
+
 	opts := client.ExecOptions{
 		Host:       fs.pos[0],
 		Argv:       argv,
 		Cwd:        fs.str("cwd"),
 		TimeoutSec: fs.num("timeout"), Env: fs.env(),
 	}
-	// Preserve pipe composition for agents and automation. Interactive TTYs
-	// remain untouched; a non-TTY stdin is bounded and forwarded as request
-	// data, never logged or interpreted by the CLI.
-	if st, statErr := os.Stdin.Stat(); statErr == nil && st.Mode()&os.ModeCharDevice == 0 {
-		body, readErr := readAllStdin()
+	remoteSec := opts.TimeoutSec
+	if remoteSec == 0 {
+		remoteSec = proto.DefaultExecTimeoutSeconds
+	}
+	// The remote timeout only starts once the agent runs the command. The local
+	// deadline bounds stdin, ssh connect and the agent handshake too, so no
+	// phase can hang this process indefinitely.
+	ctx, cancel, explain := withClientDeadline(ctx, remoteSec)
+	defer cancel()
+	stopHeartbeat := startHeartbeat(30*time.Second, 60*time.Second)
+	defer stopHeartbeat()
+
+	// Preserve pipe composition for agents and automation. Stdin is bounded and
+	// forwarded as request data, never logged or interpreted by the CLI.
+	var mode os.FileMode
+	st, statErr := os.Stdin.Stat()
+	if statErr == nil {
+		mode = st.Mode()
+	}
+	policy, why := execStdinPolicy(fs.bools["stdin"], fs.bools["no-stdin"], mode, statErr)
+	phases.trace(why)
+	if policy != stdinSkip {
+		body, readErr := readStdinContext(ctx, os.Stdin, policy == stdinReadPipe)
 		if readErr != nil {
-			return readErr
+			return explain(readErr)
 		}
+		phases.trace(fmt.Sprintf("stdin read: %d bytes", len(body)))
 		opts.Stdin = body
 	}
 	if fs.bools["no-login"] {
@@ -998,8 +1114,9 @@ func cmdExec(ctx context.Context, c *client.Client, args []string) error {
 	}
 
 	res, err := c.Exec(ctx, opts)
+	stopHeartbeat()
 	if err != nil {
-		return err
+		return explain(err)
 	}
 	// Mirror the remote streams onto ours so rdev composes with local pipes.
 	stdout := []byte(res.Stdout)
@@ -1076,6 +1193,10 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 		info, err := c.JobStart(ctx, opts)
 		if err != nil {
 			return err
+		}
+		if fs.bools["q"] {
+			fmt.Println(info.ID)
+			return nil
 		}
 		return printJSON(c, info)
 
@@ -1168,13 +1289,21 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 			opts.IDs = fs.pos[1:]
 		}
 
+		ctx, cancel, explain := withClientDeadline(ctx, waitBudget(opts.TimeoutSec))
+		defer cancel()
 		res, err := c.JobWait(ctx, opts)
 		if err != nil {
-			return err
+			return explain(err)
 		}
 
 		if len(res.Waited) > 0 {
-			if err := printJSON(c, res); err != nil {
+			if fs.bools["q"] {
+				waited := make([]*proto.WaitedJob, 0, len(res.Waited))
+				for _, w := range res.Waited {
+					waited = append(waited, &proto.WaitedJob{ID: w.ID, Info: w.Info, Err: w.Err})
+				}
+				printWaitSummary(nil, waited)
+			} else if err := printJSON(c, res); err != nil {
 				return err
 			}
 			if res.TimedOut {
@@ -1202,7 +1331,9 @@ func cmdJob(ctx context.Context, c *client.Client, args []string) error {
 				res.OperationID, res.Terminal, res.Execution,
 				res.LogsTruncation.RetainedBytes, res.LogsTruncation.OriginalBytes, res.LogsTruncation.DroppedBytes)
 		}
-		if err := printJSON(c, res.Info); err != nil {
+		if fs.bools["q"] {
+			printWaitSummary(res.Info, nil)
+		} else if err := printJSON(c, res.Info); err != nil {
 			return err
 		}
 		if res.TimedOut {
@@ -1290,6 +1421,31 @@ func cmdRead(ctx context.Context, c *client.Client, args []string) error {
 			res.OperationID, res.Terminal, res.Execution,
 			res.Truncation.RetainedBytes, res.Truncation.OriginalBytes, res.Truncation.DroppedBytes)
 	}
+	return nil
+}
+
+// cmdDigest prints only the whole-file digest that `edit -base-digest` needs,
+// without pulling the content back as `read -include-digest` does.
+func cmdDigest(ctx context.Context, c *client.Client, args []string) error {
+	fs, err := parseFlags(args, "digest")
+	if err != nil {
+		return err
+	}
+	res, err := c.ReadFileSnapshot(ctx, fs.pos[0], fs.pos[1], 0, 1)
+	if err != nil {
+		return err
+	}
+	return printDigest(res)
+}
+
+func printDigest(res *proto.ReadResult) error {
+	if res.Digest == "" {
+		if res.Redacted {
+			return errors.New("file content matches a registered secret; digest withheld")
+		}
+		return errors.New("remote agent returned no digest")
+	}
+	fmt.Println(res.Digest)
 	return nil
 }
 
@@ -1558,6 +1714,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 			}
 			format := fs.str("format")
 			if format == "raw" {
+				defer hostListNotes(c)
 				return cmdHostList(c)
 			}
 			if format != "" && format != "json" {
@@ -1596,6 +1753,7 @@ func cmdHosts(ctx context.Context, c *client.Client, args []string) error {
 				h.ForceAgentUpload, string(snapshot.Scope), sourceLabel(snapshot.Scope), snapshot.Fingerprint, snapshot.ConnectionFingerprint, snapshot.Generation,
 			})
 		}
+		defer hostListNotes(c)
 		return printJSON(c, rows)
 	}
 
@@ -1740,6 +1898,38 @@ func cmdHostList(c *client.Client) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", name, snapshot.Host.Addr, port, cwd, snapshot.Scope)
 	}
 	return w.Flush()
+}
+
+// hostListNotes adds stderr hints that a listing alone does not make obvious:
+// aliases sharing one destination, and names an unapproved project file
+// defines but that were not loaded.
+func hostListNotes(c *client.Client) {
+	byDest := map[string][]string{}
+	var dests []string
+	for _, name := range c.Hosts.Names() {
+		snapshot, err := c.Hosts.Inspect(name)
+		if err != nil {
+			continue
+		}
+		port := snapshot.Host.Port
+		if port == 0 {
+			port = 22
+		}
+		dest := fmt.Sprintf("%s port %d", snapshot.Host.Addr, port)
+		if len(byDest[dest]) == 0 {
+			dests = append(dests, dest)
+		}
+		byDest[dest] = append(byDest[dest], fmt.Sprintf("%s (%s)", name, snapshot.Scope))
+	}
+	for _, dest := range dests {
+		if names := byDest[dest]; len(names) > 1 {
+			notice("note: %s is registered under several names: %s", dest, strings.Join(names, ", "))
+		}
+	}
+	if hidden := c.Hosts.UnapprovedProjectHosts(); len(hidden) > 0 {
+		trust := c.Hosts.ProjectTrustStatus()
+		notice("note: not loaded from unapproved project config %s: %s (rdev hosts approve-project %s)", trust.Path, strings.Join(hidden, ", "), trust.Digest)
+	}
 }
 
 func sourceLabel(scope session.Scope) string {

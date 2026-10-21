@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -318,11 +317,9 @@ func jobWaitContext(ctx context.Context, hub *waitHub, p *proto.JobParams, state
 			if secureRecordFile(logPath) != nil {
 				continue
 			}
-			if logs, readErr := readTail(logPath, p.TailOnExit); readErr == nil {
-				w.Logs = logs
-				if info, statErr := os.Stat(logPath); statErr == nil {
-					w.LogsTruncation, _ = proto.NewTruncation(info.Size(), int64(len(logs)))
-				}
+			if window, readErr := readTailWindow(logPath, p.TailOnExit); readErr == nil {
+				w.Logs = window.logs
+				w.LogsTruncation = window.truncation()
 			}
 		}
 		res.Waited = append(res.Waited, w)

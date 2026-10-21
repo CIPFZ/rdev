@@ -88,10 +88,12 @@ func schema(name string) commandSpec {
 		add("bool", 0, "no-login")
 		if name == "exec" {
 			add("int", proto.MaxTimeoutSeconds, "timeout")
+			add("bool", 0, "stdin", "no-stdin")
 		} else {
 			add("string", 0, "label")
 			add("int", proto.MaxTimeoutSeconds, "wall-timeout")
 			add("int", math.MaxInt32, "fds", "job-count")
+			add("bool", 0, "q")
 		}
 	case "job.list", "ls":
 		s.min, s.max = 1, 1
@@ -99,6 +101,8 @@ func schema(name string) commandSpec {
 			s.max = 2
 		}
 		add("int", 10000, "limit")
+	case "digest":
+		s.min, s.max = 2, 2
 	case "read":
 		s.min, s.max = 2, 2
 		add("int", proto.AbsoluteReadBytes, "limit")
@@ -128,7 +132,7 @@ func schema(name string) commandSpec {
 		add("int", proto.MaxTimeoutSeconds, "grace")
 	case "job.wait":
 		s.min, s.max = 2, 65
-		add("bool", 0, "any")
+		add("bool", 0, "any", "q")
 		add("int", proto.MaxTimeoutSeconds, "timeout")
 		add("int", 1000, "tail")
 	case "job.rm":

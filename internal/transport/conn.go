@@ -342,6 +342,7 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	c.ensureLifecycle()
 
 	stage = observe.DialControlPath
+	observe.TraceDialStage(ctx, stage)
 	ctl, err := controlPath(host)
 	if err != nil {
 		return nil, err
@@ -362,6 +363,7 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	// ControlMaster as a side effect, which is what the separate connect step was
 	// for.
 	stage = observe.DialProbe
+	observe.TraceDialStage(ctx, stage)
 	probe, err := c.probeRemote(ctx)
 	if err != nil {
 		return nil, err
@@ -385,16 +387,19 @@ func Dial(ctx context.Context, host Host, lookup func(goos, goarch string) (*Age
 	}
 
 	stage = observe.DialInstall
+	observe.TraceDialStage(ctx, stage)
 	if err := c.ensureAgent(ctx, bin, probe.agentSHA); err != nil {
 		return nil, fmt.Errorf("bootstrap agent: %w", err)
 	}
 	stage = observe.DialAgentStart
+	observe.TraceDialStage(ctx, stage)
 	if err := c.startAgent(ctx); err != nil {
 		return nil, fmt.Errorf("start agent: %w", err)
 	}
 
 	// Handshake: confirms the binary runs and speaks a format we can use.
 	stage = observe.DialHandshake
+	observe.TraceDialStage(ctx, stage)
 	resp, err := c.Do(ctx, &proto.Request{
 		Op: proto.OpPing,
 		Hello: &proto.HelloParams{
@@ -460,6 +465,9 @@ rm -f -- "$root"/.rdev-upgrade.json "$root"/.rdev-upgrade.lock "$root"/.rdev-rel
 	return err
 }
 
+// sshConnectTimeoutSec is ssh's ConnectTimeout for every invocation.
+const sshConnectTimeoutSec = 15
+
 // sshBase returns the ssh args shared by every invocation, including the
 // ControlMaster settings that make repeat connections nearly free.
 func (c *Conn) sshBase() []string {
@@ -468,6 +476,10 @@ func (c *Conn) sshBase() []string {
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPath=" + c.ctlPath,
 		"-o", "ControlPersist=300",
+		// Bound TCP connect and the SSH banner exchange. Without it an
+		// unreachable host blocks for the OS connect timeout (minutes), and
+		// nothing above ssh can tell that apart from a slow remote command.
+		"-o", "ConnectTimeout=" + fmt.Sprint(sshConnectTimeoutSec),
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=4",
 	}
@@ -1499,6 +1511,7 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 	if c.testBeforeResponseWait != nil {
 		c.testBeforeResponseWait()
 	}
+	observe.Trace(ctx, "request sent: op=%s; waiting for agent result", req.Op)
 
 	select {
 	case <-ctx.Done():
@@ -1508,6 +1521,7 @@ func (c *Conn) Do(ctx context.Context, req *proto.Request) (*proto.Response, err
 		c.mu.Lock()
 		resp := call.response
 		c.mu.Unlock()
+		observe.Trace(ctx, "result received: op=%s", req.Op)
 		return c.finishResponse(resp, nil)
 	}
 }
